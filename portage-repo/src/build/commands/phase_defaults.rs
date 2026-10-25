@@ -608,7 +608,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapiSrcTestComma
 
         let source_info = brush_core::SourceInfo::from("__eapi0_src_test");
         for target in ["check", "test"] {
-            let probe = format!("emake -n {target} &>/dev/null");
+            // A missing target is an answer here, not a failed build.
+            let probe = format!("PORTAGE_NONFATAL=1 emake -n {target} &>/dev/null");
             let available = shell
                 .run_string(probe, &source_info, &context.params)
                 .await?

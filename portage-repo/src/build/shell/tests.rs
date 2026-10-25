@@ -2693,3 +2693,24 @@ async fn eapply_user_applies_config_root_patches_once() {
     assert!(!workdir.join("dropped").exists());
     assert!(!workdir.join("ignored").exists());
 }
+
+#[tokio::test]
+async fn default_src_test_falls_through_a_missing_check_target() {
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(dir.path(), "EAPI=8\nS=\"${WORKDIR}\"\n");
+    let workdir = dir.path().join("work/work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("Makefile"), "test:\n\ttouch tested\n").unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell
+        .run_phase(&ebuild, "test", &dir.path().join("work"), Path::new("/"))
+        .await
+        .expect("no check target is not a failure");
+    assert!(workdir.join("tested").is_file());
+
+    std::fs::write(workdir.join("Makefile"), "all:\n").unwrap();
+    shell
+        .run_phase(&ebuild, "test", &dir.path().join("work"), Path::new("/"))
+        .await
+        .expect("neither target is a no-op");
+}
