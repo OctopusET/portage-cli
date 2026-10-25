@@ -67,6 +67,10 @@ qtwebengine, thunderbird, libreoffice, qemu, a crossdev target) with both
 `em -p` and real `emerge -p` and diffs the package sets. `SKIP_TIMING=1`
 runs the parity check alone in seconds.
 
+On a non-Gentoo host, [`test-scripts/parity/`](../../test-scripts/README.md#parity)
+runs real `emerge` rootless in a stage3 overlay: whole-tree `-pv` sweeps, and
+merges with both tools whose installed files and VDB entries are diffed.
+
 This is not a "nice to have" — it is how most of the real, non-obvious bugs
 in this project have actually been found, because they were invisible to
 unit tests that only exercise what the author already thought to test:

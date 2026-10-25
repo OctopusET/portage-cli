@@ -200,6 +200,27 @@ reading a failure.
 ./test-scripts/test-prefix-sandbox.sh --sandbox my-name --keep
 ```
 
+### `parity/`
+
+Real `emerge` as the oracle, on any Linux host: a stage3 unpacked rootless,
+entered through `unshare --map-auto` (the subuid range, so portage can chown
+to `portage`) and `bwrap` overlays. No `sudo`, no crossdev-stages; needs
+`bubblewrap`, `newuidmap` and a subuid range for your user.
+
+- `mkbase.sh STAGE3 TREE` builds `PARITY_DIR` (default `~/.cache/em-parity`).
+- `sb.sh UPPER CMD` runs `CMD` as root in an overlay (`-` throws it away).
+- `resolve-sweep.sh OUT [OPTS] < atoms` runs `emerge -pv` and `em -pv` per
+  atom and classifies the plans (`classify.py`): same, order, display, set, rc.
+- `merge-diff.sh ATOM` installs the dependencies once with emerge, merges
+  `ATOM` with each tool on top, and diffs the two uppers (`treediff.py`):
+  files, modes, owners, links, and each VDB key.
+
+```sh
+./test-scripts/parity/mkbase.sh stage3-amd64-openrc-*.tar.xz /var/db/repos/gentoo
+./test-scripts/parity/resolve-sweep.sh ~/.cache/em-parity/runs/basket < atoms.txt
+./test-scripts/parity/merge-diff.sh app-text/tree
+```
+
 ## Known `crossdev-stages` gotchas
 
 - **Never hand-patch, bind-mount, or `sudo chroot` into an *existing*
