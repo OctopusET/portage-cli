@@ -2647,7 +2647,7 @@ fn phase_repo(dir: &std::path::Path, body: &str) -> (Repository, Ebuild) {
     std::fs::create_dir_all(&ebdir).unwrap();
     std::fs::write(
         ebdir.join("pkg-1.ebuild"),
-        format!("DESCRIPTION=\"t\"\nSLOT=\"0/1\"\nLICENSE=\"MIT\"\n{body}"),
+        format!("EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0/1\"\nLICENSE=\"MIT\"\n{body}"),
     )
     .unwrap();
     let repo = Repository::builder()
@@ -2665,7 +2665,7 @@ async fn eapply_user_applies_config_root_patches_once() {
     let dir = tempdir().unwrap();
     let (repo, ebuild) = phase_repo(
         dir.path(),
-        "EAPI=8\nS=\"${WORKDIR}\"\nsrc_prepare() { default; eapply_user; }\n",
+        "S=\"${WORKDIR}\"\nsrc_prepare() { default; eapply_user; }\n",
     );
     let patches = dir.path().join("config/etc/portage/patches/cat");
     let creates = |name: &str| format!("--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+x\n");
@@ -2697,7 +2697,7 @@ async fn eapply_user_applies_config_root_patches_once() {
 #[tokio::test]
 async fn default_src_test_falls_through_a_missing_check_target() {
     let dir = tempdir().unwrap();
-    let (repo, ebuild) = phase_repo(dir.path(), "EAPI=8\nS=\"${WORKDIR}\"\n");
+    let (repo, ebuild) = phase_repo(dir.path(), "S=\"${WORKDIR}\"\n");
     let workdir = dir.path().join("work/work");
     std::fs::create_dir_all(&workdir).unwrap();
     std::fs::write(workdir.join("Makefile"), "test:\n\ttouch tested\n").unwrap();
@@ -2713,4 +2713,26 @@ async fn default_src_test_falls_through_a_missing_check_target() {
         .run_phase(&ebuild, "test", &dir.path().join("work"), Path::new("/"))
         .await
         .expect("neither target is a no-op");
+}
+
+#[tokio::test]
+async fn a_missing_s_dies_once_the_ebuild_defines_a_source_phase() {
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(dir.path(), "");
+    let mut shell = repo.shell().await.unwrap();
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "compile", &work, Path::new("/"))
+        .await
+        .expect("nothing unpacked and no phase defined: runs in WORKDIR");
+
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(dir.path(), "src_compile() { :; }\n");
+    let mut shell = repo.shell().await.unwrap();
+    let work = dir.path().join("work");
+    let err = shell
+        .run_phase(&ebuild, "compile", &work, Path::new("/"))
+        .await
+        .expect_err("a defined src_compile needs S");
+    assert!(format!("{err}").contains("doesn't exist"), "{err}");
 }

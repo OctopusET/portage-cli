@@ -2203,6 +2203,15 @@ impl EbuildShell {
                 self.set_var(e_var, "");
             }
 
+            // Before `__ebuild_phase_funcs` adds fallbacks for the phases the
+            // ebuild leaves out; carried in the environment to later phases.
+            let defined: Vec<&str> = PHASE_FUNCTIONS
+                .iter()
+                .filter(|(name, _)| self.shell.funcs().get(name).is_some())
+                .map(|(_, phase)| phase.as_str())
+                .collect();
+            self.set_var("DEFINED_PHASES", &defined.join(" "));
+
             self.phase_sourced_ebuild = Some(ebuild.path().to_path_buf());
             self.apply_iuse_effective();
             let phases = self.sourced_phases();
@@ -2228,6 +2237,15 @@ impl EbuildShell {
         // $S doesn't exist yet).  All other phases run in $S (the source tree).
         let cd_target = match func_name {
             "src_unpack" | "pkg_nofetch" => "\"${WORKDIR}\"",
+            "src_prepare" | "src_configure" | "src_compile" | "src_test" | "src_install" => {
+                let s = self.get_var("S").unwrap_or_default();
+                if eapi >= Eapi::Four && !Path::new(&s).is_dir() && !self.may_lack_s(phase_val) {
+                    return Err(Error::Shell(format!(
+                        "{func_name}: die: The source directory '{s}' doesn't exist"
+                    )));
+                }
+                "\"${S}\" 2>/dev/null || cd \"${WORKDIR}\""
+            }
             _ => "\"${S}\" 2>/dev/null || cd \"${WORKDIR}\" 2>/dev/null || true",
         };
         self.run_string(&format!("cd {cd_target}")).await.ok();
@@ -2252,6 +2270,27 @@ impl EbuildShell {
         self.source_bashrc_hooks(func_name).await?;
 
         self.call_phase_function(func_name).await
+    }
+
+    /// Whether an EAPI 4+ source phase may run in `WORKDIR` without `S`:
+    /// only when nothing is unpacked and the ebuild defines none of the
+    /// source phases up to and including `phase`.
+    fn may_lack_s(&self, phase: &str) -> bool {
+        let a = self.get_var("A").unwrap_or_default();
+        let defined = self.get_var("DEFINED_PHASES").unwrap_or_default();
+        let up_to = [
+            "unpack",
+            "prepare",
+            "configure",
+            "compile",
+            "test",
+            "install",
+        ];
+        let end = up_to.iter().position(|p| *p == phase).map_or(0, |i| i + 1);
+        a.trim().is_empty()
+            && !up_to[..end]
+                .iter()
+                .any(|p| defined.split_whitespace().any(|d| d == *p))
     }
 
     /// Pre-parse every `.eclass` file in the shell's configured eclass directories
