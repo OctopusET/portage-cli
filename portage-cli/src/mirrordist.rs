@@ -33,7 +33,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::{Cpn, Cpv};
 use portage_distfiles::{
     DistDigests, Distfile, DistfileResolver, FetchConfig, FetchStatus, Fetcher, ResolveOpts,
-    RestrictGate, is_atomic_temp_name,
+    RestrictGate, is_partial_download_name,
 };
 use portage_metadata::{RawCacheEntry, RestrictExpr, SrcUriEntry};
 use portage_repo::{
@@ -105,7 +105,7 @@ pub async fn run(cli: &cli::Cli, opts: &MirrorDistOpts) -> Result<()> {
 
     let whitelist = parse_whitelist(&opts.whitelist_from)?;
     let referenced = plan.referenced();
-    // Only actually remove stale atomic-write temp files on a real run —
+    // Only actually remove stale partial downloads on a real run —
     // `-p` must leave the filesystem untouched even though it still reports
     // the count (see print_report).
     let state = scan_distdir(&opts.distfiles, &referenced, &whitelist, !cli.pretend())?;
@@ -143,7 +143,6 @@ pub async fn run(cli: &cli::Cli, opts: &MirrorDistOpts) -> Result<()> {
         let mut config = FetchConfig {
             max_concurrent: opts.jobs.unwrap_or(4),
             trust_existing_size: !opts.verify_existing_digest,
-            atomic_write: true,
             ..FetchConfig::default()
         };
         config.max_concurrent = config.max_concurrent.max(1);
@@ -526,9 +525,9 @@ fn parse_whitelist(paths: &[Utf8PathBuf]) -> Result<HashSet<String>> {
 pub(crate) struct DistdirState {
     pub(crate) present: BTreeMap<String, u64>,
     pub(crate) orphans: Vec<String>,
-    /// Leftover `.__em_download__` atomic-write temp files found at scan
+    /// Leftover `.__download__` partial downloads found at scan
     /// time — always from an interrupted previous run, never legitimate
-    /// (see [`is_atomic_temp_name`]). Without active cleanup these are
+    /// (see [`is_partial_download_name`]). Without active cleanup these are
     /// invisible to both `present`/`orphans` forever, which would leak disk
     /// space silently (in particular for a filename that later falls out of
     /// the referenced set entirely and so is never attempted again).
@@ -539,7 +538,7 @@ pub(crate) struct DistdirState {
 /// layout happily treats it as an ordinary file and schedules it for
 /// deletion — a known quirk, not inherited here).
 ///
-/// A leftover atomic-write temp file (`is_atomic_temp_name`) is removed
+/// A leftover partial download (`is_partial_download_name`) is removed
 /// when `remove_stale_partials` is set (real fetch runs; never under
 /// `-p`) and always excluded from `present`/`orphans` either way.
 pub(crate) fn scan_distdir(
@@ -564,7 +563,7 @@ pub(crate) fn scan_distdir(
         if name == "layout.conf" {
             continue;
         }
-        if is_atomic_temp_name(&name) {
+        if is_partial_download_name(&name) {
             stale_partials += 1;
             if remove_stale_partials {
                 let _ = std::fs::remove_file(entry.path());
@@ -1036,13 +1035,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_distdir_skips_layout_conf_subdirs_and_atomic_temp_files() {
+    fn scan_distdir_skips_layout_conf_subdirs_and_partial_downloads() {
         let dir = tempfile::tempdir().unwrap();
         let distfiles = Utf8Path::from_path(dir.path()).unwrap();
         std::fs::write(distfiles.join("layout.conf").as_std_path(), "").unwrap();
         std::fs::write(distfiles.join("foo.tar.gz").as_std_path(), b"data").unwrap();
         std::fs::write(
-            distfiles.join(".foo.tar.gz.__em_download__").as_std_path(),
+            distfiles.join("foo.tar.gz.__download__").as_std_path(),
             b"partial",
         )
         .unwrap();
@@ -1078,7 +1077,7 @@ mod tests {
     fn scan_distdir_pretend_counts_stale_partials_without_deleting() {
         let dir = tempfile::tempdir().unwrap();
         let distfiles = Utf8Path::from_path(dir.path()).unwrap();
-        let temp = distfiles.join(".foo.tar.gz.__em_download__");
+        let temp = distfiles.join("foo.tar.gz.__download__");
         std::fs::write(temp.as_std_path(), b"partial").unwrap();
 
         let state = scan_distdir(distfiles, &HashSet::new(), &HashSet::new(), false).unwrap();
@@ -1088,7 +1087,7 @@ mod tests {
     }
 
     // A real run (`remove_stale_partials: true`) actually removes leftover
-    // atomic-write temp files — this is the fix for the leak where a
+    // partial downloads — this is the fix for the leak where a
     // filename that falls out of the referenced set is never attempted
     // again and so its stray temp file would otherwise sit forever,
     // invisible to both the orphan scan and `--delete`.
@@ -1096,7 +1095,7 @@ mod tests {
     fn scan_distdir_real_run_deletes_stale_partials() {
         let dir = tempfile::tempdir().unwrap();
         let distfiles = Utf8Path::from_path(dir.path()).unwrap();
-        let temp = distfiles.join(".foo.tar.gz.__em_download__");
+        let temp = distfiles.join("foo.tar.gz.__download__");
         std::fs::write(temp.as_std_path(), b"partial").unwrap();
 
         let state = scan_distdir(distfiles, &HashSet::new(), &HashSet::new(), true).unwrap();

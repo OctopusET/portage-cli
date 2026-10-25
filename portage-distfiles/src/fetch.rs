@@ -99,20 +99,6 @@ pub struct FetchConfig {
     /// mirror on every run would turn a "nothing to do" pass into a
     /// full-disk scan. Matches real `emirrordist`'s own default.
     pub trust_existing_size: bool,
-    /// Download to a temporary path in the distdir, verify, then rename
-    /// over the final path — instead of streaming straight to the final path.
-    ///
-    /// Default `false` (fine for a private build-box DISTDIR). Set `true`
-    /// when the distdir is served live: otherwise a client fetching
-    /// mid-download sees a partial or briefly-corrupt file.
-    ///
-    /// **No cross-run resume of an atomic-mode download** — a leftover temp
-    /// file from an interrupted attempt is discarded and refetched fresh,
-    /// never appended to.
-    ///
-    /// Only affects [`FetchStrategy::Builtin`] — a [`FetchStrategy::Command`]
-    /// template writes directly to `${DISTDIR}` and isn't wrapped.
-    pub atomic_write: bool,
 }
 
 impl Default for FetchConfig {
@@ -123,7 +109,6 @@ impl Default for FetchConfig {
             resume_command: None,
             max_concurrent: 4,
             trust_existing_size: false,
-            atomic_write: false,
         }
     }
 }
@@ -299,15 +284,18 @@ impl Fetcher {
 
         // Primary strategy exhausted — try fallback command if configured.
         if let Some(cmd_template) = &self.config.fallback_command {
+            let temp = download_path(&dest);
             for url in &df.urls {
                 let result = self
-                    .run_command(cmd_template, url, &df.filename, &dest)
+                    .fetch_command(cmd_template, url, &temp, manifest_entry)
                     .await;
-                if result.is_ok() {
-                    verify_or_discard(manifest_entry, &dest)?;
-                    return Ok(FetchStatus::Downloaded);
+                match result {
+                    Ok(()) => {
+                        rename_into_place(&temp, &dest)?;
+                        return Ok(FetchStatus::Downloaded);
+                    }
+                    Err(e) => last_err = Some(e),
                 }
-                last_err = result.err();
             }
         }
 
@@ -373,64 +361,47 @@ impl Fetcher {
     // Internal
     // -----------------------------------------------------------------------
 
+    /// Download `url` to `dest`'s [`download_path`], verify it, then rename it over `dest`
     async fn fetch_one_url(
         &self,
         url: &str,
         dest: &Utf8Path,
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
+        let temp = download_path(dest);
         match &self.config.strategy {
-            FetchStrategy::Builtin if self.config.atomic_write => {
-                self.fetch_builtin_atomic(url, dest, manifest_entry).await
-            }
-            FetchStrategy::Builtin => self.fetch_builtin(url, dest, manifest_entry).await,
-            // `atomic_write` only wraps the builtin path — a Command template
-            // (FETCHCOMMAND) writes straight to `${DISTDIR}` by its own
-            // construction, same as real portage.
+            FetchStrategy::Builtin => self.fetch_builtin(url, &temp, manifest_entry).await?,
             FetchStrategy::Command(template) => {
-                self.run_command(template, url, dest.file_name().unwrap_or(""), dest)
-                    .await?;
-                verify_or_discard(manifest_entry, dest)
+                self.fetch_command(template, url, &temp, manifest_entry)
+                    .await?
             }
         }
+        rename_into_place(&temp, dest)
     }
 
-    /// Download to a temp path, verify, then rename over `dest` — never
-    /// seen by anything reading `dest` until it's a complete, verified file.
-    ///
-    /// No resume: any leftover temp from a previous attempt is discarded
-    /// and the file is always fetched fresh (see [`FetchConfig::atomic_write`]).
-    async fn fetch_builtin_atomic(
+    /// Run `FETCHCOMMAND` into `temp`, or `RESUMECOMMAND` when `temp` is a plausible partial
+    async fn fetch_command(
         &self,
+        template: &str,
         url: &str,
-        dest: &Utf8Path,
+        temp: &Utf8Path,
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
-        let temp = self.atomic_temp_path(dest.file_name().unwrap_or("?"));
-        let _ = std::fs::remove_file(temp.as_std_path());
-        match self.download_full(url, &temp, manifest_entry).await {
-            Ok(()) => {
-                std::fs::rename(temp.as_std_path(), dest.as_std_path()).map_err(|e| Error::Io {
-                    path: dest.to_path_buf().into_std_path_buf(),
-                    source: e,
-                })
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(temp.as_std_path());
-                Err(e)
-            }
+        let resume = self
+            .config
+            .resume_command
+            .as_deref()
+            .filter(|_| is_resumable(manifest_entry.and_then(dist_size), current_size(temp)));
+        if resume.is_none() {
+            let _ = std::fs::remove_file(temp.as_std_path());
         }
-    }
-
-    /// Temp path for an atomic-write in-progress download of `filename`, in
-    /// the writable distdir.
-    ///
-    /// Prefixed with `.` and suffixed distinctively so a caller scanning
-    /// the distdir (e.g. an orphan/deletion sweep) can recognize and skip
-    /// it — never a legitimate distfile, never resumed across calls or
-    /// runs. See [`is_atomic_temp_name`].
-    fn atomic_temp_path(&self, filename: &str) -> Utf8PathBuf {
-        self.distdir.join(format!(".{filename}.__em_download__"))
+        self.run_command(
+            resume.unwrap_or(template),
+            url,
+            temp.file_name().unwrap_or(""),
+        )
+        .await?;
+        verify_or_discard(manifest_entry, temp)
     }
 
     async fn fetch_builtin(
@@ -474,7 +445,7 @@ impl Fetcher {
     ) -> Result<bool> {
         if let Some(resume_tmpl) = &self.config.resume_command {
             let ran = self
-                .run_command(resume_tmpl, url, dest.file_name().unwrap_or(""), dest)
+                .run_command(resume_tmpl, url, dest.file_name().unwrap_or(""))
                 .await
                 .is_ok();
             return Ok(ran && verify_ok(manifest_entry, dest));
@@ -561,13 +532,7 @@ impl Fetcher {
     ///
     /// Template substitution: `${URI}` → url, `${FILE}` → filename,
     /// `${DISTDIR}` → distdir path.  The expanded command is run via `sh -c`.
-    async fn run_command(
-        &self,
-        template: &str,
-        url: &str,
-        filename: &str,
-        _dest: &Utf8Path,
-    ) -> Result<()> {
+    async fn run_command(&self, template: &str, url: &str, filename: &str) -> Result<()> {
         let cmd = template
             .replace("${URI}", url)
             .replace("${FILE}", filename)
@@ -591,19 +556,29 @@ impl Fetcher {
     }
 }
 
-/// The exact filename shape [`Fetcher`]'s atomic-write mode uses for an
-/// in-progress download (`.{filename}.__em_download__`).
-///
-/// A directory scan that walks a distdir (an orphan/deletion sweep) must
-/// recognize and skip these — never a legitimate distfile, and always safe
-/// to remove as a stale leftover from an interrupted run.
-pub fn is_atomic_temp_name(name: &str) -> bool {
-    name.starts_with('.') && name.ends_with(".__em_download__")
+/// Suffix of an in-progress download; portage uses the same one, so either tool resumes the other's partial
+const DOWNLOAD_SUFFIX: &str = ".__download__";
+
+/// Whether a DISTDIR entry is an in-progress (or interrupted) download, never a distfile
+pub fn is_partial_download_name(name: &str) -> bool {
+    name.ends_with(DOWNLOAD_SUFFIX)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Where `dest` is downloaded to before it is verified and renamed into place
+fn download_path(dest: &Utf8Path) -> Utf8PathBuf {
+    Utf8PathBuf::from(format!("{dest}{DOWNLOAD_SUFFIX}"))
+}
+
+fn rename_into_place(temp: &Utf8Path, dest: &Utf8Path) -> Result<()> {
+    std::fs::rename(temp.as_std_path(), dest.as_std_path()).map_err(|e| Error::Io {
+        path: dest.to_path_buf().into_std_path_buf(),
+        source: e,
+    })
+}
 
 /// Current on-disk size of `dest`, or 0 when it is absent or unreadable
 fn current_size(dest: &Utf8Path) -> u64 {
@@ -894,50 +869,67 @@ mod tests {
     }
 
     #[test]
-    fn is_atomic_temp_name_recognizes_the_pattern() {
-        assert!(is_atomic_temp_name(".foo.tar.gz.__em_download__"));
-        assert!(!is_atomic_temp_name("foo.tar.gz"));
-        assert!(!is_atomic_temp_name("layout.conf"));
+    fn is_partial_download_name_recognizes_the_suffix() {
+        assert!(is_partial_download_name("foo.tar.gz.__download__"));
+        assert!(!is_partial_download_name("foo.tar.gz"));
+        assert!(!is_partial_download_name("layout.conf"));
+    }
+
+    fn command_fetcher(distdir: &Utf8Path, script: &str) -> Fetcher {
+        Fetcher::new(
+            distdir.to_path_buf(),
+            FetchConfig::from_make_conf(Some(script.to_string()), None),
+        )
+    }
+
+    fn one_url(filename: &str) -> Distfile {
+        Distfile {
+            filename: filename.to_string(),
+            urls: vec![format!("http://example.invalid/{filename}")],
+            restriction: None,
+        }
     }
 
     #[tokio::test]
-    async fn atomic_write_leaves_no_file_at_dest_until_verified() {
+    async fn fetchcommand_writes_the_download_name_then_renames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        let filename = "foo.tar.gz";
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![dist_entry(filename, b"payload")],
+        });
+        let fetcher = command_fetcher(
+            &distdir,
+            r#"case "${FILE}" in *.__download__) printf payload > "${DISTDIR}/${FILE}" ;; *) exit 1 ;; esac"#,
+        );
+        let status = fetcher
+            .fetch_distfile_digests(&one_url(filename), &digests)
+            .await
+            .unwrap();
+        assert_eq!(status, FetchStatus::Downloaded);
+        assert_eq!(std::fs::read(distdir.join(filename)).unwrap(), b"payload");
+        assert!(!download_path(&distdir.join(filename)).exists());
+    }
+
+    // Another fetcher's file under the final name must survive a download of ours that fails to verify.
+    #[tokio::test]
+    async fn failed_verify_never_touches_the_final_name() {
         let tmp = tempfile::tempdir().unwrap();
         let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
         let filename = "foo.tar.gz";
         let dest = distdir.join(filename);
-
-        // Stale leftover from a previous interrupted run — must not be
-        // resumed, and must not survive to confuse anything.
-        let temp = distdir.join(format!(".{filename}.__em_download__"));
-        std::fs::write(temp.as_std_path(), b"stale partial").unwrap();
-
-        let fetcher = Fetcher::new(
-            distdir.clone(),
-            FetchConfig {
-                atomic_write: true,
-                ..Default::default()
-            },
-        );
-        // No reachable URL: the atomic path must fail (network unreachable)
-        // without ever creating `dest`, and must clean up its own temp file
-        // on failure rather than leaving it behind.
-        let df = Distfile {
-            filename: filename.to_string(),
-            urls: vec!["http://127.0.0.1:1/unreachable".to_string()],
-            restriction: None,
-        };
-        let digests = DistDigests::new();
-        let result = fetcher.fetch_distfile_digests(&df, &digests).await;
-        assert!(result.is_err());
-        assert!(
-            !dest.as_std_path().exists(),
-            "dest must not appear on failure"
-        );
-        assert!(
-            !temp.as_std_path().exists(),
-            "the atomic temp file must not linger after a failed attempt"
-        );
+        std::fs::write(&dest, b"other").unwrap();
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![dist_entry(filename, b"payload")],
+        });
+        let fetcher = command_fetcher(&distdir, r#"printf truncat > "${DISTDIR}/${FILE}""#);
+        let err = fetcher
+            .fetch_distfile_digests(&one_url(filename), &digests)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Verify { .. }));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"other");
+        assert!(!download_path(&dest).exists());
     }
 
     // Regression: two independent fetch calls for the same filename (e.g. one

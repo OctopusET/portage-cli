@@ -414,8 +414,8 @@ fn dist_candidates(globals: &Cli, opts: &CleanOpts, filters: &Filters) -> Result
     }
 
     // The DISTDIR walk itself is `mirrordist`'s, parameterised on the
-    // reference set: it already skips `layout.conf` and the atomic-write temp
-    // files, and keeping one scanner means those rules cannot drift apart.
+    // reference set: it already skips `layout.conf` and partial downloads,
+    // and keeping one scanner means those rules cannot drift apart.
     // Only the *policy* differs — what counts as referenced.
     let refs: std::collections::HashSet<&str> = wanted.iter().map(String::as_str).collect();
     // Portage's own bookkeeping in a *local* DISTDIR, which a mirror dir never
