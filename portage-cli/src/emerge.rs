@@ -529,8 +529,8 @@ async fn emerge_atoms_inner(
     }
 
     // World selection (real emerge's `_world_atom`): only the genuine
-    // top-level invocation (`update_world`), and only the literal,
-    // explicitly-named atoms go to `world` — a `@set` ref's *members* never
+    // top-level invocation (`update_world`), and only explicitly-named
+    // atoms, reduced by `world_atom`, go to `world`; a `@set` ref's *members* never
     // do (they're recorded as the set reference itself, in `world_sets`,
     // via `world_set_refs` below).
     //
@@ -540,7 +540,15 @@ async fn emerge_atoms_inner(
     // record (see `DepgraphOpts::world_additions`). `select_world_atoms`
     // warns on unparsable atoms, so it must not run twice.
     let world_additions: Vec<portage_atom::Dep> = if update_world && !merge_flags.oneshot {
+        let system = maint::world::resolve_set(roots.config(), roots.merge_root(), "system")
+            .unwrap_or_default();
         select_world_atoms(&atoms)
+            .iter()
+            .filter_map(|arg| {
+                let (repo_slots, vdb_slots) = slot_facts(arg, &set, vdb.as_ref());
+                world_atom(arg, &repo_slots, &vdb_slots, &system)
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -1190,6 +1198,109 @@ fn select_world_atoms(atoms: &[TargetAtom]) -> Vec<portage_atom::Dep> {
         .collect()
 }
 
+/// Slots of one package's candidates in one database: every slot, and those the argument matches
+#[derive(Debug, Default)]
+struct SlotFacts {
+    all: std::collections::BTreeSet<String>,
+    matched: std::collections::BTreeSet<String>,
+}
+
+impl SlotFacts {
+    fn record(
+        &mut self,
+        arg: &portage_atom::Dep,
+        cpv: &portage_atom::Cpv,
+        slot: &portage_atom::Slot,
+    ) {
+        self.all.insert(slot.slot.to_string());
+        if arg.matches_cpv(cpv, Some(slot)) {
+            self.matched.insert(slot.slot.to_string());
+        }
+    }
+
+    fn slotted(&self) -> bool {
+        self.all.len() > 1 || self.all.iter().any(|s| s != "0")
+    }
+}
+
+/// [`SlotFacts`] for `arg`'s package in the repositories (only `arg`'s own `::repo`, if
+/// given) and in the installed `vdb`
+fn slot_facts(
+    arg: &portage_atom::Dep,
+    set: &portage_repo::RepoSet,
+    vdb: Option<&portage_vdb::Vdb>,
+) -> (SlotFacts, SlotFacts) {
+    let mut repo_slots = SlotFacts::default();
+    for repo in set.iter() {
+        if arg.repo.is_some_and(|r| r != repo.name()) {
+            continue;
+        }
+        let ebuilds = repo
+            .category(arg.cpn.category.as_ref())
+            .and_then(|c| c.package(arg.cpn.package.as_ref()))
+            .and_then(|p| p.ebuilds().ok())
+            .unwrap_or_default();
+        for ebuild in ebuilds {
+            if let Ok(Some(entry)) = repo.cache_entry(ebuild.cpv()) {
+                repo_slots.record(arg, ebuild.cpv(), &entry.metadata.slot);
+            }
+        }
+    }
+    let mut vdb_slots = SlotFacts::default();
+    if let Some(cat) = vdb.and_then(|v| v.category(arg.cpn.category.as_ref())) {
+        for pkg in cat.packages() {
+            if pkg.cpv().cpn == arg.cpn
+                && let Ok(slot) = pkg.slot()
+            {
+                vdb_slots.record(arg, pkg.cpv(), &slot);
+            }
+        }
+    }
+    (repo_slots, vdb_slots)
+}
+
+/// The world-file entry for command-line argument `arg` (portage's `create_world_atom`)
+///
+/// The bare cpn (keeping `::repo`), narrowed to `cpn:slot` when the package is slotted and a
+/// more specific `arg` selects exactly one slot. `None` for an unslotted package in `system`
+/// unless `arg` names a repo: `@world` already covers it.
+fn world_atom(
+    arg: &portage_atom::Dep,
+    repo_slots: &SlotFacts,
+    vdb_slots: &SlotFacts,
+    system: &[portage_atom::Dep],
+) -> Option<portage_atom::Dep> {
+    let mut entry = portage_atom::Dep::new(arg.cpn);
+    entry.repo = arg.repo;
+    let slotted = repo_slots.slotted() || vdb_slots.slotted();
+    let specific = arg.version.is_some() || arg.slot_dep.is_some() || arg.use_deps.is_some();
+    if slotted && specific {
+        let matched = if repo_slots.matched.is_empty() {
+            &vdb_slots.matched
+        } else {
+            &repo_slots.matched
+        };
+        if matched.len() == 1
+            && let Some(slot) = matched.first()
+        {
+            entry.slot_dep = Some(portage_atom::SlotDep::Slot {
+                slot: Some(portage_atom::Slot::new(slot)),
+                op: None,
+            });
+        }
+    }
+    // A system virtual stays: it is only safe to drop with a single old-style provider.
+    let in_system = || {
+        system
+            .iter()
+            .any(|d| d.cpn == arg.cpn && d.cpn.category.as_ref() != "virtual")
+    };
+    if !slotted && arg.repo.is_none() && in_system() {
+        return None;
+    }
+    Some(entry)
+}
+
 /// The other half of real emerge's world selection: a `@name` set typed
 /// directly on the command line, when `name` is a `world-candidate` set
 /// (real portage's `usersets` only). Recorded as the literal `@name`
@@ -1669,6 +1780,77 @@ mod tests {
         let world = select_world_atoms(&atoms);
         assert_eq!(world.len(), 1);
         assert_eq!(world[0].to_string(), "sys-devel/gcc");
+    }
+
+    fn facts(arg: &str, candidates: &[(&str, &str)]) -> SlotFacts {
+        let arg = portage_atom::Dep::parse(arg).unwrap();
+        let mut f = SlotFacts::default();
+        for (cpv, slot) in candidates {
+            f.record(
+                &arg,
+                &portage_atom::Cpv::parse(cpv).unwrap(),
+                &portage_atom::Slot::new(slot),
+            );
+        }
+        f
+    }
+
+    fn world_entry(arg: &str, repo: &[(&str, &str)], system: &[&str]) -> Option<String> {
+        let system: Vec<_> = system
+            .iter()
+            .map(|s| portage_atom::Dep::parse(s).unwrap())
+            .collect();
+        world_atom(
+            &portage_atom::Dep::parse(arg).unwrap(),
+            &facts(arg, repo),
+            &SlotFacts::default(),
+            &system,
+        )
+        .map(|d| d.to_string())
+    }
+
+    #[test]
+    fn world_atom_drops_version_and_use_deps_of_an_unslotted_package() {
+        let repo = [("app-editors/nano-8.0", "0"), ("app-editors/nano-8.1", "0")];
+        assert_eq!(
+            world_entry(">=app-editors/nano-8.0[spell]", &repo, &[]).as_deref(),
+            Some("app-editors/nano")
+        );
+    }
+
+    #[test]
+    fn world_atom_records_the_one_slot_a_specific_argument_selects() {
+        let repo = [
+            ("sys-devel/gcc-13.3.0", "13"),
+            ("sys-devel/gcc-14.2.0", "14"),
+        ];
+        assert_eq!(
+            world_entry("=sys-devel/gcc-14*", &repo, &["sys-devel/gcc"]).as_deref(),
+            Some("sys-devel/gcc:14")
+        );
+        assert_eq!(
+            world_entry("sys-devel/gcc", &repo, &[]).as_deref(),
+            Some("sys-devel/gcc")
+        );
+        assert_eq!(
+            world_entry(">=sys-devel/gcc-13", &repo, &[]).as_deref(),
+            Some("sys-devel/gcc")
+        );
+    }
+
+    #[test]
+    fn world_atom_skips_unslotted_system_packages_but_not_virtuals_or_repo_atoms() {
+        let repo = [("sys-apps/sed-4.9", "0")];
+        assert_eq!(world_entry("sys-apps/sed", &repo, &["sys-apps/sed"]), None);
+        assert_eq!(
+            world_entry("sys-apps/sed::gentoo", &repo, &["sys-apps/sed"]).as_deref(),
+            Some("sys-apps/sed::gentoo")
+        );
+        let repo = [("virtual/libc-1", "0")];
+        assert_eq!(
+            world_entry("virtual/libc", &repo, &["virtual/libc"]).as_deref(),
+            Some("virtual/libc")
+        );
     }
 
     #[test]

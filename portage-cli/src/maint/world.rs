@@ -287,9 +287,10 @@ fn check_world_sets_file(
 /// atoms (skipped under `--oneshot`/`--buildpkgonly`/`--fetchonly`/
 /// `--onlydeps`/`--pretend` — see the caller).
 ///
-/// An atom whose `Cpn` already has an entry is replaced in place rather
-/// than duplicated; a genuinely new one is appended. Best-effort: a
-/// failure here is reported but never unwinds a merge already on disk.
+/// The world file is a set: an atom already present is left alone, any
+/// other is appended, so `cat/pkg:1` and `cat/pkg:2` both stay selected.
+/// Best-effort: a failure here is reported but never unwinds a merge
+/// already on disk.
 pub fn add_atoms(root: Option<&Utf8Path>, atoms: &[Dep]) {
     if atoms.is_empty() {
         return;
@@ -299,18 +300,11 @@ pub fn add_atoms(root: Option<&Utf8Path>, atoms: &[Dep]) {
     let mut lines: Vec<String> = existing.lines().map(str::to_owned).collect();
 
     for atom in atoms {
-        let rendered = atom.to_string();
-        let already = lines.iter().position(|l| {
-            let t = l.trim();
-            !t.is_empty()
-                && !t.starts_with('#')
-                && !t.starts_with('@')
-                && Dep::parse(t).is_ok_and(|d| d.cpn == atom.cpn)
-        });
-        match already {
-            Some(idx) if lines[idx].trim() == rendered => {}
-            Some(idx) => lines[idx] = rendered,
-            None => lines.push(rendered),
+        let present = lines
+            .iter()
+            .any(|l| Dep::parse(l.trim()).is_ok_and(|d| d == *atom));
+        if !present {
+            lines.push(atom.to_string());
         }
     }
 
@@ -534,15 +528,15 @@ mod tests {
     }
 
     #[test]
-    fn replaces_an_existing_entry_for_the_same_cpn_instead_of_duplicating() {
+    fn keeps_another_slot_of_the_same_cpn() {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
         std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
-        std::fs::write(world_path(Some(&root)), "=app-editors/nano-8.0\n").unwrap();
+        std::fs::write(world_path(Some(&root)), "sys-devel/gcc:13\n").unwrap();
 
-        add_atoms(Some(&root), &[Dep::parse("app-editors/nano").unwrap()]);
+        add_atoms(Some(&root), &[Dep::parse("sys-devel/gcc:14").unwrap()]);
 
-        assert_eq!(read_world(&root), "app-editors/nano\n");
+        assert_eq!(read_world(&root), "sys-devel/gcc:13\nsys-devel/gcc:14\n");
     }
 
     #[test]
