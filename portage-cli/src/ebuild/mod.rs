@@ -2191,7 +2191,7 @@ fn register_merged(
         .unwrap_or(0);
     let counter = vdb.next_counter()?;
     let elf = crate::elfscan::scan_image(image_dir);
-    let spec = merge_spec_from_env(
+    let mut spec = merge_spec_from_env(
         env,
         ebuild.cpv().clone(),
         contents,
@@ -2200,6 +2200,7 @@ fn register_merged(
         build_time,
         counter,
     );
+    build_info::inject_libc_dep(&mut spec, vdb);
     let installed = vdb.register(&spec)?;
 
     // Copy the ebuild into the VDB entry as `<PF>.ebuild`, as portage does.

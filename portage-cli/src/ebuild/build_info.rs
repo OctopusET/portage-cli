@@ -2,14 +2,14 @@
 //!
 //! `*DEPEND`, `LICENSE`, `RESTRICT` and `PROPERTIES` are written with their USE
 //! conditionals evaluated, redundant groups flattened and `:=` bound to the
-//! installed provider's slot.
+//! installed provider's slot; `RDEPEND` also gains an implicit `>=libc`.
 
 use std::collections::HashSet;
 
-use portage_atom::{Dep, Slot, SlotDep, SlotOperator, UseDep, UseDepKind};
+use portage_atom::{Cpv, Dep, Slot, SlotDep, SlotOperator, UseDep, UseDepKind};
 use portage_metadata::Eapi;
 use portage_repo::EbuildEnv;
-use portage_vdb::Vdb;
+use portage_vdb::{MergeSpec, Vdb};
 
 /// Reduce `env`'s raw fields against its own USE and bind `:=` deps
 ///
@@ -41,6 +41,45 @@ pub(super) fn reduce_env(env: &mut EbuildEnv, target: &Vdb, running: &Vdb) {
     deps(&mut env.rdepend, &[target]);
     deps(&mut env.pdepend, &[target]);
     deps(&mut env.idepend, &[target]);
+}
+
+/// Append `>=<libc>` to `RDEPEND` of a package that links anything (has `NEEDED.ELF.2`)
+pub(super) fn inject_libc_dep(spec: &mut MergeSpec, target: &Vdb) {
+    if spec.needed_elf2.is_empty() {
+        return;
+    }
+    if let Some(libc) = libc_dep(target, &spec.cpv) {
+        spec.rdepend = Some(match spec.rdepend.take() {
+            Some(r) => format!("{r} {libc}"),
+            None => libc,
+        });
+    }
+}
+
+/// `>=<cpv>` for each installed provider of `virtual/libc`, unless `cpv` is one
+fn libc_dep(vdb: &Vdb, cpv: &Cpv) -> Option<String> {
+    let virtual_libc = Dep::parse("virtual/libc").ok()?;
+    let rdepend = installed_matches(vdb, &virtual_libc)
+        .into_iter()
+        .max_by(|a, b| a.cpv().cmp(b.cpv()))?
+        .rdepend()
+        .ok()
+        .flatten()?;
+    let mut providers = Vec::new();
+    portage_atom::DepEntry::walk_atoms(&rdepend, &mut |dep| {
+        if dep.blocker.is_none()
+            && let Some(p) = installed_matches(vdb, dep)
+                .into_iter()
+                .min_by(|a, b| a.cpv().cmp(b.cpv()))
+        {
+            providers.push(p.cpv().clone());
+        }
+    });
+    if providers.is_empty() || providers.iter().any(|p| p.cpn == cpv.cpn) {
+        return None;
+    }
+    let atoms: Vec<String> = providers.iter().map(|p| format!(">={p}")).collect();
+    Some(atoms.join(" "))
 }
 
 fn installed_matches(vdb: &Vdb, dep: &Dep) -> Vec<portage_vdb::InstalledPackage> {
@@ -308,5 +347,28 @@ mod tests {
         );
         assert_eq!(atom("dev-libs/bar[gtk?]"), "dev-libs/bar");
         assert_eq!(atom("<dev-libs/bar-1.0_rc1"), "<dev-libs/bar-1.0_rc1");
+    }
+
+    #[test]
+    fn libc_dep_names_the_virtuals_installed_provider_except_for_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb = vdb_with(
+            tmp.path(),
+            &[
+                ("virtual", "libc-1-r1", "0"),
+                ("sys-libs", "glibc-2.43-r4", "2.2"),
+            ],
+        );
+        std::fs::write(
+            tmp.path().join("virtual/libc-1-r1/RDEPEND"),
+            "sys-libs/glibc:2.2\n",
+        )
+        .unwrap();
+        let cpv = |s| Cpv::parse(s).unwrap();
+        assert_eq!(
+            libc_dep(&vdb, &cpv("app-text/tree-2.2.1")).as_deref(),
+            Some(">=sys-libs/glibc-2.43-r4")
+        );
+        assert_eq!(libc_dep(&vdb, &cpv("sys-libs/glibc-2.44")), None);
     }
 }

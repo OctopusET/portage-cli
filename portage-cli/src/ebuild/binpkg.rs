@@ -76,7 +76,7 @@ pub(crate) async fn build_binpkg_standalone(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let elf = crate::elfscan::scan_image(&image_dir);
-    let spec = merge_spec_from_env(
+    let mut spec = merge_spec_from_env(
         env,
         ebuild.cpv().clone(),
         contents,
@@ -85,6 +85,7 @@ pub(crate) async fn build_binpkg_standalone(
         build_time,
         counter,
     );
+    build_info::inject_libc_dep(&mut spec, target);
     let installed = vdb.register(&spec)?;
 
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
