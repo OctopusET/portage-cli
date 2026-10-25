@@ -2,7 +2,8 @@
 """classify.py OUT: compare OUT/*.emerge against OUT/*.em merge lists.
 
 Classes: same, order (same lines, other order), display (same packages,
-different line text), set (different packages), rc (one side failed).
+different line text), set (different packages), rc (one side failed), fail
+(both failed: their partial plans are not compared).
 Writes OUT.json; prints counts and the packages most often on one side only.
 """
 import collections
@@ -37,6 +38,8 @@ def main(out):
         mrc, ml, mp = parse(os.path.join(out, slug + ".em"))
         if (erc == "0") != (mrc == "0"):
             k = "rc"
+        elif erc != "0":
+            k = "fail"
         elif ep != mp:
             k = "set"
             for p in ep - mp:
