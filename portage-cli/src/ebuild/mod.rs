@@ -18,6 +18,7 @@ use crate::postprocess;
 use crate::preserve_libs;
 
 mod binpkg;
+mod build_info;
 mod flock;
 mod protect;
 
@@ -2262,12 +2263,14 @@ async fn run_merge(
             .context("sourcing ebuild")?;
     }
     shell.apply_iuse_effective();
-    let env = shell.collect_env();
+    let mut env = shell.collect_env();
 
     let env_dump = capture_environment(shell, work_root).await;
 
     let vdb_root = vdb_root_for(root);
     let vdb = open_or_create_vdb(&vdb_root)?;
+    let running = running_vdb(shell, &vdb_root);
+    build_info::reduce_env(&mut env, &vdb, running.as_ref().unwrap_or(&vdb));
 
     let slot_main = env.slot_main().to_owned();
     // The slot occupant (if any) is the package being replaced — its files are
@@ -3635,6 +3638,15 @@ fn repo_revisions(repo: &Repository, repos_conf: Option<&ReposConf>) -> Option<S
         .filter(|o| o.status.success())?;
     let head = String::from_utf8(out.stdout).ok()?;
     Some(format!("{{\"{name}\": \"{}\"}}", head.trim()))
+}
+
+/// The VDB of the tree the build runs from, when it is not `target_root`'s
+fn running_vdb(shell: &portage_repo::EbuildShell, target_root: &Utf8Path) -> Option<Vdb> {
+    let path = vdb_root_for(shell.build_broot().unwrap_or(Utf8Path::new("/")));
+    if path == target_root {
+        return None;
+    }
+    Vdb::open(&path).ok()
 }
 
 fn vdb_root_for(root: &Utf8Path) -> Utf8PathBuf {

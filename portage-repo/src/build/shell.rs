@@ -810,6 +810,11 @@ impl EbuildShell {
         self.build_ld_library_path = ld_library_path.map(str::to_string);
     }
 
+    /// The tree the build runs from, as given to [`Self::set_build_roots`]; `None` when unknown
+    pub fn build_broot(&self) -> Option<&Utf8Path> {
+        self.build_broot.as_deref()
+    }
+
     /// Host-side cross code generators (`cross-*`/`cross_llvm-*` binutils,
     /// gcc, gdb, clang-crossdev-wrappers) that need PATH/EPREFIX/ESYSROOT
     /// specials. llvm-runtimes use host-env package.env but are not codegen.
