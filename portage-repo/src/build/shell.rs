@@ -668,6 +668,10 @@ impl EbuildShell {
                 brush_core::builtins::Registration::of::<commands::AssertCommand>(),
             ),
             (
+                "pipestatus",
+                brush_core::builtins::Registration::of::<commands::PipestatusCommand>(),
+            ),
+            (
                 "eapply_user",
                 brush_core::builtins::Registration::of::<commands::EapplyUserCommand>(),
             ),

@@ -934,3 +934,59 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for AssertCommand {
         Ok(brush_core::ExecutionResult::success())
     }
 }
+
+/// `pipestatus [-v]`  (PMS 12.3.1, EAPI &ge; 9)
+///
+/// Returns the last non-zero exit status of the previous pipeline, or 0 when
+/// every command succeeded. `-v` also prints all the statuses, space-separated.
+#[derive(winnow_args::Args)]
+#[arg(
+    disable_help_flag,
+    disable_version_flag,
+    disable_help_subcommand,
+    unknown_flags = "value"
+)]
+pub(crate) struct PipestatusCommand {
+    #[arg(short = 'v')]
+    verbose: bool,
+    #[arg(positional, stop_flags)]
+    extra: Vec<String>,
+}
+
+brush_winnow_args_adapter::impl_parse_args!(PipestatusCommand);
+
+impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for PipestatusCommand {
+    type Error = brush_core::Error;
+
+    async fn execute(
+        self,
+        context: brush_core::ExecutionContext<'_, SE>,
+    ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        let die_flag = context.shell.builtin_state::<DieFlag>().cloned();
+        let shell = context.shell;
+        // Read before anything else runs a pipeline and replaces it.
+        let statuses = shell
+            .env()
+            .get("PIPESTATUS")
+            .map(|r| r.base_var().value().element_values(shell))
+            .unwrap_or_default();
+        if !self.extra.is_empty() {
+            die_now(
+                &context.params,
+                die_flag.as_ref(),
+                shell,
+                "usage: pipestatus [-v]",
+            );
+            return Ok(brush_core::ExecutionResult::new(1));
+        }
+        if self.verbose {
+            let _ = writeln!(context.params.stdout(shell), "{}", statuses.join(" "));
+        }
+        let last_failure = statuses
+            .iter()
+            .filter_map(|s| s.parse::<u8>().ok())
+            .rfind(|&s| s != 0)
+            .unwrap_or(0);
+        Ok(brush_core::ExecutionResult::new(last_failure))
+    }
+}

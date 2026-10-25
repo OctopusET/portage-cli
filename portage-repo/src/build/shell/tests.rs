@@ -2784,3 +2784,20 @@ async fn ver_replacing_tests_each_replaced_version() {
         .expect_err("ver_replacing dies outside pkg_pretend/setup/preinst/postinst");
     assert!(format!("{err}").contains("meaningless"), "{err}");
 }
+
+#[tokio::test]
+async fn pipestatus_returns_the_last_failure_of_the_previous_pipeline() {
+    let dir = tempdir().unwrap();
+    let mut shell = minimal_shell(dir.path()).await;
+    shell
+        .run_string(
+            "true | (exit 3) | (exit 4) | true; pipestatus; EM_RC=$?\n\
+             true | true; pipestatus; EM_OK=$?\n\
+             true | (exit 2); EM_V=$(pipestatus -v)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(shell.get_var("EM_RC").as_deref(), Some("4"));
+    assert_eq!(shell.get_var("EM_OK").as_deref(), Some("0"));
+    assert_eq!(shell.get_var("EM_V").as_deref(), Some("0 2"));
+}

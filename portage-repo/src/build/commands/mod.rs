@@ -42,7 +42,7 @@ pub(crate) use phase_defaults::{
     EapiSrcCompile2Command, EapiSrcConfigureCommand, EapiSrcInstall4Command,
     EapiSrcInstall6Command, EapiSrcPrepare6Command, EapiSrcPrepare8Command,
     EapiSrcPrepareNoopCommand, EapiSrcTestCommand, EapiSrcUnpackCommand, EapplyUserCommand,
-    EinstalldocsCommand, GetLibdirCommand, NonfatalCommand,
+    EinstalldocsCommand, GetLibdirCommand, NonfatalCommand, PipestatusCommand,
 };
 pub(crate) use phase_funcs::{EAPI_PREDICATE_NAMES, EapiPredicateCommand, EbuildPhaseFuncsCommand};
 pub(crate) use unpack::UnpackCommand;
