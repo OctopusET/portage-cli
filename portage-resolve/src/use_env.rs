@@ -538,7 +538,7 @@ fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
         let Some(atom_str) = parts.next() else {
             continue;
         };
-        let Ok(dep) = Dep::parse(atom_str) else {
+        let Some(dep) = parse_config_atom(path, atom_str) else {
             continue;
         };
         let flags: Vec<String> = parts.map(str::to_string).collect();
@@ -670,7 +670,7 @@ fn load_package_keywords(path: &str) -> Vec<(Dep, Vec<AcceptToken>)> {
         let Some(atom_str) = parts.next() else {
             continue;
         };
-        let Ok(dep) = Dep::parse(atom_str) else {
+        let Some(dep) = parse_config_atom(path, atom_str) else {
             continue;
         };
         let tokens: Vec<AcceptToken> = parts.filter_map(AcceptToken::parse).collect();
@@ -691,7 +691,7 @@ fn load_package_license(path: &str, groups: &LicenseGroupRegistry) -> Vec<(Dep, 
         let Some(atom_str) = parts.next() else {
             continue;
         };
-        let Ok(dep) = Dep::parse(atom_str) else {
+        let Some(dep) = parse_config_atom(path, atom_str) else {
             continue;
         };
         let tokens: Vec<String> = parts.map(String::from).collect();
@@ -708,11 +708,18 @@ fn load_dep_list(path: &str) -> Vec<Dep> {
         if line.starts_with('-') {
             continue;
         }
-        if let Ok(dep) = Dep::parse(&line) {
+        if let Some(dep) = parse_config_atom(path, &line) {
             result.push(dep);
         }
     }
     result
+}
+
+/// Parse the atom of a `path` line, warning instead of failing on one em cannot read
+fn parse_config_atom(path: &str, atom: &str) -> Option<Dep> {
+    Dep::parse(atom)
+        .inspect_err(|e| tracing::warn!("{path}: ignoring invalid atom {atom}: {e}"))
+        .ok()
 }
 
 #[cfg(test)]

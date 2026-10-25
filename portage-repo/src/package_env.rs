@@ -47,7 +47,7 @@ pub fn env_files_for(
 /// names])` entries.
 ///
 /// One entry per line: `atom file1 file2 …`; `#` comments and blank lines are
-/// skipped, as are lines with no env-file names or an unparseable atom. A
+/// skipped, as are lines with no env-file names or an unparseable atom (warned). A
 /// directory is read as its regular files, sorted by name (PMS 5.2.4 form).
 ///
 /// Public (unlike the rest of this module's helpers) because
@@ -76,8 +76,12 @@ pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
             let Some(atom_str) = parts.next() else {
                 continue;
             };
-            let Ok(dep) = Dep::parse(atom_str) else {
-                continue;
+            let dep = match Dep::parse(atom_str) {
+                Ok(dep) => dep,
+                Err(e) => {
+                    tracing::warn!("{}: ignoring invalid atom {atom_str}: {e}", file.display());
+                    continue;
+                }
             };
             let names: Vec<String> = parts.map(String::from).collect();
             if !names.is_empty() {
