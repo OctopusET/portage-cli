@@ -2903,12 +2903,17 @@ fn remove_old_unique_files(
                 continue;
             }
         };
+        let Ok(lstat) = std::fs::symlink_metadata(dest.as_std_path()) else {
+            continue;
+        };
+        if let Some(reason) = keep_on_unmerge(entry, &dest, &lstat) {
+            tracing::debug!("--- {reason} {}", entry.path);
+            continue;
+        }
 
         match entry.kind {
             ContentsKind::Obj | ContentsKind::Sym => {
-                if (dest.exists() || std::fs::symlink_metadata(dest.as_std_path()).is_ok())
-                    && let Err(e) = std::fs::remove_file(dest.as_std_path())
-                {
+                if let Err(e) = std::fs::remove_file(dest.as_std_path()) {
                     crate::style::warn_line!("could not remove {dest}: {e}");
                 }
             }
@@ -2917,6 +2922,33 @@ fn remove_old_unique_files(
             }
             _ => {}
         }
+    }
+}
+
+/// Why an existing CONTENTS entry at `dest` must survive its package's
+/// removal, in portage's unmerge-log wording, or `None` to remove it
+fn keep_on_unmerge(
+    entry: &ContentsEntry,
+    dest: &Utf8Path,
+    lstat: &std::fs::Metadata,
+) -> Option<&'static str> {
+    use std::os::unix::fs::MetadataExt;
+    let is_link = lstat.file_type().is_symlink();
+    let mtime_changed = entry
+        .mtime
+        .is_some_and(|m| u64::try_from(lstat.mtime()).ok() != Some(m));
+    match entry.kind {
+        ContentsKind::Obj | ContentsKind::Sym if mtime_changed => Some("!mtime"),
+        ContentsKind::Sym if !is_link => Some("!sym"),
+        ContentsKind::Obj if !lstat.is_file() => Some("!obj"),
+        ContentsKind::Obj => {
+            let md5 = entry.md5.as_deref()?;
+            let on_disk = std::fs::read(dest.as_std_path())
+                .ok()
+                .map(|d| format!("{:x}", md5::compute(d)));
+            (!on_disk.is_some_and(|d| d.eq_ignore_ascii_case(md5))).then_some("!md5")
+        }
+        _ => None,
     }
 }
 
@@ -5114,6 +5146,30 @@ mod tests {
         );
     }
 
+    /// CONTENTS entry recording what is on disk at `path` under `root` now
+    fn recorded(root: &Utf8Path, path: &str) -> ContentsEntry {
+        use std::os::unix::fs::MetadataExt;
+        let dest = root.join(path.trim_start_matches('/'));
+        let meta = fs::symlink_metadata(dest.as_std_path()).unwrap();
+        let (kind, md5, target) = if meta.file_type().is_symlink() {
+            let target = fs::read_link(dest.as_std_path()).unwrap();
+            (ContentsKind::Sym, None, Some(target.try_into().unwrap()))
+        } else if meta.is_dir() {
+            (ContentsKind::Dir, None, None)
+        } else {
+            let md5 = format!("{:x}", md5::compute(fs::read(dest.as_std_path()).unwrap()));
+            (ContentsKind::Obj, Some(md5), None)
+        };
+        let mtime = (kind != ContentsKind::Dir).then(|| meta.mtime() as u64);
+        ContentsEntry {
+            kind,
+            path: path.into(),
+            md5,
+            mtime,
+            target,
+        }
+    }
+
     #[test]
     fn remove_old_unique_files_removes_only_unique() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5123,42 +5179,58 @@ mod tests {
         fs::write(root.join("usr/bin/old-only").as_std_path(), b"old").unwrap();
         fs::write(root.join("usr/bin/shared").as_std_path(), b"shared").unwrap();
 
-        let old_contents = vec![
-            ContentsEntry {
-                kind: ContentsKind::Dir,
-                path: "/usr/bin".into(),
-                md5: None,
-                mtime: None,
-                target: None,
-            },
-            ContentsEntry {
-                kind: ContentsKind::Obj,
-                path: "/usr/bin/old-only".into(),
-                md5: Some("aa".into()),
-                mtime: Some(0),
-                target: None,
-            },
-            ContentsEntry {
-                kind: ContentsKind::Obj,
-                path: "/usr/bin/shared".into(),
-                md5: Some("bb".into()),
-                mtime: Some(0),
-                target: None,
-            },
-        ];
-        let new_contents = vec![ContentsEntry {
-            kind: ContentsKind::Obj,
-            path: "/usr/bin/shared".into(),
-            md5: Some("cc".into()),
-            mtime: Some(1),
-            target: None,
-        }];
+        let old_contents =
+            ["/usr/bin", "/usr/bin/old-only", "/usr/bin/shared"].map(|p| recorded(&root, p));
+        let new_contents = [recorded(&root, "/usr/bin/shared")];
 
         remove_old_unique_files(&old_contents, &new_contents, &HashSet::new(), &root);
 
         assert!(!root.join("usr/bin/old-only").exists());
         assert!(root.join("usr/bin/shared").exists());
         assert!(root.join("usr/bin").exists());
+    }
+
+    #[test]
+    fn remove_old_unique_files_keeps_files_changed_since_merge() {
+        use rustix::fs::{CWD, FileType, Mode, mknodat};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        fs::create_dir_all(root.join("etc").as_std_path()).unwrap();
+        for name in ["edited", "touched", "fifo"] {
+            fs::write(root.join("etc").join(name).as_std_path(), b"orig").unwrap();
+        }
+        let mut old_contents =
+            ["/etc/edited", "/etc/touched", "/etc/fifo"].map(|p| recorded(&root, p));
+        old_contents[2].mtime = None;
+        let fifo = root.join("etc/fifo");
+        fs::remove_file(&fifo).unwrap();
+        mknodat(CWD, fifo.as_str(), FileType::Fifo, Mode::RUSR, 0).unwrap();
+
+        let edited = root.join("etc/edited");
+        let mtime = fs::metadata(edited.as_std_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        fs::write(edited.as_std_path(), b"user").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(edited.as_std_path())
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let touched = fs::File::options()
+            .write(true)
+            .open(root.join("etc/touched").as_std_path())
+            .unwrap();
+        touched
+            .set_modified(mtime + std::time::Duration::from_secs(5))
+            .unwrap();
+
+        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root);
+
+        assert_eq!(fs::read(edited.as_std_path()).unwrap(), b"user");
+        assert!(root.join("etc/touched").exists());
+        assert!(fifo.exists());
     }
 
     #[tokio::test]
