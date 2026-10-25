@@ -2736,3 +2736,25 @@ async fn a_missing_s_dies_once_the_ebuild_defines_a_source_phase() {
         .expect_err("a defined src_compile needs S");
     assert!(format!("{err}").contains("doesn't exist"), "{err}");
 }
+
+#[tokio::test]
+async fn restrict_test_skips_src_test_under_the_current_use() {
+    let body = "IUSE=\"test\"\nRESTRICT=\"!test? ( test )\"\nS=\"${WORKDIR}\"\n\
+                src_test() { die \"tests ran\"; }\n";
+    for use_test in [false, true] {
+        let dir = tempdir().unwrap();
+        let (repo, ebuild) = phase_repo(dir.path(), body);
+        let mut shell = repo.shell().await.unwrap();
+        if use_test {
+            shell.set_use_flags(&["test"]).unwrap();
+        }
+        let result = shell
+            .run_phase(&ebuild, "test", &dir.path().join("work"), Path::new("/"))
+            .await;
+        assert_eq!(
+            result.is_err(),
+            use_test,
+            "USE=test: {use_test}, {result:?}"
+        );
+    }
+}

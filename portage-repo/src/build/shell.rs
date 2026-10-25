@@ -8,7 +8,7 @@ use brush_core::parser::ParserImpl;
 use brush_core::{
     ProfileLoadBehavior, RcLoadBehavior, Shell, ShellValue, ShellVariable, SourceInfo,
 };
-use portage_metadata::{Eapi, EbuildMetadata, Phase, SrcUriEntry};
+use portage_metadata::{Eapi, EbuildMetadata, Phase, RestrictExpr, SrcUriEntry};
 
 use super::commands;
 use super::commands::inherit;
@@ -2267,6 +2267,13 @@ impl EbuildShell {
         // split-usr` (live 2026-08-07, 27 packages under --prefix --target).
         self.die_flag.take();
 
+        if func_name == "src_test" && self.tests_restricted() {
+            self.run_string("einfo 'Skipping make test/check due to ebuild restriction.'")
+                .await
+                .ok();
+            return Ok(());
+        }
+
         self.source_bashrc_hooks(func_name).await?;
 
         self.call_phase_function(func_name).await
@@ -2291,6 +2298,31 @@ impl EbuildShell {
             && !up_to[..end]
                 .iter()
                 .any(|p| defined.split_whitespace().any(|d| d == *p))
+    }
+
+    /// Whether `RESTRICT=test` applies under the current USE, and `ALLOW_TEST`
+    /// does not lift it
+    fn tests_restricted(&self) -> bool {
+        let use_flags = self.get_var("USE").unwrap_or_default();
+        let enabled = |flag: &str| use_flags.split_whitespace().any(|u| u == flag);
+        let active = |var: &str| -> Vec<String> {
+            let value = self.get_var(var).unwrap_or_default();
+            let entries = RestrictExpr::parse(&value).unwrap_or_default();
+            RestrictExpr::active_tokens(&entries, &enabled)
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        if !active("RESTRICT").iter().any(|t| t == "test") {
+            return false;
+        }
+        let allow = self.get_var("ALLOW_TEST").unwrap_or_default();
+        let allows = |w: &str| allow.split_whitespace().any(|a| a == w);
+        let properties = active("PROPERTIES");
+        let has_property = |p: &str| properties.iter().any(|t| t == p);
+        !(allows("all")
+            || (has_property("test_network") && allows("network"))
+            || (has_property("test_privileged") && allows("privileged")))
     }
 
     /// Pre-parse every `.eclass` file in the shell's configured eclass directories

@@ -115,6 +115,37 @@ impl RestrictExpr {
             .collect()
     }
 
+    /// Tokens that apply when the USE flags for which `enabled` is true are set
+    ///
+    /// ```
+    /// use portage_metadata::RestrictExpr;
+    ///
+    /// let entries = RestrictExpr::parse("mirror !test? ( test )").unwrap();
+    /// assert_eq!(RestrictExpr::active_tokens(&entries, &|_| false), vec!["mirror", "test"]);
+    /// assert_eq!(RestrictExpr::active_tokens(&entries, &|f| f == "test"), vec!["mirror"]);
+    /// ```
+    pub fn active_tokens<'a>(
+        entries: &'a [RestrictExpr],
+        enabled: &dyn Fn(&str) -> bool,
+    ) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        for entry in entries {
+            match entry {
+                RestrictExpr::Token(t) => out.push(t.as_str()),
+                RestrictExpr::UseConditional {
+                    flag,
+                    negated,
+                    entries,
+                } => {
+                    if enabled(flag) != *negated {
+                        out.extend(Self::active_tokens(entries, enabled));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Whether `token` applies unconditionally. See [`Self::unconditional_tokens`]
     pub fn has_unconditional(entries: &[RestrictExpr], token: &str) -> bool {
         entries
