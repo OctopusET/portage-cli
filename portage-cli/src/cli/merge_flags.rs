@@ -223,6 +223,17 @@ impl MergeFlags {
     pub fn depclean_bdeps(&self) -> bool {
         self.with_bdeps != Some(YesNo::N)
     }
+
+    /// Turn on `--buildpkg`/`--getbinpkg` for the `buildpkg`/`getbinpkg` words of `FEATURES`
+    pub fn apply_features(&mut self, features: &str) {
+        for feature in features.split_whitespace() {
+            match feature {
+                "buildpkg" => self.buildpkg = true,
+                "getbinpkg" => self.getbinpkg = true,
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +270,13 @@ mod tests {
         };
         assert!(!off.install_bdeps());
         assert!(!off.depclean_bdeps());
+    }
+
+    #[test]
+    fn features_buildpkg_live_does_not_imply_buildpkg() {
+        let mut flags = MergeFlags::default();
+        flags.apply_features("buildpkg-live");
+        assert!(!flags.buildpkg);
     }
 
     #[test]
