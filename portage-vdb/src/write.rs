@@ -68,6 +68,12 @@ pub struct MergeSpec {
     pub ldflags: Option<String>,
     /// Rust compiler flags (RUSTFLAGS)
     pub rustflags: Option<String>,
+    /// C compiler (CC)
+    pub cc: Option<String>,
+    /// C++ compiler (CXX)
+    pub cxx: Option<String>,
+    /// `REPO_REVISIONS`: JSON map of repository name to its head commit
+    pub repo_revisions: Option<String>,
     /// Legacy `NEEDED` lines (`<path> <needed,comma>`)
     pub needed: Vec<String>,
     /// `NEEDED.ELF.2` lines
@@ -219,6 +225,9 @@ impl Vdb {
         write_opt!("CXXFLAGS", spec.cxxflags);
         write_opt!("LDFLAGS", spec.ldflags);
         write_opt!("RUSTFLAGS", spec.rustflags);
+        write_opt!("CC", spec.cc);
+        write_opt!("CXX", spec.cxx);
+        write_opt!("REPO_REVISIONS", spec.repo_revisions);
 
         // PF is the package's full name-version (the VDB dir basename); portage
         // always records it.
@@ -427,6 +436,9 @@ mod tests {
             cxxflags: None,
             ldflags: None,
             rustflags: None,
+            cc: None,
+            cxx: None,
+            repo_revisions: None,
             needed: vec![],
             needed_elf2: vec![],
             requires: vec![],

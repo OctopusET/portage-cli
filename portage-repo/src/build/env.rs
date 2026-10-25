@@ -64,6 +64,12 @@ pub struct EbuildEnv {
     pub ldflags: Option<String>,
     /// Rust compiler flags (RUSTFLAGS), or `None`
     pub rustflags: Option<String>,
+    /// C compiler (CC), or `None`
+    pub cc: Option<String>,
+    /// C++ compiler (CXX), or `None`
+    pub cxx: Option<String>,
+    /// `PORTAGE_REPO_REVISIONS`: JSON map of repository name to its head commit, or `None`
+    pub repo_revisions: Option<String>,
 }
 
 impl EbuildEnv {

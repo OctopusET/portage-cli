@@ -1354,6 +1354,12 @@ impl PackageSetup {
         if let Some(settings) = &settings {
             crate::settings::seed_build_shell(&mut shell, settings).await?;
         }
+        if let Some(revisions) = repo_revisions(&repo, repos_conf.as_ref()) {
+            shell
+                .run_string(&format!("export PORTAGE_REPO_REVISIONS='{revisions}'"))
+                .await
+                .context("setting PORTAGE_REPO_REVISIONS")?;
+        }
 
         // Per-package build environment: `/etc/portage/package.env` maps this package
         // to env files under `/etc/portage/env/`, sourced on top of `make.conf` so
@@ -3595,6 +3601,9 @@ fn merge_spec_from_env(
         cxxflags: env.cxxflags,
         ldflags: env.ldflags,
         rustflags: env.rustflags,
+        cc: env.cc,
+        cxx: env.cxx,
+        repo_revisions: env.repo_revisions,
         needed: elf.needed,
         needed_elf2: elf.needed_elf2,
         requires: elf.requires,
@@ -3604,6 +3613,28 @@ fn merge_spec_from_env(
         size,
         counter,
     }
+}
+
+/// `PORTAGE_REPO_REVISIONS` for a repository synced with git: `{"<name>": "<HEAD commit>"}`
+fn repo_revisions(repo: &Repository, repos_conf: Option<&ReposConf>) -> Option<String> {
+    let name = repo.name();
+    let entry = repos_conf?.find(name.as_str())?;
+    if entry.sync_type.as_deref() != Some("git") {
+        return None;
+    }
+    // The tree is often owned by another user than the one building.
+    let out = std::process::Command::new("git")
+        .arg("-c")
+        .arg(format!("safe.directory={}", repo.path()))
+        .arg("-C")
+        .arg(repo.path())
+        .args(["rev-parse", "HEAD"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let head = String::from_utf8(out.stdout).ok()?;
+    Some(format!("{{\"{name}\": \"{}\"}}", head.trim()))
 }
 
 fn vdb_root_for(root: &Utf8Path) -> Utf8PathBuf {

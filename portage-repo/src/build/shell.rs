@@ -2463,6 +2463,9 @@ impl EbuildShell {
             cxxflags: get_opt("CXXFLAGS"),
             ldflags: get_opt("LDFLAGS"),
             rustflags: get_opt("RUSTFLAGS"),
+            cc: get_opt("CC"),
+            cxx: get_opt("CXX"),
+            repo_revisions: get_opt("PORTAGE_REPO_REVISIONS"),
         }
     }
 
