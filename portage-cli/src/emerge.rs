@@ -1411,14 +1411,15 @@ pub(crate) async fn run_unmerge_batch(
         println!(">>> Quitting.");
         return Ok(());
     }
-    execute_unmerge_batch(cli, vdb, packages, exclude, verb, gerund).await
+    execute_unmerge_batch(cli, vdb, packages, exclude, verb, gerund, true).await
 }
 
 /// Disk-mutating half of [`run_unmerge_batch`]: profile-env'd shell, one
 /// preserve-libs graph for the batch, per-package removal, `env-update`.
 ///
 /// No `--pretend`/`--ask` — callers that already confirmed (blocker unmerge
-/// during a real merge) use this directly.
+/// during a real merge) use this directly. `clean_world` drops the world entries a
+/// removal leaves matching nothing; a blocker unmerge keeps them for the replacement.
 async fn execute_unmerge_batch(
     cli: &cli::Cli,
     vdb: &portage_vdb::Vdb,
@@ -1426,6 +1427,7 @@ async fn execute_unmerge_batch(
     exclude: &std::collections::HashSet<portage_atom::Cpv>,
     verb: &str,
     gerund: &str,
+    clean_world: bool,
 ) -> Result<()> {
     let roots = cli.roots();
     let root = roots.merge_root().to_owned();
@@ -1491,6 +1493,10 @@ async fn execute_unmerge_batch(
             crate::style::error_line!("failed to {verb} {pkg}: {e:#}");
             failures += 1;
             continue;
+        }
+        if clean_world && let Err(e) = maint::world::clean_package(Some(&root), vdb, &pkg.cpv().cpn)
+        {
+            crate::style::warn_line!("could not update the world file: {e:#}");
         }
         println!(">>> {verb} success: {pkg}");
     }
@@ -1559,7 +1565,16 @@ async fn unmerge_blocker_victims(
     }
     let exclude: std::collections::HashSet<portage_atom::Cpv> =
         packages.iter().map(|p| p.cpv().clone()).collect();
-    execute_unmerge_batch(cli, &vdb, &packages, &exclude, "unmerge", "Unmerging").await
+    execute_unmerge_batch(
+        cli,
+        &vdb,
+        &packages,
+        &exclude,
+        "unmerge",
+        "Unmerging",
+        false,
+    )
+    .await
 }
 
 /// Unmerge one blocker victim at its computed position in the merge order
@@ -1576,7 +1591,16 @@ pub(crate) async fn unmerge_blocker_victim(cli: &cli::Cli, cpv: &portage_atom::C
     }
     let exclude: std::collections::HashSet<portage_atom::Cpv> =
         packages.iter().map(|p| p.cpv().clone()).collect();
-    execute_unmerge_batch(cli, &vdb, &packages, &exclude, "unmerge", "Unmerging").await
+    execute_unmerge_batch(
+        cli,
+        &vdb,
+        &packages,
+        &exclude,
+        "unmerge",
+        "Unmerging",
+        false,
+    )
+    .await
 }
 
 /// Resolve classified unmerge CPVs against the VDB. Missing entries are

@@ -392,6 +392,30 @@ pub fn remove_atoms(root: Option<&Utf8Path>, tokens: &[String]) -> Result<usize>
     Ok(world_removed + sets_removed)
 }
 
+/// Drop the world entries for `cpn` that no package installed in `vdb` still matches
+///
+/// Run after each unmerge, so removing one slot keeps the entries naming the slots still
+/// installed. Returns the lines removed.
+pub fn clean_package(root: Option<&Utf8Path>, vdb: &Vdb, cpn: &portage_atom::Cpn) -> Result<usize> {
+    let installed: Vec<_> = vdb
+        .category(cpn.category.as_ref())
+        .map(|c| {
+            c.packages()
+                .into_iter()
+                .filter(|p| p.cpv().cpn == *cpn)
+                .collect()
+        })
+        .unwrap_or_default();
+    remove_matching_lines(&world_path(root), |t| {
+        Dep::parse(t).is_ok_and(|d| {
+            d.cpn == *cpn
+                && !installed
+                    .iter()
+                    .any(|p| d.matches_cpv(p.cpv(), p.slot().ok().as_ref()))
+        })
+    })
+}
+
 /// Drop every non-blank, non-comment line of `path` for which `should_drop`
 /// is true, rewriting the file only when something actually changed — a
 /// missing `world_sets` (very common: most installs never register a
@@ -621,6 +645,26 @@ mod tests {
         remove_atoms(Some(&root), &["app-shells/bash".to_owned()]).unwrap();
 
         assert!(!world_sets_path(Some(&root)).exists());
+    }
+
+    #[test]
+    fn clean_package_keeps_entries_an_installed_slot_still_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
+        std::fs::write(
+            world_path(Some(&root)),
+            "app-misc/foo:1\napp-misc/foo:2\napp-misc/bar\n",
+        )
+        .unwrap();
+        let pkg = root.join("var/db/pkg/app-misc/foo-2.0");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("SLOT"), "2\n").unwrap();
+        let vdb = Vdb::open(root.join("var/db/pkg")).unwrap();
+
+        let cpn = portage_atom::Cpn::parse("app-misc/foo").unwrap();
+        assert_eq!(clean_package(Some(&root), &vdb, &cpn).unwrap(), 1);
+        assert_eq!(read_world(&root), "app-misc/foo:2\napp-misc/bar\n");
     }
 
     #[test]
