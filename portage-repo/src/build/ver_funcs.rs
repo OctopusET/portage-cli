@@ -12,6 +12,8 @@ use std::sync::OnceLock;
 use brush_core::builtins;
 use regex::Regex;
 
+use super::commands::die::DieFlag;
+
 // ── Version splitting ──────────────────────────────────────────────────────
 
 /// Split a version string into alternating (separator, component) pairs
@@ -525,31 +527,45 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for VerTestCommand {
             return Ok(brush_core::ExecutionResult::new(1));
         };
 
-        let result = match op {
-            "-eq" => ord == Ordering::Equal,
-            "-ne" => ord != Ordering::Equal,
-            "-lt" => ord == Ordering::Less,
-            "-le" => ord != Ordering::Greater,
-            "-gt" => ord == Ordering::Greater,
-            "-ge" => ord != Ordering::Less,
-            _ => unreachable!(),
-        };
-
+        let result = op_holds(op, ord).unwrap_or_default();
         Ok(brush_core::ExecutionResult::new(if result { 0 } else { 1 }))
     }
 }
 
+/// Whether `ord` (left compared to right) satisfies the `ver_test` operator
+/// `op`, or `None` for an unknown operator
+fn op_holds(op: &str, ord: Ordering) -> Option<bool> {
+    Some(match op {
+        "-eq" => ord == Ordering::Equal,
+        "-ne" => ord != Ordering::Equal,
+        "-lt" => ord == Ordering::Less,
+        "-le" => ord != Ordering::Greater,
+        "-gt" => ord == Ordering::Greater,
+        "-ge" => ord != Ordering::Less,
+        _ => return None,
+    })
+}
+
 // ── ver_replacing ─────────────────────────────────────────────────────────────
 
-/// `ver_replacing`  (PMS 12.3.14 / EAPI 9)
+/// `ver_replacing <op> <ver>`  (PMS 12.3.14, EAPI 9)
 ///
-/// Outputs the versions being replaced, one per line.  During metadata
-/// extraction no package is being replaced, so the output is always empty.
+/// Succeeds when any of `REPLACING_VERSIONS` compares to `ver` under `op`, as
+/// `ver_test` would. Only meaningful in `pkg_pretend`, `pkg_setup`,
+/// `pkg_preinst` and `pkg_postinst`.
 ///
 /// See [PMS 12.3.14](https://projects.gentoo.org/pms/9/pms.html#ver-funcs).
 #[derive(winnow_args::Args)]
-#[arg(disable_help_flag, disable_version_flag, disable_help_subcommand)]
-pub(crate) struct VerReplacingCommand {}
+#[arg(
+    disable_help_flag,
+    disable_version_flag,
+    disable_help_subcommand,
+    unknown_flags = "value"
+)]
+pub(crate) struct VerReplacingCommand {
+    #[arg(positional, stop_flags, double_dash = "preserve")]
+    args: Vec<String>,
+}
 
 brush_winnow_args_adapter::impl_parse_args!(VerReplacingCommand);
 
@@ -558,10 +574,43 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for VerReplacingComm
 
     async fn execute(
         self,
-        _context: brush_core::ExecutionContext<'_, SE>,
+        context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        // No package is being replaced during metadata extraction.
-        Ok(brush_core::ExecutionResult::new(0))
+        let die_flag = context.shell.builtin_state::<DieFlag>().cloned();
+        let shell = context.shell;
+        let die = |shell: &mut brush_core::Shell<SE>, msg: String| {
+            if let Some(flag) = &die_flag {
+                flag.raise(&msg);
+            }
+            let _ = writeln!(context.params.stderr(shell), "die: {msg}");
+            Ok(brush_core::ExecutionResult::new(1))
+        };
+        let phase = shell.env_str("EBUILD_PHASE").unwrap_or_default();
+        if !matches!(&*phase, "pretend" | "setup" | "preinst" | "postinst") {
+            let msg = format!("ver_replacing is meaningless in the {phase} phase");
+            return die(shell, msg);
+        }
+        let [op, ver] = self.args.as_slice() else {
+            return die(shell, "usage: ver_replacing <op> <ver>".to_string());
+        };
+        let replacing = shell
+            .env_str("REPLACING_VERSIONS")
+            .unwrap_or_default()
+            .into_owned();
+        for v in replacing.split_whitespace() {
+            let Some(ord) = ver_compare(v, ver) else {
+                return die(
+                    shell,
+                    format!("ver_replacing: invalid version: {v} or {ver}"),
+                );
+            };
+            match op_holds(op, ord) {
+                Some(true) => return Ok(brush_core::ExecutionResult::success()),
+                Some(false) => {}
+                None => return die(shell, format!("ver_replacing: invalid operator: {op}")),
+            }
+        }
+        Ok(brush_core::ExecutionResult::new(1))
     }
 }
 

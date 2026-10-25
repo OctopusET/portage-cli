@@ -2758,3 +2758,29 @@ async fn restrict_test_skips_src_test_under_the_current_use() {
         );
     }
 }
+
+#[tokio::test]
+async fn ver_replacing_tests_each_replaced_version() {
+    let dir = tempdir().unwrap();
+    let body = "pkg_setup() {\n\
+                ver_replacing -lt 2 && export EM_LT=1\n\
+                ver_replacing -gt 3 || export EM_NOT_GT=1\n\
+                }\nsrc_compile() { ver_replacing -lt 2; }\n";
+    let (repo, ebuild) = phase_repo(dir.path(), body);
+    let mut shell = repo.shell().await.unwrap();
+    shell.preset_var("REPLACING_VERSIONS", "1.5 3");
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "setup", &work, Path::new("/"))
+        .await
+        .unwrap();
+    assert!(shell.get_var("EM_LT").is_some());
+    assert!(shell.get_var("EM_NOT_GT").is_some());
+
+    std::fs::create_dir_all(work.join("work/pkg-1")).unwrap();
+    let err = shell
+        .run_phase(&ebuild, "compile", &work, Path::new("/"))
+        .await
+        .expect_err("ver_replacing dies outside pkg_pretend/setup/preinst/postinst");
+    assert!(format!("{err}").contains("meaningless"), "{err}");
+}

@@ -719,8 +719,6 @@ impl EbuildShell {
             "ver_test",
             brush_core::builtins::Registration::of::<ver_funcs::VerTestCommand>(),
         );
-        // ver_replacing (EAPI 9): outputs versions being replaced; always
-        // empty during metadata extraction.
         shell.builtins_mut().register(
             "ver_replacing",
             brush_core::builtins::Registration::of::<ver_funcs::VerReplacingCommand>(),
