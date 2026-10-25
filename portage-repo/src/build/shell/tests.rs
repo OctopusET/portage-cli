@@ -2537,3 +2537,25 @@ async fn a_restored_phase_keeps_s_and_fills_it_when_unset() {
         Some(expected.to_str().unwrap())
     );
 }
+
+#[tokio::test]
+async fn defined_phases_ignore_wired_default_phases() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    let ebuild_path = write_ebuild_with_plain_iuse_eclass(&repo_path);
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    let ebuild = Ebuild::from_path(&ebuild_path).unwrap();
+    let work = dir.path().join("work");
+    for phase in ["setup", "unpack", "prepare", "configure", "compile"] {
+        shell
+            .run_phase(&ebuild, phase, &work, std::path::Path::new("/"))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(shell.collect_env().defined_phases, ["setup"]);
+}

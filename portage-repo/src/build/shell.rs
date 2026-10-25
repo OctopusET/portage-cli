@@ -1535,6 +1535,7 @@ impl EbuildShell {
         // (the authoritative source per PMS 7.3.1)
         let mut metadata = self.extract_metadata()?;
         metadata.eapi = eapi;
+        self.export_defined_phases(&metadata.defined_phases);
 
         // CacheEntry::parse derives `inherited` from `_eclasses_`, which doesn't
         // exist yet during regen. Read the transitive list directly from the
@@ -2199,6 +2200,8 @@ impl EbuildShell {
 
             self.phase_sourced_ebuild = Some(ebuild.path().to_path_buf());
             self.apply_iuse_effective();
+            let phases = self.sourced_phases();
+            self.export_defined_phases(&phases);
         }
 
         // Compute $A from $SRC_URI for the active USE flag set.
@@ -2430,18 +2433,7 @@ impl EbuildShell {
             bdepend: get_opt("BDEPEND"),
             pdepend: get_opt("PDEPEND"),
             idepend: get_opt("IDEPEND"),
-            // DEFINED_PHASES is computed by portage (not set by the ebuild) — derive
-            // it from which phase functions the sourced ebuild defines (PMS 7.4),
-            // matching the metadata path's computation.
-            defined_phases: {
-                let mut p: Vec<String> = PHASE_FUNCTIONS
-                    .iter()
-                    .filter(|(name, _)| self.shell.funcs().get(name).is_some())
-                    .map(|(_, phase)| phase.as_str().to_owned())
-                    .collect();
-                p.sort();
-                p
-            },
+            defined_phases: split("DEFINED_PHASES"),
             // The repo name lives in `<repo>/profiles/repo_name`, not a shell var.
             repository: std::fs::read_to_string(
                 self.repo_path.join("profiles/repo_name").as_std_path(),
@@ -2640,19 +2632,32 @@ impl EbuildShell {
             pairs.iter().map(|(k, v)| (*k, v.as_ref())),
         )?;
 
-        // Compute DEFINED_PHASES by inspecting which phase functions are
-        // defined in the shell after sourcing (PMS 7.4).
-        let mut defined_phases: Vec<Phase> = PHASE_FUNCTIONS
+        let mut metadata = entry.metadata;
+        metadata.defined_phases = self.sourced_phases();
+        Ok(metadata)
+    }
+
+    /// The phase functions defined right after sourcing (PMS 7.4), sorted by short name
+    ///
+    /// Only meaningful before a phase runs: running one wires default
+    /// implementations under the same function names.
+    fn sourced_phases(&self) -> Vec<Phase> {
+        let mut phases: Vec<Phase> = PHASE_FUNCTIONS
             .iter()
             .filter(|(name, _)| self.shell.funcs().get(name).is_some())
             .map(|(_, phase)| *phase)
             .collect();
-        // Sort alphabetically by short name to match Portage's cache format.
-        defined_phases.sort_by_key(|p| p.as_str());
+        phases.sort_by_key(|p| p.as_str());
+        phases
+    }
 
-        let mut metadata = entry.metadata;
-        metadata.defined_phases = defined_phases;
-        Ok(metadata)
+    /// Export `DEFINED_PHASES` for the just-sourced ebuild, as portage does
+    fn export_defined_phases(&mut self, phases: &[Phase]) {
+        let names: Vec<&str> = phases.iter().map(|p| p.as_str()).collect();
+        self.set_var("DEFINED_PHASES", &names.join(" "));
+        if let Some(mut var) = self.shell.env_mut().get_mut("DEFINED_PHASES") {
+            var.base_var_mut().export();
+        }
     }
 }
 
