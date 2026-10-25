@@ -183,8 +183,11 @@ impl Fetcher {
         // Send a User-Agent: some mirrors (e.g. freedesktop.org's Apache)
         // return HTTP 403 for requests with an empty/missing UA, mirroring how
         // portage's default wget/curl FETCHCOMMAND always identifies itself.
+        // Idle timeouts, not a whole-request one, so large downloads are not capped; 60s as wget's `-T 60`.
         let client = reqwest::Client::builder()
             .user_agent(concat!("em/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(60))
+            .read_timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
