@@ -419,34 +419,29 @@ impl Version {
 
     /// Check whether this version matches a glob pattern (PMS 8.3.1 `=V*`)
     ///
-    /// Truncates this version to the number of numeric components in
-    /// `pattern` and requires PMS component equality on that prefix. A
-    /// candidate with *fewer* components than the pattern does **not** match
-    /// (no zero-padding). If `pattern` specifies a letter, the candidate must
-    /// match it exactly. Candidate suffixes and revision are ignored.
+    /// The written version (revision included) must start with the pattern's,
+    /// ending on a part boundary: `1*` matches `1.5`, `1_rc1` and `1a`, never `10`.
+    /// Leading zeros of the first component are ignored, as for comparison.
     pub fn glob_matches(&self, pattern: &Version) -> bool {
-        let n = pattern.numbers.len().max(pattern.digits.len());
-        let cand_n = self.numbers.len().max(self.digits.len());
-        if cand_n < n {
+        let cand = self.written();
+        let pat = pattern.written();
+        let (cand, pat) = (strip_leading_zeros(&cand), strip_leading_zeros(&pat));
+        let Some(rest) = cand.strip_prefix(pat) else {
             return false;
+        };
+        let Some(next) = rest.chars().next() else {
+            return true;
+        };
+        let last_is_digit = pat.ends_with(|c: char| c.is_ascii_digit());
+        matches!(next, '.' | '_' | '-') || last_is_digit != next.is_ascii_digit()
+    }
+
+    /// The version as written: the parsed string, or the rendering of a built one
+    fn written(&self) -> std::borrow::Cow<'_, str> {
+        match &self.raw {
+            Some(raw) => std::borrow::Cow::Borrowed(raw.as_str()),
+            None => std::borrow::Cow::Owned(self.to_string()),
         }
-        for i in 0..n {
-            let Some(a) = component_digits(self, i) else {
-                return false;
-            };
-            let Some(b) = component_digits(pattern, i) else {
-                return false;
-            };
-            if cmp_component(i, a.as_ref(), b.as_ref()) != Ordering::Equal {
-                return false;
-            }
-        }
-        if let Some(pattern_letter) = pattern.letter
-            && self.letter.unwrap_or('\0') != pattern_letter
-        {
-            return false;
-        }
-        true
     }
 
     /// Whether this is a live (VCS/snapshot-tracking) version per Gentoo's
@@ -545,8 +540,7 @@ impl Version {
 
     /// Version with suffixes and revision removed.
     ///
-    /// Numeric components and the letter stay. `=V*` matching is
-    /// [`Self::glob_matches`], which keeps only the pattern's numeric prefix.
+    /// Numeric components and the letter stay.
     pub fn without_suffix(&self) -> Self {
         Version {
             numbers: self.numbers.clone(),
@@ -604,6 +598,16 @@ impl Ord for Version {
             Ordering::Equal => self.revision.cmp(&other.revision),
             ordering => ordering,
         }
+    }
+}
+
+/// `s` without the first component's leading zeros, keeping one `0` if nothing numeric follows
+fn strip_leading_zeros(s: &str) -> &str {
+    let trimmed = s.trim_start_matches('0');
+    if trimmed.starts_with(|c: char| c.is_ascii_digit()) || trimmed.len() == s.len() {
+        trimmed
+    } else {
+        &s[s.len() - trimmed.len() - 1..]
     }
 }
 
@@ -1109,12 +1113,30 @@ mod tests {
         assert!(Version::parse("1.0.1").unwrap().glob_matches(&pattern));
         assert!(Version::parse("1.0_alpha").unwrap().glob_matches(&pattern));
         assert!(!Version::parse("1.1").unwrap().glob_matches(&pattern));
-        // Leading-zero string mode on the truncated prefix.
-        assert!(
-            Version::parse("1.010.5")
+        assert!(!Version::parse("1.00").unwrap().glob_matches(&pattern));
+    }
+
+    #[test]
+    fn glob_matches_written_prefix_on_part_boundary() {
+        let m = |cand: &str, pat: &str| {
+            Version::parse(cand)
                 .unwrap()
-                .glob_matches(&Version::parse("1.01").unwrap())
-        );
+                .glob_matches(&Version::parse(pat).unwrap())
+        };
+        assert!(!m("1.2", "1.2_rc"));
+        assert!(m("1.2_rc1", "1.2_rc"));
+        assert!(!m("1.2.5", "1.2_rc"));
+        assert!(m("1.2-r1", "1.2-r1"));
+        assert!(!m("1.2-r2", "1.2-r1"));
+        assert!(!m("1.2-r10", "1.2-r1"));
+        assert!(m("2_rc1", "2"));
+        assert!(!m("20", "2"));
+        assert!(m("2a", "2"));
+        assert!(!m("1.010.5", "1.01"));
+        assert!(m("01.5", "1"));
+        assert!(m("1.5", "001"));
+        assert!(m("0.5", "00"));
+        assert!(!m("1.5", "0"));
     }
 
     #[test]
