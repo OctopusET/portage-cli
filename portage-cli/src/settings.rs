@@ -155,6 +155,7 @@ pub(crate) async fn load(cli: &Cli) -> Result<Option<Arc<Settings>>> {
 const SEEDED: &[&str] = &[
     "CONFIG_PROTECT",
     "CONFIG_PROTECT_MASK",
+    "FEATURES",
     "GENTOO_MIRRORS",
     "PORTAGE_ELOG_CLASSES",
     "PORTAGE_ELOG_SYSTEM",
