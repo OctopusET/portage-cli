@@ -83,6 +83,13 @@ impl LayoutConf {
             Err(e) => Err(util::io_err(&path, e)),
         }
     }
+
+    /// Whether a distfile with no Manifest `DIST` entry may be used: any `use-manifests` but `strict` (the default)
+    pub fn allow_missing_manifest(&self) -> bool {
+        self.properties
+            .get("use-manifests")
+            .is_some_and(|v| !v.eq_ignore_ascii_case("strict"))
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +105,7 @@ thin-manifests = true
 sign-manifests = false
 cache-formats = md5-dict
 profile-formats = portage-2
+use-manifests = false
 "#;
         let layout = LayoutConf::parse(input).unwrap();
         assert_eq!(layout.masters, vec!["gentoo"]);
@@ -105,6 +113,7 @@ profile-formats = portage-2
         assert!(!layout.sign_manifests);
         assert_eq!(layout.cache_formats, vec!["md5-dict"]);
         assert_eq!(layout.profile_formats, vec!["portage-2"]);
+        assert!(layout.allow_missing_manifest());
     }
 
     #[test]
@@ -129,6 +138,7 @@ profile-formats = portage-2
         assert!(!layout.thin_manifests);
         assert!(layout.sign_manifests);
         assert!(layout.cache_formats.is_empty());
+        assert!(!layout.allow_missing_manifest());
     }
 
     #[test]

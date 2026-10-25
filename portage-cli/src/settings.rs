@@ -180,6 +180,7 @@ const HONOURED_FEATURES: &[&str] = &[
     "binpkg-request-signature",
     "binpkg-signing",
     "buildpkg",
+    "digest",
     "keeptemp",
     "keepwork",
     "noclean",
