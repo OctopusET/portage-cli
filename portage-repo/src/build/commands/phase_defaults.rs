@@ -701,22 +701,139 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapiSrcPrepare8C
     }
 }
 
-/// `eapply_user` — no user patch directory support (yet); a no-op is a
-/// conforming implementation (PMS only requires it be safe to call).
+/// `eapply_user`  (PMS 12.3.8, EAPI &ge; 6)
+///
+/// Applies the `*.patch`/`*.diff` files under
+/// `${PORTAGE_CONFIGROOT}/etc/portage/patches/${CATEGORY}/`, once per build. See
+/// [`user_patches`] for how the directories combine.
 #[derive(winnow_args::Args)]
 #[arg(disable_help_flag, disable_version_flag, disable_help_subcommand)]
 pub(crate) struct EapplyUserCommand;
 
 brush_winnow_args_adapter::impl_parse_args!(EapplyUserCommand);
 
+/// The user patches for a package, in application (basename) order
+///
+/// Directories are read from least to most specific: `PN`, `P`, `P-PR`, each
+/// also with a `:SLOT` suffix. A later directory's file replaces a same-named
+/// earlier one, and an empty one (e.g. a `/dev/null` symlink) drops it.
+fn user_patches(
+    basedir: &Path,
+    category: &str,
+    names: [&str; 3],
+    slot: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut by_name = std::collections::BTreeMap::new();
+    for name in names {
+        for dir in [name.to_string(), format!("{name}:{slot}")] {
+            let dir = basedir.join(category).join(dir);
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) if dir.symlink_metadata().is_err() => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "eapply_user: {} exists but can't be read as a directory: {e}",
+                        dir.display()
+                    ));
+                }
+            };
+            for entry in entries.flatten() {
+                let Ok(file) = entry.file_name().into_string() else {
+                    continue;
+                };
+                if !(file.ends_with(".patch") || file.ends_with(".diff")) {
+                    continue;
+                }
+                let path = entry.path();
+                if path.metadata().is_ok_and(|m| m.len() > 0) {
+                    by_name.insert(file, path);
+                } else {
+                    by_name.remove(&file);
+                }
+            }
+        }
+    }
+    Ok(by_name.into_values().collect())
+}
+
 impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapplyUserCommand {
     type Error = brush_core::Error;
 
     async fn execute(
         self,
-        _context: brush_core::ExecutionContext<'_, SE>,
+        context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        Ok(brush_core::ExecutionResult::success())
+        let die_flag = context.shell.builtin_state::<DieFlag>().cloned();
+        let shell = context.shell;
+        let var = |name: &str| {
+            shell
+                .env_str(name)
+                .map(|s| s.into_owned())
+                .unwrap_or_default()
+        };
+        let phase = var("EBUILD_PHASE");
+        if phase != "prepare" {
+            let msg = format!("eapply_user called during invalid phase: {phase}");
+            die_now(&context.params, die_flag.as_ref(), shell, &msg);
+            return Ok(brush_core::ExecutionResult::new(1));
+        }
+        // A marker in ${T}, so the once-per-build rule also holds across the
+        // separate processes a `--jobs` build runs its phases in.
+        let tag = Path::new(&var("T")).join(".eapply_user_done");
+        if tag.exists() {
+            return Ok(brush_core::ExecutionResult::success());
+        }
+        let _ = std::fs::write(&tag, "");
+
+        let basedir = format!(
+            "{}/etc/portage/patches",
+            var("PORTAGE_CONFIGROOT").trim_end_matches('/')
+        );
+        let (pn, p) = (var("PN"), var("P"));
+        let p_pr = format!("{p}-{}", var("PR"));
+        let slot = var("SLOT");
+        let slot = slot.split('/').next().unwrap_or_default();
+        let found = user_patches(
+            Path::new(&basedir),
+            &var("CATEGORY"),
+            [&pn, &p, &p_pr],
+            slot,
+        );
+        let patches = match found {
+            Ok(patches) => patches,
+            Err(msg) => {
+                die_now(&context.params, die_flag.as_ref(), shell, &msg);
+                return Ok(brush_core::ExecutionResult::new(1));
+            }
+        };
+        if patches.is_empty() {
+            return Ok(brush_core::ExecutionResult::success());
+        }
+
+        let source_info = brush_core::SourceInfo::from("eapply_user");
+        let banner = format!("Applying user patches from {basedir} ...");
+        shell
+            .run_string(
+                format!("einfo {}", shell_quote(&banner)),
+                &source_info,
+                &context.params,
+            )
+            .await?;
+        let paths = patches.iter().map(|p| p.to_string_lossy());
+        let script = format!("eapply -- {}", quoted_args(paths));
+        let result = shell
+            .run_string(script, &source_info, &context.params)
+            .await?;
+        if result.exit_code.is_success() {
+            shell
+                .run_string(
+                    "einfo 'User patches applied.'",
+                    &source_info,
+                    &context.params,
+                )
+                .await?;
+        }
+        Ok(result)
     }
 }
 

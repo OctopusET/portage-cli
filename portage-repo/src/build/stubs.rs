@@ -70,7 +70,6 @@ debug-print-section()  { :; }
 # registers a real Rust no-op builtin for metadata mode instead, so there
 # is nothing for the real builtin to ever get shadowed by.
 
-eapply_user() { :; }
 default() { :; }
 default_src_unpack()    { :; }
 default_src_prepare()   { :; }

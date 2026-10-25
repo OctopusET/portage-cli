@@ -2635,3 +2635,61 @@ async fn defined_phases_ignore_wired_default_phases() {
 
     assert_eq!(shell.collect_env().defined_phases, ["setup"]);
 }
+
+/// A one-ebuild repo under `dir` holding `cat/pkg/pkg-1.ebuild` with `body`.
+fn phase_repo(dir: &std::path::Path, body: &str) -> (Repository, Ebuild) {
+    let repo_path = dir.join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let ebdir = repo_path.join("cat/pkg");
+    std::fs::create_dir_all(&ebdir).unwrap();
+    std::fs::write(
+        ebdir.join("pkg-1.ebuild"),
+        format!("DESCRIPTION=\"t\"\nSLOT=\"0/1\"\nLICENSE=\"MIT\"\n{body}"),
+    )
+    .unwrap();
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let ebuild =
+        Ebuild::from_path(camino::Utf8Path::from_path(&ebdir.join("pkg-1.ebuild")).unwrap())
+            .unwrap();
+    (repo, ebuild)
+}
+
+#[tokio::test]
+async fn eapply_user_applies_config_root_patches_once() {
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(
+        dir.path(),
+        "EAPI=8\nS=\"${WORKDIR}\"\nsrc_prepare() { default; eapply_user; }\n",
+    );
+    let patches = dir.path().join("config/etc/portage/patches/cat");
+    let creates = |name: &str| format!("--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+x\n");
+    for (sub, file, text) in [
+        ("pkg", "a.patch", creates("from-pn")),
+        ("pkg", "b.patch", creates("dropped")),
+        ("pkg-1-r0", "b.patch", String::new()),
+        ("pkg:0", "c.diff", creates("from-slot")),
+        ("pkg", "notes.txt", creates("ignored")),
+    ] {
+        std::fs::create_dir_all(patches.join(sub)).unwrap();
+        std::fs::write(patches.join(sub).join(file), text).unwrap();
+    }
+    let mut shell = repo.shell().await.unwrap();
+    let config = camino::Utf8PathBuf::from_path_buf(dir.path().join("config")).unwrap();
+    shell.set_build_roots(Some(&config), None, None, None, None);
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "prepare", &work, std::path::Path::new("/"))
+        .await
+        .expect("user patches apply, and the second eapply_user is a no-op");
+    let workdir = work.join("work");
+    assert!(workdir.join("from-pn").is_file());
+    assert!(workdir.join("from-slot").is_file());
+    assert!(!workdir.join("dropped").exists());
+    assert!(!workdir.join("ignored").exists());
+}
