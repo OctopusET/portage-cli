@@ -2591,3 +2591,25 @@ async fn econf_libdir_follows_the_ebuild_prefix() {
     assert!(sysroot < libdir && libdir < user, "{args:?}");
     assert_eq!(shell.get_var("CONF_PREFIX").as_deref(), Some("/opt/x"));
 }
+
+#[tokio::test]
+async fn phase_env_use_is_narrowed_to_iuse_effective() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    let ebuild_path = write_ebuild_with_plain_iuse_eclass(&repo_path);
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell.set_use_flags(&["foo", "unrelated"]).unwrap();
+    let ebuild = Ebuild::from_path(&ebuild_path).unwrap();
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+        .await
+        .unwrap();
+
+    assert_eq!(shell.get_var("USE").as_deref(), Some("foo"));
+    assert_eq!(shell.collect_env().use_flags, ["foo"]);
+}

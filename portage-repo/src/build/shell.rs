@@ -2360,6 +2360,10 @@ impl EbuildShell {
     }
 
     /// Set `IUSE_EFFECTIVE` from IUSE + profile implicit/expand values (PMS 11.1.1)
+    /// and narrow `USE` to it
+    ///
+    /// `USE` is rebuilt from the full configured set each call, so a shell reused
+    /// for another ebuild does not inherit the previous one's narrowing.
     ///
     /// Undefined during metadata generation; call this on the build-phase
     /// source path only.
@@ -2394,7 +2398,17 @@ impl EbuildShell {
             unprefixed,
             &values,
         );
-        let joined = set.into_iter().collect::<Vec<_>>().join(" ");
+        let use_str = if self.use_flags.is_empty() {
+            self.get_var("USE").unwrap_or_default()
+        } else {
+            self.use_flags_string()
+        };
+        let filtered: Vec<&str> = use_str
+            .split_whitespace()
+            .filter(|f| set.contains(*f))
+            .collect();
+        self.set_var("USE", &filtered.join(" "));
+        let joined = set.iter().map(String::as_str).collect::<Vec<_>>().join(" ");
         self.set_var("IUSE_EFFECTIVE", &joined);
     }
 
