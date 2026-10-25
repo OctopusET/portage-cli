@@ -2334,12 +2334,25 @@ fn reject_same_arch_target(tuple: &str, host: &str) -> Result<()> {
     Ok(())
 }
 
-/// The host `CHOST` (= the target's `CBUILD`), read from the host `make.conf`
+/// The host `CHOST` (= the target's `CBUILD`): the host `make.conf`, else the profile
+///
+/// Stage3 tarballs no longer set `CHOST` in `make.conf`; the arch profile's
+/// `make.defaults` carries it.
 fn host_chost() -> String {
     MakeConf::load_default()
         .ok()
         .and_then(|m| m.get("CHOST").map(str::to_owned))
+        .or_else(profile_chost)
         .unwrap_or_else(|| "unknown-host".to_owned())
+}
+
+/// `CHOST` from the host profile stack's `make.defaults`, the innermost profile winning
+fn profile_chost() -> Option<String> {
+    let stack = crate::settings::profile_stack(Utf8Path::new("/"), None).ok()??;
+    stack.profiles().iter().rev().find_map(|p| {
+        let path = Utf8PathBuf::from_path_buf(p.path().join("make.defaults")).ok()?;
+        MakeConf::load(&path).ok()?.get("CHOST").map(str::to_owned)
+    })
 }
 
 #[cfg(test)]
