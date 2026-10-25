@@ -2083,7 +2083,10 @@ async fn run_fetch(
     };
 
     let (fetch_cmd, resume_cmd) = read_fetch_commands(shell);
-    let config = FetchConfig::from_make_conf(fetch_cmd, resume_cmd);
+    let config = FetchConfig {
+        allow_missing_digests: allow_missing_digests(shell, repo),
+        ..FetchConfig::from_make_conf(fetch_cmd, resume_cmd)
+    };
     let ro_distdirs: Vec<Utf8PathBuf> = shell
         .get_var("PORTAGE_RO_DISTDIRS")
         .unwrap_or_default()
@@ -2164,6 +2167,17 @@ async fn run_fetch(
         bail!("one or more distfiles could not be fetched");
     }
     Ok(())
+}
+
+/// Whether a distfile with no `DIST` entry may be fetched unverified, as portage allows
+fn allow_missing_digests(shell: &portage_repo::EbuildShell, repo: &Repository) -> bool {
+    let features = shell.get_var("FEATURES").unwrap_or_default();
+    repo.layout()
+        .properties
+        .get("allow-missing-manifests")
+        .is_some_and(|v| v == "true")
+        || features.split_whitespace().any(|f| f == "digest")
+        || shell.get_var("EBUILD_SKIP_MANIFEST").as_deref() == Some("1")
 }
 
 /// Refuse the merge when another installed package owns one of `planned`'s paths

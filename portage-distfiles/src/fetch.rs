@@ -99,6 +99,11 @@ pub struct FetchConfig {
     /// mirror on every run would turn a "nothing to do" pass into a
     /// full-disk scan. Matches real `emirrordist`'s own default.
     pub trust_existing_size: bool,
+    /// Accept a distfile with no `DIST` entry, checking only that it is non-empty
+    ///
+    /// Default `true`. A package build sets it from the repo's `allow-missing-manifests`,
+    /// `FEATURES=digest` and `EBUILD_SKIP_MANIFEST`, refusing unverifiable files otherwise.
+    pub allow_missing_digests: bool,
 }
 
 impl Default for FetchConfig {
@@ -109,6 +114,7 @@ impl Default for FetchConfig {
             resume_command: None,
             max_concurrent: 4,
             trust_existing_size: false,
+            allow_missing_digests: true,
         }
     }
 }
@@ -225,6 +231,12 @@ impl Fetcher {
         let _lock = lock_distfile(&dest).await;
 
         let manifest_entry = digests.get(&df.filename);
+        if manifest_entry.is_none() && !self.config.allow_missing_digests {
+            return Err(Error::Verify {
+                filename: df.filename.clone(),
+                reason: "no DIST entry in the Manifest".to_owned(),
+            });
+        }
 
         // Fast path: already present and valid (writable dir first, then the
         // read-only locations).
@@ -237,9 +249,7 @@ impl Fetcher {
                 Some(entry) if self.config.trust_existing_size => {
                     dist_size(entry).is_some_and(|size| current_size(&candidate) == size)
                 }
-                Some(entry) => entry.verify_file(candidate.as_std_path()).is_ok(),
-                // No manifest entry to verify against — treat as present.
-                None => candidate.is_file(),
+                _ => verify_ok(manifest_entry, &candidate),
             };
             if !valid {
                 continue;
@@ -668,28 +678,36 @@ fn is_html(response: &reqwest::Response) -> bool {
         .unwrap_or(false)
 }
 
-/// Verify `dest` against the manifest if there is an entry; `true` when it passes
-/// (or there is nothing to check against).
-fn verify_ok(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> bool {
+/// Check `dest` against its `DIST` entry; with none, only a non-empty regular file passes
+fn check_distfile(
+    manifest_entry: Option<&ManifestEntry>,
+    dest: &Utf8Path,
+) -> std::result::Result<(), String> {
     match manifest_entry {
-        Some(entry) => entry.verify_file(dest.as_std_path()).is_ok(),
-        None => true,
+        Some(entry) => entry
+            .verify_file(dest.as_std_path())
+            .map_err(|e| e.to_string()),
+        None if std::fs::metadata(dest.as_std_path()).is_ok_and(|m| m.is_file() && m.len() > 0) => {
+            Ok(())
+        }
+        None => Err("empty file with no DIST entry to verify against".to_owned()),
     }
+}
+
+fn verify_ok(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> bool {
+    check_distfile(manifest_entry, dest).is_ok()
 }
 
 /// Verify `dest`; on failure delete it (so it can't be treated as a resumable
 /// partial later) and return the error.
 fn verify_or_discard(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> Result<()> {
-    if let Some(entry) = manifest_entry
-        && let Err(e) = entry.verify_file(dest.as_std_path())
-    {
+    check_distfile(manifest_entry, dest).map_err(|reason| {
         let _ = std::fs::remove_file(dest.as_std_path());
-        return Err(Error::Verify {
+        Error::Verify {
             filename: dest.file_name().unwrap_or("?").to_owned(),
-            reason: e.to_string(),
-        });
-    }
-    Ok(())
+            reason,
+        }
+    })
 }
 
 /// Stream a response body into `file` to completion, then flush
@@ -1033,6 +1051,45 @@ mod tests {
             matches!(err, Error::AllFailed { .. }),
             "fetch+ must attempt a download, not return FetchRestricted"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_dist_entry_is_refused_unless_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        std::fs::write(distdir.join("foo.tar.gz"), b"placed").unwrap();
+        let strict = FetchConfig {
+            allow_missing_digests: false,
+            ..Default::default()
+        };
+        let err = Fetcher::new(distdir.clone(), strict)
+            .fetch_distfile_digests(&one_url("foo.tar.gz"), &DistDigests::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Verify { .. }));
+
+        let status = Fetcher::new(distdir, FetchConfig::default())
+            .fetch_distfile_digests(&one_url("foo.tar.gz"), &DistDigests::new())
+            .await
+            .unwrap();
+        assert_eq!(status, FetchStatus::AlreadyPresent);
+    }
+
+    #[tokio::test]
+    async fn empty_unverified_file_is_not_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        std::fs::write(distdir.join("foo.tar.gz"), b"").unwrap();
+        let df = Distfile {
+            filename: "foo.tar.gz".to_string(),
+            urls: vec![],
+            restriction: None,
+        };
+        let err = Fetcher::new(distdir, FetchConfig::default())
+            .fetch_distfile_digests(&df, &DistDigests::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::AllFailed { .. }));
     }
 
     #[tokio::test]
