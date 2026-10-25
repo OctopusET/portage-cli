@@ -332,6 +332,9 @@ pub struct PortageDependencyProvider {
     pub(crate) kept_build_deps: bool,
     /// USE requirements the requested atoms name, checked after the solve as a dependency's are
     pub(crate) root_use_deps: Vec<convert::UseDepConstraint>,
+    /// An installed non-target package kept at its version lists its deps; off without `--deep`,
+    /// where emerge does not descend into a satisfied installed package
+    pub(crate) expand_kept: bool,
     /// Selective resolution without `--update`: an installed version that
     /// satisfies a root target is kept rather than replaced by the newest
     /// accepted one
@@ -766,6 +769,7 @@ impl PortageDependencyProvider {
             prefer_update: false,
             kept_build_deps: false,
             root_use_deps: Vec::new(),
+            expand_kept: true,
             selective_no_update: false,
             root_deps_rdeps: false,
             nodeps: false,
@@ -917,6 +921,11 @@ impl PortageDependencyProvider {
             use_deps,
             parent_cpn_str: Interned::intern(label),
         });
+    }
+
+    /// `--deep`: an installed non-target package kept at its version still lists its deps
+    pub fn set_expand_kept(&mut self, active: bool) {
+        self.expand_kept = active;
     }
 
     /// Selective resolution without `--update`: keep an installed version that

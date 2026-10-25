@@ -3908,3 +3908,53 @@ fn kept_build_deps_upgrade_a_kept_packages_build_tool() {
     assert_eq!(solve(true), Some(Version::parse("1.1").unwrap()));
     assert_eq!(solve(false), None);
 }
+
+// emerge without `--deep` does not descend into a satisfied installed package: a dep that only
+// the installed lib's current ebuild has stays out of the plan.
+#[test]
+fn kept_installed_dep_is_expanded_only_under_deep() {
+    let solve = |deep: bool| {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("net-libs/nghttp2-1.0").unwrap(),
+            None,
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("net-misc/curl-8.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (DepEntry::parse("net-libs/nghttp2").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/app-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (DepEntry::parse("net-misc/curl").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        provider.set_expand_kept(deep);
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::unslotted(Cpn::parse("net-misc/curl").unwrap()),
+            version: Version::parse("8.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+        let app = PortagePackage::unslotted(Cpn::parse("app-misc/app").unwrap());
+        let nghttp2 = PortagePackage::unslotted(Cpn::parse("net-libs/nghttp2").unwrap());
+        let solution = provider
+            .resolve_targets(vec![(app, PortageVersionSet::any())])
+            .unwrap();
+        solution.get(&nghttp2).cloned()
+    };
+    assert_eq!(solve(true), Some(Version::parse("1.0").unwrap()));
+    assert_eq!(solve(false), None);
+}

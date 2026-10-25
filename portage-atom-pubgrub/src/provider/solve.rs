@@ -346,17 +346,17 @@ impl PortageDependencyProvider {
             return Dependencies::Available(DependencyConstraints::default());
         }
 
-        // An installed package kept at its version lists its runtime deps, and its build deps only
-        // under `kept_build_deps`, as emerge does with `--with-bdeps` and `--deep`. `--emptytree`
-        // (`InstalledPolicy::Rebuild`) expands the full build-time closure instead.
+        // An installed package kept at its version lists its runtime deps only under
+        // `expand_kept` (`--deep`) or as a target, and its build deps only under `kept_build_deps`.
+        // `--emptytree` (`InstalledPolicy::Rebuild`) expands the full build-time closure instead.
         if let Some((inst, policy)) = self.installed.get(package)
             && inst == version
             && !matches!(policy, InstalledPolicy::Rebuild)
         {
-            // `package.provided`: no real VDB record backs this, so unlike a
-            // genuinely installed package there is nothing to trust past "the
-            // system claims this exists" — stop here, not even RDEPEND.
-            if matches!(policy, InstalledPolicy::Provided) {
+            // `package.provided` has no VDB record to trust past its existence, so no deps.
+            if matches!(policy, InstalledPolicy::Provided)
+                || (!self.expand_kept && !self.root_targets.contains_key(package))
+            {
                 return Dependencies::Available(DependencyConstraints::default());
             }
             if self.cross_active && package.merge_root() == MergeRoot::Target {
