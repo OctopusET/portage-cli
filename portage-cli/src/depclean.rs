@@ -22,8 +22,7 @@
 //! biased toward over-keeping, but coarser than the other
 //! simplifications: it can leave real orphans (an alternative branch's
 //! otherwise-unneeded package) un-removed where real depclean would
-//! clean them. No `-P`/`--prune`, no world-file `--deselect` side effect
-//! (the world file itself is never modified by this).
+//! clean them. No `-P`/`--prune`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -222,6 +221,21 @@ fn removal_order(cleanlist: &[InstalledPackage], with_bdeps: bool) -> Vec<Instal
         .collect()
 }
 
+/// The required-set seed of a targeted depclean: `@system` plus the sets `world_sets` names,
+/// without the `world` file atoms, so a selected target is removable (and then deselected).
+fn targeted_seed(
+    config_root: Option<&camino::Utf8Path>,
+    root: &camino::Utf8Path,
+) -> Result<Vec<Dep>> {
+    let mut atoms = crate::maint::world::resolve_set(config_root, root, "system")
+        .context("depclean: cannot read @system")?;
+    atoms.extend(
+        crate::maint::world::resolve_set(config_root, root, "selected-sets")
+            .context("depclean: cannot read @selected-sets")?,
+    );
+    Ok(atoms)
+}
+
 /// `-c`/`--depclean` / `em depclean [atoms]`: mirrors `emerge.rs::unmerge_atoms`'s
 /// own structure (root/shell setup, `-p`/`--ask` gating, preserve-libs
 /// reporting) but computes its own removal list instead of taking it from
@@ -255,11 +269,16 @@ pub async fn run_with_targets(
         bail!("depclean: no valid target atoms");
     }
     let with_bdeps = merge_flags.depclean_bdeps();
+    let seed_atoms = if target_atoms.is_empty() {
+        world_atoms
+    } else {
+        targeted_seed(roots.config(), &root)?
+    };
 
     let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
     let cleanlist = compute_cleanlist(
         &installed,
-        &world_atoms,
+        &seed_atoms,
         &exclude_atoms,
         &target_atoms,
         with_bdeps,
@@ -356,6 +375,29 @@ mod tests {
         let cleanlist = compute_cleanlist(&installed, &[], &[], &target, false);
         assert_eq!(cleanlist.len(), 1);
         assert_eq!(cleanlist[0].cpv().cpn.to_string(), "dev-libs/orphan");
+    }
+
+    #[test]
+    fn targeted_seed_keeps_system_and_world_sets_but_not_world_atoms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("etc/portage/make.profile/packages", "*sys-apps/base\n");
+        write("etc/portage/sets/extra", "dev-libs/inset\n");
+        write("var/lib/portage/world", "app-misc/top\n");
+        write("var/lib/portage/world_sets", "@extra\n");
+
+        let mut seed: Vec<String> = targeted_seed(Some(&root), &root)
+            .unwrap()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        seed.sort();
+        assert_eq!(seed, ["dev-libs/inset", "sys-apps/base"]);
     }
 
     #[test]
