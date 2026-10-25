@@ -34,8 +34,10 @@ pub enum ColorChoice {
     #[default]
     Auto,
     /// Always colour.
+    #[arg(alias("y", "yes"))]
     Always,
     /// Never colour.
+    #[arg(alias("n", "no"))]
     Never,
 }
 
@@ -656,6 +658,16 @@ mod tests {
     fn candidates(words: &[&str]) -> Vec<String> {
         let offered = winnow_args::complete::complete(Cli::HELP, words);
         offered.candidates.into_iter().map(|c| c.value).collect()
+    }
+
+    #[test]
+    fn color_accepts_emerge_y_and_n() {
+        assert_eq!(emerge(["--color=y", "foo"]).color, ColorChoice::Always);
+        assert_eq!(emerge(["--color", "n", "foo"]).color, ColorChoice::Never);
+        assert_eq!(
+            parse_cli(&["em", "--color", "never", "query", "list"]).color,
+            ColorChoice::Never
+        );
     }
 
     #[test]
