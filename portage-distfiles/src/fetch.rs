@@ -216,13 +216,8 @@ impl Fetcher {
     ) -> Result<FetchStatus> {
         let dest = self.distdir.join(&df.filename);
 
-        // Exclusive flock on `<dest>.lock` for the whole fetch (present-check
-        // included) — the same filename can be needed by two independent
-        // fetch calls at once (e.g. one package built for two different
-        // roots), and without this a "already present" check on one task can
-        // read a file the other is still writing. Matches portage's own
-        // FEATURES=distlocks; also serializes two separate em invocations
-        // sharing a DISTDIR, not just --jobs concurrency within one.
+        // Held for the whole fetch, present-check included, against other em tasks, em processes
+        // and emerge sharing this DISTDIR.
         let _lock = lock_distfile(&dest).await;
 
         let manifest_entry = digests.get(&df.filename);
@@ -595,32 +590,61 @@ fn dist_size(entry: &ManifestEntry) -> Option<u64> {
     }
 }
 
-/// A leftover file is a resumable partial only when its size is a *strict*
-/// prefix of the target: present, and smaller than the known manifest size.
+/// Exclusive fetch lock on a distfile; dropping it unlinks the lock file, then releases the lock
+struct DistLock {
+    path: Utf8PathBuf,
+    _file: std::fs::File,
+}
+
+impl Drop for DistLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.path.as_std_path());
+    }
+}
+
+/// Path of portage's distlocks lock file for `dest` (`.<name>.portage_lockfile` beside it)
+fn lock_path(dest: &Utf8Path) -> Utf8PathBuf {
+    let name = dest.file_name().unwrap_or("");
+    dest.with_file_name(format!(".{name}.portage_lockfile"))
+}
+
+/// Acquire the exclusive lock guarding `dest`, or `None` when it cannot be taken (read-only DISTDIR)
 ///
-/// Without a known size we never resume (a blind `Range` onto an unknown
-/// body is how a corrupt cache wedges every retry); a complete-but-wrong
-/// file (`>=` expected) is refetched fresh, not appended to.
-/// Acquire the exclusive flock guarding `dest`, released on drop.
-///
-/// The lock file (`<dest>.lock`) is separate from `dest` itself so a locker
-/// never has to touch the distfile's own contents to synchronize.
-async fn lock_distfile(dest: &Utf8Path) -> Option<std::fs::File> {
-    let path = format!("{dest}.lock");
+/// `flock` excludes other em tasks and processes; the POSIX record lock is the one portage's
+/// distlocks take, and the two kinds do not conflict on Linux.
+async fn lock_distfile(dest: &Utf8Path) -> Option<DistLock> {
+    let path = lock_path(dest);
     tokio::task::spawn_blocking(move || {
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive).ok()?;
-        Some(f)
+        loop {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path.as_std_path())
+                .ok()?;
+            rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive).ok()?;
+            let _ = rustix::fs::fcntl_lock(&f, rustix::fs::FlockOperation::LockExclusive);
+            // The previous holder unlinks the file before releasing it; retry on the new one.
+            let held = rustix::fs::fstat(&f).ok()?;
+            if let Ok(now) = rustix::fs::stat(path.as_std_path())
+                && (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino)
+            {
+                return Some(DistLock { path, _file: f });
+            }
+        }
     })
     .await
     .ok()
     .flatten()
 }
 
+/// A leftover file is a resumable partial only when its size is a *strict*
+/// prefix of the target: present, and smaller than the known manifest size.
+///
+/// Without a known size we never resume (a blind `Range` onto an unknown
+/// body is how a corrupt cache wedges every retry); a complete-but-wrong
+/// file (`>=` expected) is refetched fresh, not appended to.
 fn is_resumable(expected_size: Option<u64>, existing_size: u64) -> bool {
     matches!(expected_size, Some(exp) if existing_size > 0 && existing_size < exp)
 }
@@ -958,6 +982,10 @@ mod tests {
             acquired.is_some(),
             "second acquisition must succeed once the first releases"
         );
+        let lock_file = distdir.join(".foo.tar.gz.portage_lockfile");
+        assert!(lock_file.exists());
+        drop(acquired);
+        assert!(!lock_file.exists(), "the lock file is removed on release");
     }
 
     #[tokio::test]
