@@ -2,12 +2,12 @@
 //!
 //! Portage's `quickpkg(1)` builds a binary package from the live filesystem
 //! using the installed package's VDB `CONTENTS` (not a build image). Default
-//! behaviour skips `CONFIG_PROTECT` paths (security: live configs may hold
-//! secrets); `--include-config y` packs them, and `--include-unmodified-config y`
-//! re-includes protected files whose on-disk MD5 still matches CONTENTS.
+//! behaviour replaces `CONFIG_PROTECT` files with a placeholder (security: live
+//! configs may hold secrets); `--include-config y` packs them, and
+//! `--include-unmodified-config y` packs those whose on-disk MD5 still matches CONTENTS.
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -207,36 +207,14 @@ fn package_one(
         .tempdir()
         .context("creating quickpkg staging dir")?;
     let image_dir = staging.path().join("image");
-    std::fs::create_dir_all(&image_dir)?;
-
-    let mut excluded = Vec::new();
-    for entry in &contents {
-        if should_exclude_config(
-            entry,
-            protect,
-            include_config,
-            include_unmodified_config,
-            merge_root,
-        ) {
-            excluded.push(entry.path.clone());
-            continue;
-        }
-        stage_entry(entry, merge_root, &image_dir)?;
-    }
-
-    // Place a marker when config was omitted, matching portage's empty
-    // protect-file note (informational only; not required by GLEP 78).
-    if !excluded.is_empty() {
-        let note = image_dir.join(".quickpkg-config-omitted");
-        if let Some(parent) = note.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut f = std::fs::File::create(&note)?;
-        writeln!(
-            f,
-            "# empty file because --include-config=n when `em quickpkg` was used"
-        )?;
-    }
+    let excluded = stage_image(
+        &contents,
+        merge_root,
+        protect,
+        include_config,
+        include_unmodified_config,
+        &image_dir,
+    )?;
 
     let cat = pkg.category();
     let pf = pkg.pf().to_string();
@@ -262,6 +240,50 @@ fn package_one(
         .map(|m| m.len())
         .unwrap_or(0);
     Ok((out, size, excluded))
+}
+
+/// Stage `contents` from the live root into `image_dir`, returning the protected configs omitted
+fn stage_image(
+    contents: &[ContentsEntry],
+    merge_root: &Utf8Path,
+    protect: &ConfigProtectLists,
+    include_config: bool,
+    include_unmodified_config: bool,
+    image_dir: &std::path::Path,
+) -> Result<Vec<Utf8PathBuf>> {
+    std::fs::create_dir_all(image_dir)?;
+    std::fs::set_permissions(image_dir, std::fs::Permissions::from_mode(0o755))?;
+
+    let mut excluded = Vec::new();
+    let mut dirs = Vec::new();
+    for entry in contents {
+        if should_exclude_config(
+            entry,
+            protect,
+            include_config,
+            include_unmodified_config,
+            merge_root,
+        ) {
+            stage_placeholder(entry, merge_root, image_dir)?;
+            excluded.push(entry.path.clone());
+            continue;
+        }
+        if matches!(entry.kind, ContentsKind::Dir) {
+            dirs.push(entry);
+        }
+        stage_entry(entry, merge_root, image_dir)?;
+    }
+    // Deepest first, after every child is staged: a read-only mode would block staging into
+    // the dir, and staging a child resets its mtime.
+    dirs.sort_by(|a, b| b.path.cmp(&a.path));
+    for entry in dirs {
+        let rel = strip_root_prefix(&entry.path);
+        copy_metadata(
+            &live_path(merge_root, &entry.path),
+            &image_dir.join(rel.as_str()),
+        );
+    }
+    Ok(excluded)
 }
 
 fn should_exclude_config(
@@ -314,14 +336,11 @@ fn stage_entry(
                 crate::style::warn_line!("missing file (skipped): {src}");
                 return Ok(());
             }
-            // Prefer hardlink (cheap, preserves content); fall back to copy.
+            // Prefer hardlink (cheap, shares the live inode's metadata); fall back to copy.
             if std::fs::hard_link(src.as_std_path(), &dest).is_err() {
                 std::fs::copy(src.as_std_path(), &dest)
                     .with_context(|| format!("copy {src} -> {}", dest.display()))?;
-                // Preserve mode bits on the copy path only (hardlink shares them).
-                if let Ok(meta) = std::fs::metadata(src.as_std_path()) {
-                    let _ = std::fs::set_permissions(&dest, meta.permissions());
-                }
+                copy_metadata(&src, &dest);
             }
         }
         ContentsKind::Sym => {
@@ -354,6 +373,46 @@ fn stage_entry(
         }
     }
     Ok(())
+}
+
+/// Stage an omitted protected config as portage's one-line placeholder, keeping the live file's metadata
+fn stage_placeholder(
+    entry: &ContentsEntry,
+    merge_root: &Utf8Path,
+    image_dir: &std::path::Path,
+) -> Result<()> {
+    let src = live_path(merge_root, &entry.path);
+    if !src.is_file() {
+        return Ok(());
+    }
+    let dest = image_dir.join(strip_root_prefix(&entry.path).as_str());
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &dest,
+        "# empty file because --include-config=n when `quickpkg` was used\n",
+    )
+    .with_context(|| format!("writing {}", dest.display()))?;
+    copy_metadata(&src, &dest);
+    Ok(())
+}
+
+/// Best-effort copy of `src`'s owner, mode and mtime onto the staged `dest`
+///
+/// Owner first, since `chown` clears set-id bits. A non-root run cannot give away
+/// ownership, so the archive then records the invoking user, as an unprivileged tar would.
+fn copy_metadata(src: &Utf8Path, dest: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(src.as_std_path()) else {
+        return;
+    };
+    let _ = std::os::unix::fs::chown(dest, Some(meta.uid()), Some(meta.gid()));
+    let _ = std::fs::set_permissions(dest, meta.permissions());
+    if let Ok(mtime) = meta.modified()
+        && let Ok(f) = std::fs::File::open(dest)
+    {
+        let _ = f.set_modified(mtime);
+    }
 }
 
 fn live_path(merge_root: &Utf8Path, contents_path: &Utf8Path) -> Utf8PathBuf {
@@ -494,6 +553,50 @@ mod tests {
         let meta = portage_binpkg::read_metadata(out.as_std_path()).unwrap();
         assert_eq!(meta.get("CATEGORY").map(String::as_str), Some("app-misc"));
         assert_eq!(meta.get("PF").map(String::as_str), Some("hello-1.0"));
+    }
+
+    #[test]
+    fn stage_image_keeps_dir_metadata_and_placeholders_protected_configs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().join("root")).unwrap();
+        let state = root.join("var/lib/foo");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(root.join("etc/foo.conf"), "secret=1\n").unwrap();
+        std::fs::set_permissions(
+            root.join("etc/foo.conf"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::open(&state)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let contents = ContentsEntry::parse(
+            "dir /etc\nobj /etc/foo.conf 0 0\ndir /var\ndir /var/lib\ndir /var/lib/foo\n",
+        );
+        let protect = ConfigProtectLists {
+            protect: vec!["/etc".into()],
+            mask: vec![],
+        };
+        let image = tmp.path().join("image");
+        let excluded = stage_image(&contents, &root, &protect, false, false, &image).unwrap();
+
+        assert_eq!(excluded, vec![Utf8PathBuf::from("/etc/foo.conf")]);
+        let conf = image.join("etc/foo.conf");
+        assert!(
+            std::fs::read_to_string(&conf)
+                .unwrap()
+                .starts_with("# empty file")
+        );
+        assert_eq!(std::fs::metadata(&conf).unwrap().mode() & 0o7777, 0o640);
+        let staged = std::fs::metadata(image.join("var/lib/foo")).unwrap();
+        assert_eq!(staged.mode() & 0o7777, 0o750);
+        assert_eq!(staged.modified().unwrap(), old);
+        assert!(!image.join(".quickpkg-config-omitted").exists());
     }
 
     #[test]
