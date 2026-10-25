@@ -33,6 +33,11 @@ impl MultilibEnv {
             .unwrap_or(&self.default_abi)
     }
 
+    /// More than one active ABI: crossdev's `MULTILIB_USE`
+    pub fn is_multilib(&self) -> bool {
+        self.multilib_abis.split_whitespace().nth(1).is_some()
+    }
+
     /// The default ABI (`DEFAULT_ABI`)
     pub fn default_abi(&self) -> &str {
         &self.default_abi
