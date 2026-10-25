@@ -2659,7 +2659,15 @@ async fn unmerge_package(u: UnmergePackage<'_>) -> Result<()> {
         preserve_paths.iter().cloned().collect(),
     );
 
-    remove_old_unique_files(&old_contents, new_contents, &preserve_paths, root);
+    let uninstall_ignore =
+        uninstall_ignore_patterns(&shell.get_var("UNINSTALL_IGNORE").unwrap_or_default());
+    remove_old_unique_files(
+        &old_contents,
+        new_contents,
+        &preserve_paths,
+        root,
+        &uninstall_ignore,
+    );
 
     vdb.unregister(old_pkg)
         .context("unregistering old package")?;
@@ -2889,8 +2897,10 @@ fn remove_old_unique_files(
     new_contents: &[ContentsEntry],
     preserve: &HashSet<Utf8PathBuf>,
     root: &Utf8Path,
+    uninstall_ignore: &[glob::Pattern],
 ) {
     let new_paths: HashSet<&Utf8PathBuf> = new_contents.iter().map(|e| &e.path).collect();
+    let owned: HashSet<&Utf8Path> = old_contents.iter().map(|e| e.path.as_path()).collect();
 
     for entry in old_contents.iter().rev() {
         if new_paths.contains(&entry.path) || preserve.contains(&entry.path) {
@@ -2906,7 +2916,7 @@ fn remove_old_unique_files(
         let Ok(lstat) = std::fs::symlink_metadata(dest.as_std_path()) else {
             continue;
         };
-        if let Some(reason) = keep_on_unmerge(entry, &dest, &lstat) {
+        if let Some(reason) = keep_on_unmerge(entry, &dest, &lstat, &owned, uninstall_ignore) {
             tracing::debug!("--- {reason} {}", entry.path);
             continue;
         }
@@ -2925,21 +2935,41 @@ fn remove_old_unique_files(
     }
 }
 
+/// Parse `UNINSTALL_IGNORE` into fnmatch-style patterns (`*` crosses `/`)
+fn uninstall_ignore_patterns(value: &str) -> Vec<glob::Pattern> {
+    value
+        .split_whitespace()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect()
+}
+
 /// Why an existing CONTENTS entry at `dest` must survive its package's
 /// removal, in portage's unmerge-log wording, or `None` to remove it
 fn keep_on_unmerge(
     entry: &ContentsEntry,
     dest: &Utf8Path,
     lstat: &std::fs::Metadata,
+    owned: &HashSet<&Utf8Path>,
+    uninstall_ignore: &[glob::Pattern],
 ) -> Option<&'static str> {
     use std::os::unix::fs::MetadataExt;
     let is_link = lstat.file_type().is_symlink();
+    let libdir_link =
+        is_link && ["/lib", "/usr/lib", "/usr/local/lib"].contains(&entry.path.as_str());
+    if libdir_link
+        || uninstall_ignore
+            .iter()
+            .any(|p| p.matches(entry.path.as_str()))
+    {
+        return Some("cfgpro");
+    }
     let mtime_changed = entry
         .mtime
         .is_some_and(|m| u64::try_from(lstat.mtime()).ok() != Some(m));
     match entry.kind {
         ContentsKind::Obj | ContentsKind::Sym if mtime_changed => Some("!mtime"),
         ContentsKind::Sym if !is_link => Some("!sym"),
+        ContentsKind::Sym if dir_link_in_use(&entry.path, dest, owned) => Some("!empty"),
         ContentsKind::Obj if !lstat.is_file() => Some("!obj"),
         ContentsKind::Obj => {
             let md5 = entry.md5.as_deref()?;
@@ -2950,6 +2980,22 @@ fn keep_on_unmerge(
         }
         _ => None,
     }
+}
+
+/// A symlink to a directory holding anything but regular files of the package
+/// being removed: another package may have installed through it.
+fn dir_link_in_use(path: &Utf8Path, dest: &Utf8Path, owned: &HashSet<&Utf8Path>) -> bool {
+    let Ok(children) = std::fs::read_dir(dest.as_std_path()) else {
+        return false;
+    };
+    children.flatten().any(|child| {
+        let owned_file = child
+            .file_name()
+            .to_str()
+            .is_some_and(|n| owned.contains(path.join(n).as_path()))
+            && child.file_type().is_ok_and(|t| t.is_file());
+        !owned_file
+    })
 }
 
 fn run_clean(work_root: &Utf8Path) -> Result<()> {
@@ -5183,7 +5229,7 @@ mod tests {
             ["/usr/bin", "/usr/bin/old-only", "/usr/bin/shared"].map(|p| recorded(&root, p));
         let new_contents = [recorded(&root, "/usr/bin/shared")];
 
-        remove_old_unique_files(&old_contents, &new_contents, &HashSet::new(), &root);
+        remove_old_unique_files(&old_contents, &new_contents, &HashSet::new(), &root, &[]);
 
         assert!(!root.join("usr/bin/old-only").exists());
         assert!(root.join("usr/bin/shared").exists());
@@ -5199,12 +5245,17 @@ mod tests {
         for name in ["edited", "touched", "fifo"] {
             fs::write(root.join("etc").join(name).as_std_path(), b"orig").unwrap();
         }
-        let mut old_contents =
-            ["/etc/edited", "/etc/touched", "/etc/fifo"].map(|p| recorded(&root, p));
-        old_contents[2].mtime = None;
+        symlink("edited", root.join("etc/unlinked").as_std_path()).unwrap();
+        let mut old_contents = ["/etc/edited", "/etc/touched", "/etc/unlinked", "/etc/fifo"]
+            .map(|p| recorded(&root, p));
+        old_contents[3].mtime = None;
         let fifo = root.join("etc/fifo");
         fs::remove_file(&fifo).unwrap();
         mknodat(CWD, fifo.as_str(), FileType::Fifo, Mode::RUSR, 0).unwrap();
+        let unlinked_mtime = fs::symlink_metadata(root.join("etc/unlinked").as_std_path())
+            .unwrap()
+            .modified()
+            .unwrap();
 
         let edited = root.join("etc/edited");
         let mtime = fs::metadata(edited.as_std_path())
@@ -5225,12 +5276,58 @@ mod tests {
         touched
             .set_modified(mtime + std::time::Duration::from_secs(5))
             .unwrap();
+        fs::remove_file(root.join("etc/unlinked").as_std_path()).unwrap();
+        fs::write(root.join("etc/unlinked").as_std_path(), b"file").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join("etc/unlinked").as_std_path())
+            .unwrap()
+            .set_modified(unlinked_mtime)
+            .unwrap();
 
-        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root);
+        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root, &[]);
 
         assert_eq!(fs::read(edited.as_std_path()).unwrap(), b"user");
         assert!(root.join("etc/touched").exists());
+        assert!(root.join("etc/unlinked").is_file());
         assert!(fifo.exists());
+    }
+
+    #[test]
+    fn remove_old_unique_files_keeps_ignored_paths_and_dir_links_in_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        fs::create_dir_all(root.join("lib64/modules").as_std_path()).unwrap();
+        fs::write(root.join("lib64/modules/m.ko").as_std_path(), b"ko").unwrap();
+        symlink("lib64", root.join("lib").as_std_path()).unwrap();
+        fs::create_dir_all(root.join("usr/share/real").as_std_path()).unwrap();
+        fs::write(root.join("usr/share/real/foreign").as_std_path(), b"x").unwrap();
+        symlink("real", root.join("usr/share/shared-link").as_std_path()).unwrap();
+        fs::create_dir_all(root.join("usr/share/mine").as_std_path()).unwrap();
+        fs::write(root.join("usr/share/mine/own").as_std_path(), b"y").unwrap();
+        symlink("mine", root.join("usr/share/own-link").as_std_path()).unwrap();
+
+        // Entries are removed last first: own-link is judged while its child is still there.
+        let old_contents = [
+            "/lib",
+            "/lib/modules/m.ko",
+            "/usr/share/shared-link",
+            "/usr/share/own-link/own",
+            "/usr/share/own-link",
+        ]
+        .map(|p| recorded(&root, p));
+        let ignore = uninstall_ignore_patterns("/lib/modules/*");
+
+        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root, &ignore);
+
+        assert!(root.join("lib").as_std_path().is_symlink());
+        assert!(root.join("lib64/modules/m.ko").exists());
+        assert!(
+            root.join("usr/share/shared-link")
+                .as_std_path()
+                .is_symlink()
+        );
+        assert!(fs::symlink_metadata(root.join("usr/share/own-link").as_std_path()).is_err());
     }
 
     #[tokio::test]
