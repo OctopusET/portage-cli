@@ -44,10 +44,7 @@ impl PortageVersionSet {
             Operator::Greater => Self(Ranges::strictly_higher_than(v)),
             Operator::LessOrEqual => Self(Ranges::lower_than(v)),
             Operator::Less => Self(Ranges::strictly_lower_than(v)),
-            Operator::Equal if glob => {
-                let next = next_after_glob(&v);
-                Self(Ranges::between(v, next))
-            }
+            Operator::Equal if glob => Self(glob_ranges(v)),
             Operator::Equal => Self(Ranges::singleton(v)),
             Operator::Approximate => {
                 let (base, bumped) = approximate_bounds(&v);
@@ -134,21 +131,78 @@ fn approximate_bounds(v: &Version) -> (Version, Version) {
     (base, upper)
 }
 
-/// Compute the first version NOT matched by a glob pattern
+/// `=V*` as a range agreeing with [`Version::glob_matches`]
 ///
-/// PMS 8.3.1: "=V*" compares only the version components present before `*`.
-/// The exclusive upper bound is computed by bumping the last specified numeric
-/// component.
-fn next_after_glob(v: &Version) -> Version {
-    let n = v.numbers.len();
-    let mut next_numbers = v.numbers.clone();
-
-    if n > 0 {
-        next_numbers[n - 1] += 1;
+/// PMS order has no least version above a prefix (`1_alpha_alpha` < `1_alpha`), so each bound
+/// is taken one `_alpha` below its version ([`alpha_below`]); deeper `_alpha` chains fall outside.
+fn glob_ranges(v: Version) -> Ranges<Version> {
+    if v.to_string().contains("-r") {
+        return Ranges::singleton(v);
     }
+    let upper = glob_upper(&v);
+    Ranges::between(alpha_below(v), upper)
+}
 
-    // Rebuild digits from the bumped integers so PMS compare stays consistent.
-    Version::new(&next_numbers)
+fn alpha_below(mut v: Version) -> Version {
+    v.raw = None;
+    v.suffixes.push(Suffix {
+        kind: SuffixKind::Alpha,
+        version: None,
+    });
+    v
+}
+
+/// The first version past every glob match of `v`
+fn glob_upper(v: &Version) -> Version {
+    let mut next = v.clone();
+    next.raw = None;
+    let Some(last) = next.suffixes.last_mut() else {
+        if next.letter.is_some() {
+            return suffix_family_upper(next);
+        }
+        let i = next.numbers.len() - 1;
+        next.numbers[i] += 1;
+        let width = next.digits[i].len();
+        next.digits[i] = format!("{:0width$}", next.numbers[i]).into();
+        return alpha_below(next);
+    };
+    let next_kind = match (last.kind, last.version) {
+        (_, Some(n)) => {
+            last.version = Some(n + 1);
+            return alpha_below(next);
+        }
+        (SuffixKind::P, None) => {
+            next.suffixes.pop();
+            return suffix_family_upper(next);
+        }
+        (SuffixKind::Rc, None) => {
+            next.suffixes.pop();
+            return next;
+        }
+        (SuffixKind::Alpha, None) => SuffixKind::Beta,
+        (SuffixKind::Beta, None) => SuffixKind::Pre,
+        (SuffixKind::Pre, None) => SuffixKind::Rc,
+    };
+    last.kind = next_kind;
+    alpha_below(next)
+}
+
+/// The first version past `v` with any further suffixes
+fn suffix_family_upper(mut v: Version) -> Version {
+    if let Some(last) = v.suffixes.last_mut() {
+        last.version = Some(last.version.unwrap_or(0) + 1);
+    } else {
+        match v.letter {
+            None => v.letter = Some('a'),
+            Some('z') => {
+                v.letter = None;
+                v.numbers.push(0);
+                v.digits.push("0".into());
+            }
+            Some(c) => v.letter = char::from_u32(c as u32 + 1),
+        }
+    }
+    alpha_below(v)
 }
 
 #[cfg(test)]
@@ -183,14 +237,75 @@ mod tests {
     }
 
     #[test]
-    fn glob() {
-        let v = Version::parse("1.2").unwrap();
-        let vs = PortageVersionSet::from_operator(Operator::Equal, true, v);
-        assert!(vs.contains(&Version::parse("1.2.0").unwrap()));
-        assert!(vs.contains(&Version::parse("1.2.3").unwrap()));
-        assert!(vs.contains(&Version::parse("1.2.3-r1").unwrap()));
-        assert!(!vs.contains(&Version::parse("1.3.0").unwrap()));
-        assert!(!vs.contains(&Version::parse("1.1.9").unwrap()));
+    fn glob_agrees_with_glob_matches() {
+        let candidates = [
+            "1",
+            "1.1.9",
+            "1.2_alpha",
+            "1.2_alpha2",
+            "1.2_beta",
+            "1.2_beta3_p1",
+            "1.2_pre",
+            "1.2_rc",
+            "1.2_rc1",
+            "1.2_rc1_p2",
+            "1.2_rc1-r3",
+            "1.2_rc2",
+            "1.2_rc10",
+            "1.2",
+            "1.2-r1",
+            "1.2-r2",
+            "1.2-r10",
+            "1.2_p",
+            "1.2_p3",
+            "1.2_p3_rc",
+            "1.2a",
+            "1.2a_rc1",
+            "1.2b",
+            "1.2z",
+            "1.2z_p1",
+            "1.2.0",
+            "1.2.0_alpha",
+            "1.2.5",
+            "1.20",
+            "1.3_alpha",
+            "1.3",
+            "2",
+            "2_rc1",
+            "20",
+            "02.1",
+            "2023.01",
+            "2023.01.4",
+            "2023.02",
+            "2023.1",
+        ];
+        let patterns = [
+            "1.2",
+            "1.2_rc",
+            "1.2_rc1",
+            "1.2-r1",
+            "1.2_p",
+            "1.2_p3",
+            "1.2_alpha",
+            "1.2_beta",
+            "1.2a",
+            "1.2z",
+            "2",
+            "1",
+            "2023.01",
+        ];
+        for pat in patterns {
+            let pattern = Version::parse(pat).unwrap();
+            let vs = PortageVersionSet::from_operator(Operator::Equal, true, pattern.clone());
+            for cand in candidates {
+                let c = Version::parse(cand).unwrap();
+                assert_eq!(
+                    vs.contains(&c),
+                    c.glob_matches(&pattern),
+                    "{cand} against ={pat}*"
+                );
+            }
+        }
     }
 
     #[test]
