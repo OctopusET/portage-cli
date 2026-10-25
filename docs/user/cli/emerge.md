@@ -19,6 +19,7 @@ em emerge [OPTIONS] [ATOM]...
 
 ## Options
 
+* `--ignore-default-opts` — Do not prepend `EMERGE_DEFAULT_OPTS` (environment or make.conf) to the options
 * `-v, --verbose...` — Increase verbosity: `-v` labels each build phase, `-vv`/`-vvv` add `em`'s own debug/trace logs (see also `RUST_LOG`).
 * `-q, --quiet` — Suppress non-error output
 * `--arch <ARCH>` — Target architecture for operations \[default: current system architecture\]

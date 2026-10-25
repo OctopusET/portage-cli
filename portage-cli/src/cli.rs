@@ -158,10 +158,53 @@ pub fn parse_cli_or_exit() -> Validated {
         print!("{answer}");
         std::process::exit(0);
     }
-    match Cli::parse_from(&args).and_then(Validated::try_from) {
+    let parsed = Cli::parse_from(&args).and_then(|cli| {
+        let defaults = match &cli.applet {
+            Some(Applet::Emerge(a)) if !a.ignore_default_opts => {
+                let config_root = cli
+                    .roots()
+                    .config()
+                    .unwrap_or(camino::Utf8Path::new("/"))
+                    .to_owned();
+                emerge_default_opts(std::env::var("EMERGE_DEFAULT_OPTS").ok(), &config_root)
+            }
+            _ => Vec::new(),
+        };
+        if defaults.is_empty() {
+            Ok(cli)
+        } else {
+            Cli::parse_from(with_default_opts(args, defaults))
+        }
+    });
+    match parsed.and_then(Validated::try_from) {
         Ok(validated) => validated,
         Err(error) => std::process::exit(winnow_args::report(&error, "em")),
     }
+}
+
+/// `EMERGE_DEFAULT_OPTS`, the environment's value `env` or else `config_root`'s make.conf one,
+/// split into words by shell quoting rules
+fn emerge_default_opts(env: Option<String>, config_root: &camino::Utf8Path) -> Vec<OsString> {
+    let value = env.or_else(|| {
+        let files = crate::settings::make_conf_files(config_root).ok()?;
+        files.iter().rev().find_map(|f| {
+            let conf = portage_repo::MakeConf::load(camino::Utf8Path::from_path(f)?).ok()?;
+            conf.get("EMERGE_DEFAULT_OPTS").map(str::to_owned)
+        })
+    });
+    value
+        .and_then(|v| shlex::split(&v))
+        .unwrap_or_default()
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+}
+
+/// `args` with `defaults` ahead of the user's own emerge options, so those still override them
+fn with_default_opts(mut args: Vec<OsString>, defaults: Vec<OsString>) -> Vec<OsString> {
+    let at = usize::from(args.first().is_some_and(|a| a == "emerge"));
+    args.splice(at..at, defaults);
+    args
 }
 
 /// A leading flag before any subcommand name routes into `emerge` (the
@@ -658,6 +701,43 @@ mod tests {
     fn candidates(words: &[&str]) -> Vec<String> {
         let offered = winnow_args::complete::complete(Cli::HELP, words);
         offered.candidates.into_iter().map(|c| c.value).collect()
+    }
+
+    #[test]
+    fn default_opts_go_ahead_of_the_user_options() {
+        let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            with_default_opts(os(&["emerge", "-j2", "foo"]), os(&["--ask", "-j4"])),
+            os(&["emerge", "--ask", "-j4", "-j2", "foo"])
+        );
+        assert_eq!(
+            with_default_opts(os(&["-p", "foo"]), os(&["--ask"])),
+            os(&["--ask", "-p", "foo"])
+        );
+        let Some(Applet::Emerge(a)) = emerge(["--ignore-default-opts", "foo"]).applet else {
+            panic!("not emerge");
+        };
+        assert!(a.ignore_default_opts);
+    }
+
+    #[test]
+    fn default_opts_come_from_make_conf_unless_the_environment_sets_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        std::fs::create_dir_all(root.join("etc/portage")).unwrap();
+        std::fs::write(
+            root.join("etc/portage/make.conf"),
+            "EMERGE_DEFAULT_OPTS=\"--jobs=4 --exclude 'a/b c/d'\"\n",
+        )
+        .unwrap();
+        let words = |env: Option<&str>| -> Vec<String> {
+            emerge_default_opts(env.map(str::to_owned), &root)
+                .into_iter()
+                .map(|w| w.into_string().unwrap())
+                .collect()
+        };
+        assert_eq!(words(None), ["--jobs=4", "--exclude", "a/b c/d"]);
+        assert_eq!(words(Some("--ask")), ["--ask"]);
     }
 
     #[test]
@@ -3290,6 +3370,10 @@ pub struct EmergeArgs {
     /// Privilege backend for this merge
     #[arg(long, default = "auto", help_heading = "Merge")]
     pub privilege: Privilege,
+
+    /// Do not prepend `EMERGE_DEFAULT_OPTS` (environment or make.conf) to the options
+    #[arg(long)]
+    pub ignore_default_opts: bool,
 
     /// Atoms, package sets (`@world`), or ebuild paths to act on
     #[arg(positional, value_name = "ATOM")]
