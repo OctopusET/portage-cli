@@ -2062,6 +2062,25 @@ fn cross_env_entries(
         path: portage.join("package.env").join(&category),
         desired: mappings,
     });
+    // crossdev's `set_use ... -multilib`: an amd64 host profile enables multilib, and a gcc
+    // built with it for a one-ABI target (riscv64 lp64d) builds libgcc for ABIs the libc
+    // has no headers for (`gnu/stubs-ilp32.h`).
+    let multilib = if target_ml.is_multilib() {
+        "multilib"
+    } else {
+        "-multilib"
+    };
+    let package_use: String = spec
+        .packages()
+        .into_iter()
+        .map(|cpn| cpn.package)
+        .chain(spec.extras().into_iter().map(|cpn| cpn.package))
+        .map(|pkg| format!("{category}/{pkg} {multilib}\n"))
+        .collect();
+    entries.push(config_plan::ConfigEntry::File {
+        path: portage.join("package.use").join(&category),
+        desired: package_use,
+    });
     if let Some(clang) = &spec.toolchain.clang {
         entries.push(config_plan::ConfigEntry::File {
             path: env_dir.join("llvm.conf"),
