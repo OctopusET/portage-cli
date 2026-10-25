@@ -2163,7 +2163,7 @@ async fn run_fetch(
             .context("pkg_nofetch failed")?;
     }
 
-    if any_failed {
+    if any_restricted || any_failed {
         bail!("one or more distfiles could not be fetched");
     }
     Ok(())
