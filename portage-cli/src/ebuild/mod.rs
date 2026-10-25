@@ -3238,6 +3238,8 @@ impl ImagePass<'_> {
             let _ = std::fs::remove_file(write_path.as_std_path());
             std::fs::copy(src_path.as_std_path(), write_path.as_std_path())
                 .with_context(|| format!("copy {src_path} → {write_path}"))?;
+            // chown clears setuid/setgid, so it must precede chmod.
+            preserve_owner(write_path, meta);
             std::fs::set_permissions(write_path.as_std_path(), meta.permissions())
                 .with_context(|| format!("chmod {write_path}"))?;
             // Preserve the image file's mtime (portage does), so the on-disk
@@ -3253,7 +3255,6 @@ impl ImagePass<'_> {
                 self.hardlinks.insert(inode, write_path.to_owned());
             }
         }
-        preserve_owner(write_path, meta);
         Ok(())
     }
 }
@@ -4734,6 +4735,38 @@ mod tests {
             fs::read(root.join("usr/bin/prog").as_std_path()).unwrap(),
             b"new"
         );
+    }
+
+    #[test]
+    fn walk_image_keeps_setuid_across_owner_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(image.join("usr/bin").as_std_path()).unwrap();
+        let prog = image.join("usr/bin/prog");
+        fs::write(prog.as_std_path(), b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(prog.as_std_path(), fs::Permissions::from_mode(0o6755)).unwrap();
+        fs::hard_link(prog.as_std_path(), image.join("usr/bin/link").as_std_path()).unwrap();
+        fs::create_dir_all(root.as_std_path()).unwrap();
+
+        walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Merge,
+        )
+        .unwrap();
+
+        for name in ["usr/bin/prog", "usr/bin/link"] {
+            let mode = fs::metadata(root.join(name).as_std_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7777, 0o6755, "{name}");
+        }
     }
 
     #[test]
