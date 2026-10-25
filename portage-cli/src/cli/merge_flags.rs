@@ -223,11 +223,32 @@ impl MergeFlags {
     pub fn depclean_bdeps(&self) -> bool {
         self.with_bdeps != Some(YesNo::N)
     }
+
+    /// Turn on `--buildpkg`/`--getbinpkg` for the `buildpkg`/`getbinpkg` words of `FEATURES`
+    pub fn apply_features(&mut self, features: &str) {
+        for feature in features.split_whitespace() {
+            match feature {
+                "buildpkg" => self.buildpkg = true,
+                "getbinpkg" => self.getbinpkg = true,
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn features_turn_on_buildpkg_and_getbinpkg() {
+        let mut flags = MergeFlags::default();
+        flags.apply_features("binpkg-logs buildpkg-live getbinpkg");
+        assert!(flags.getbinpkg);
+        assert!(!flags.buildpkg);
+        flags.apply_features("buildpkg");
+        assert!(flags.buildpkg);
+    }
 
     #[test]
     fn with_bdeps_defaults_to_auto() {

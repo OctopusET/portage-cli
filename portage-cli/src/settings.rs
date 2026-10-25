@@ -181,6 +181,7 @@ pub(crate) async fn seed_build_shell(shell: &mut EbuildShell, settings: &Setting
 const HONOURED_FEATURES: &[&str] = &[
     "binpkg-request-signature",
     "binpkg-signing",
+    "buildpkg",
     "keeptemp",
     "keepwork",
     "noclean",

@@ -402,13 +402,18 @@ async fn emerge_atoms_inner(
         bus_attached,
     } = opts;
     let extra_use_override = extra_use_override.as_deref();
-    let merge_flags = merge_flags_override.unwrap_or_else(|| cli.merge_flags());
-    let merge_flags = &merge_flags;
+    let user_flags = merge_flags_override.is_none();
+    let mut merge_flags = merge_flags_override.unwrap_or_else(|| cli.merge_flags());
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);
     if !repo_path.is_dir() {
         bail!("repo not found at {resolved}");
     }
+    // Staged steps (crossdev, resume) pass their own flags, already final.
+    if user_flags && let Some(settings) = crate::settings::load(cli).await? {
+        merge_flags.apply_features(settings.get("FEATURES").unwrap_or_default());
+    }
+    let merge_flags = &merge_flags;
     let repo = crate::repo_open::open(repo_path.as_std_path())?;
     let vdb = open_cli_vdb(cli).ok();
     // `-a` takes precedence over `-u`: explicitly asking to be asked beats a
