@@ -1237,11 +1237,7 @@ fn format_flags(
         }
         parts.push(format!("{}=\"{}\"", key, join_bucket(bucket)));
     }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("  {}", parts.join(" "))
-    }
+    parts.join(" ")
 }
 
 /// Build the `:slot/subslot::repo` suffix shown in verbose mode
@@ -1633,7 +1629,7 @@ fn format_plan_parts(
     .unwrap_or_default();
     // Verbose mode appends the download size (distfiles not in DISTDIR).
     let size_str = if verbose >= 1 {
-        format!(" {}", format_kib(sizes.get(&cpv).copied().unwrap_or(0)))
+        format_kib(sizes.get(&cpv).copied().unwrap_or(0))
     } else {
         String::new()
     };
@@ -1676,9 +1672,18 @@ fn format_plan_parts(
         ("nomerge", "", " ".repeat(7))
     };
     let bracket = format!("[{name_color}{kind}{name_color:#}{pad}{colored_field}]");
-    let rest = format!(
-        "{name_color}{cpn}-{ver}{slot_repo}{name_color:#}{old}{flag_str}{size_str}{dest_suffix}"
-    );
+    // Portage's `pkg_str oldbest` leaves a trailing space when there is no old version column.
+    let extra = [flag_str, size_str]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let extra = match (extra.is_empty(), old.is_empty()) {
+        (true, _) => extra,
+        (false, true) => format!("  {extra}"),
+        (false, false) => format!(" {extra}"),
+    };
+    let rest = format!("{name_color}{cpn}-{ver}{slot_repo}{name_color:#}{old}{extra}{dest_suffix}");
     (bracket, rest)
 }
 
