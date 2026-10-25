@@ -10,10 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::Ebuild;
+use portage_vdb::Vdb;
 
 use super::{
-    ConfigProtect, Walk, WalkResult, capture_environment, merge_spec_from_env, open_or_create_vdb,
-    rewrite_d_symlinks, walk_image, write_environment_bz2,
+    ConfigProtect, Walk, WalkResult, build_info, capture_environment, merge_spec_from_env,
+    open_or_create_vdb, rewrite_d_symlinks, running_vdb, vdb_root_for, walk_image,
+    write_environment_bz2,
 };
 
 /// The image subtree that gets post-processed and merged: the shell's `ED`
@@ -45,7 +47,7 @@ pub(crate) async fn build_binpkg_standalone(
     build_env_key: &str,
 ) -> Result<Utf8PathBuf> {
     shell.apply_iuse_effective();
-    let env = shell.collect_env();
+    let mut env = shell.collect_env();
     let env_dump = capture_environment(shell, work_root).await;
     let image_dir = ed_image_dir(shell, work_root);
     let cp = ConfigProtect::from_shell(shell);
@@ -64,12 +66,17 @@ pub(crate) async fn build_binpkg_standalone(
 
     let scratch_vdb_root = work_root.join("temp/buildpkgonly-vdb");
     let vdb = open_or_create_vdb(&scratch_vdb_root)?;
+    let target = Vdb::open(vdb_root_for(root)).ok();
+    let target = target.as_ref().unwrap_or(&vdb);
+    let running = running_vdb(shell, target.root());
+    build_info::reduce_env(&mut env, target, running.as_ref().unwrap_or(target));
     let counter = vdb.next_counter()?;
     let build_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let elf = crate::elfscan::scan_image(&image_dir);
+    build_info::inject_libc_dep(&mut env.rdepend, ebuild.cpv(), &elf, target);
     let spec = merge_spec_from_env(
         env,
         ebuild.cpv().clone(),
