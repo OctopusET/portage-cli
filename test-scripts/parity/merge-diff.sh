@@ -13,7 +13,9 @@ R=$P/merge/$(printf '%s' "$atom" | tr -c 'A-Za-z0-9._+-' _)
 mkdir -p "$R"
 
 if [[ ! -e $R/deps.ok ]]; then
-	"$here/sb.sh" "$R/deps" "emerge -1 --onlydeps --with-bdeps=y --nospinner --color=n $atom" \
+	# Fetch first: two tools downloading one distfile at once corrupt it.
+	"$here/sb.sh" "$R/deps" "emerge -f --nodeps --nospinner --color=n $atom &&
+		emerge -1 --onlydeps --with-bdeps=y --nospinner --color=n $atom" \
 		>"$R/deps.log" 2>&1 || { echo "deps failed: $R/deps.log" >&2; exit 1; }
 	touch "$R/deps.ok"
 fi
