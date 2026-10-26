@@ -5293,8 +5293,21 @@ mod tests {
         for name in ["edited", "touched", "retyped"] {
             fs::write(root.join("etc").join(name).as_std_path(), b"orig").unwrap();
         }
-        let old_contents =
-            ["/etc/edited", "/etc/touched", "/etc/retyped"].map(|p| recorded(&root, p));
+        symlink("edited", root.join("etc/unlinked").as_std_path()).unwrap();
+        let old_contents = [
+            "/etc/edited",
+            "/etc/touched",
+            "/etc/retyped",
+            "/etc/unlinked",
+        ]
+        .map(|p| recorded(&root, p));
+        let mtime_of = |p: &str| {
+            fs::symlink_metadata(root.join(p).as_std_path())
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        let (retyped_mtime, unlinked_mtime) = (mtime_of("etc/retyped"), mtime_of("etc/unlinked"));
 
         let edited = root.join("etc/edited");
         let mtime = fs::metadata(edited.as_std_path())
@@ -5317,12 +5330,32 @@ mod tests {
             .unwrap();
         fs::remove_file(root.join("etc/retyped").as_std_path()).unwrap();
         fs::create_dir(root.join("etc/retyped").as_std_path()).unwrap();
+        fs::File::open(root.join("etc/retyped").as_std_path())
+            .unwrap()
+            .set_modified(retyped_mtime)
+            .unwrap();
+        fs::remove_file(root.join("etc/unlinked").as_std_path()).unwrap();
+        fs::write(root.join("etc/unlinked").as_std_path(), b"file").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join("etc/unlinked").as_std_path())
+            .unwrap()
+            .set_modified(unlinked_mtime)
+            .unwrap();
+        let reason = |e: &ContentsEntry| {
+            let dest = root.join(e.path.as_str().trim_start_matches('/'));
+            let lstat = fs::symlink_metadata(dest.as_std_path()).unwrap();
+            keep_on_unmerge(e, &dest, &lstat, &HashSet::new(), &[])
+        };
+        assert_eq!(reason(&old_contents[2]), Some("!obj"));
+        assert_eq!(reason(&old_contents[3]), Some("!sym"));
 
         remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root, &[]);
 
         assert_eq!(fs::read(edited.as_std_path()).unwrap(), b"user");
         assert!(root.join("etc/touched").exists());
         assert!(root.join("etc/retyped").is_dir());
+        assert!(root.join("etc/unlinked").is_file());
     }
 
     #[test]
@@ -5338,13 +5371,17 @@ mod tests {
         fs::create_dir_all(root.join("usr/share/mine").as_std_path()).unwrap();
         fs::write(root.join("usr/share/mine/own").as_std_path(), b"y").unwrap();
         symlink("mine", root.join("usr/share/own-link").as_std_path()).unwrap();
+        fs::create_dir_all(root.join("usr/lib64").as_std_path()).unwrap();
+        symlink("lib64", root.join("usr/lib").as_std_path()).unwrap();
 
+        // Entries are removed last first: own-link is judged while its child is still there.
         let old_contents = [
             "/lib",
             "/lib/modules/m.ko",
+            "/usr/lib",
             "/usr/share/shared-link",
-            "/usr/share/own-link",
             "/usr/share/own-link/own",
+            "/usr/share/own-link",
         ]
         .map(|p| recorded(&root, p));
         let ignore = uninstall_ignore_patterns("/lib/modules/*");
@@ -5353,6 +5390,7 @@ mod tests {
 
         assert!(root.join("lib").as_std_path().is_symlink());
         assert!(root.join("lib64/modules/m.ko").exists());
+        assert!(root.join("usr/lib").as_std_path().is_symlink());
         assert!(
             root.join("usr/share/shared-link")
                 .as_std_path()
