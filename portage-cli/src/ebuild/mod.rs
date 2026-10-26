@@ -5232,6 +5232,7 @@ mod tests {
         let context = PhaseContext {
             fetch_all_uri: false,
             mirror_repos: &mirror_repos,
+            ignore_blockers: false,
             merge_state: None,
             binpkg_metadata: None,
             binpkg_record: &[],

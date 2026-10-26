@@ -700,6 +700,8 @@ A weak victim still installed when its blocker merges may own the same files: as
 portage, the collision check skips it and the paths the new package installs leave its
 CONTENTS, so its later unmerge keeps them. Under `--nodeps` blockers are ignored, so neither
 happens.
+A file collision aborts the merge only under `FEATURES=collision-protect` or `protect-owned`; where
+em reads no make.globals (a prefix, a host without Portage, no profile) it assumes `protect-owned`.
 
 **`@profile` / `profile-set` (package-set semantics).** Real portage's `@profile`
 set (`ProfilePackageSet`) reads only the *non-`*`* `packages` entries, and only

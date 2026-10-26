@@ -18,7 +18,7 @@ const MAKE_GLOBALS: &str = "/usr/share/portage/config/make.globals";
 
 /// Stands in for an absent make.globals' FEATURES: the ones em always acted on, so make.conf can
 /// still switch them off
-const EM_FEATURES: &str = "binpkg-multi-instance preserve-libs";
+const EM_FEATURES: &str = "binpkg-multi-instance preserve-libs protect-owned";
 
 /// The profile stack of `config_root`, its user profiles included; `None` without a `make.profile`
 pub(crate) fn profile_stack(
@@ -369,10 +369,13 @@ mod tests {
             let settings = evaluate(&key, &repo).await.unwrap().unwrap();
             settings.get("FEATURES").unwrap_or_default().to_owned()
         };
-        assert_eq!(features("").await, "binpkg-multi-instance preserve-libs");
+        assert_eq!(
+            features("").await,
+            "binpkg-multi-instance preserve-libs protect-owned"
+        );
         assert_eq!(
             features("FEATURES=\"-preserve-libs\"\n").await,
-            "binpkg-multi-instance"
+            "binpkg-multi-instance protect-owned"
         );
     }
 
@@ -414,5 +417,41 @@ mod tests {
         let mut overlays: Vec<&str> = overlays.split(' ').collect();
         overlays.sort();
         assert_eq!(overlays, ["/r/guru", "/r/local"]);
+    }
+
+    /// FEATURES of a prefix (no make.globals read) whose make.conf has `conf`, and of a shell
+    /// seeded without settings
+    async fn features_without_make_globals(conf: &str) -> (String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        for dir in ["repo/metadata", "repo/profiles", "profile", "etc/portage"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("repo/metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(root.join("repo/profiles/repo_name"), "probe\n").unwrap();
+        std::fs::write(root.join("profile/make.defaults"), "").unwrap();
+        std::fs::write(root.join("etc/portage/make.conf"), conf).unwrap();
+        std::os::unix::fs::symlink(root.join("profile"), root.join("etc/portage/make.profile"))
+            .unwrap();
+        let repo = Repository::builder()
+            .in_memory_cache()
+            .open(root.join("repo"))
+            .unwrap();
+        let key = Key::new(Some(root), None, root, Some(root));
+        let settings = evaluate(&key, &repo).await.unwrap().unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        seed_build_shell(&mut shell, None).await.unwrap();
+        (
+            settings.get("FEATURES").unwrap_or_default().to_owned(),
+            shell.get_var("FEATURES").unwrap_or_default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn protect_owned_stays_on_without_make_globals_unless_disabled() {
+        let (prefix, bare) = features_without_make_globals("").await;
+        assert_eq!((prefix.as_str(), bare.as_str()), (EM_FEATURES, EM_FEATURES));
+        let (prefix, _) = features_without_make_globals("FEATURES=\"-protect-owned\"\n").await;
+        assert!(!prefix.split_whitespace().any(|f| f == "protect-owned"));
     }
 }
