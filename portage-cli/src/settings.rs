@@ -165,7 +165,7 @@ const SEEDED: &[&str] = &[
 
 /// FEATURES em implements that make.globals may enable: the build shell's FEATURES lists what
 /// em provides, so only these are carried over from the settings
-const PROVIDED_FEATURES: &[&str] = &["config-protect-if-modified"];
+const PROVIDED_FEATURES: &[&str] = &["config-protect-if-modified", "unmerge-orphans"];
 
 /// Give a build shell the [`SEEDED`] values and the enabled [`PROVIDED_FEATURES`]
 pub(crate) async fn seed_build_shell(shell: &mut EbuildShell, settings: &Settings) -> Result<()> {

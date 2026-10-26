@@ -23,6 +23,10 @@ run. Matching Portage's set is this note's work, one feature at a time.
   `protect-owned`, `qa-unresolved-soname-deps`, `sandbox`, `strict`, `unknown-features-warn`,
   `unmerge-logs`, `unmerge-orphans`, `userfetch`, `userpriv`, `usersandbox`, `usersync`.
 
+- **Carried from the settings into the build shell** (`settings::PROVIDED_FEATURES`, 2026-10-26):
+  `config-protect-if-modified`, `unmerge-orphans`. The VDB `FEATURES` therefore differs from
+  emerge's, which records the whole make.globals set.
+
 ## Work
 
 1. Sort the 31 into: behaviour em always has (no switch: likely `preserve-libs`,
