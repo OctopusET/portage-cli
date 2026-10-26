@@ -3048,6 +3048,34 @@ async fn reinheriting_an_eclass_re_exports_its_functions() {
 }
 
 #[tokio::test]
+async fn use_outside_iuse_effective_dies_only_from_eapi_5() {
+    for (eapi, dies) in [("4", false), ("5", true)] {
+        let dir = tempdir().unwrap();
+        let (repo, ebuild) = phase_repo(dir.path(), "");
+        std::fs::write(
+            ebuild.path(),
+            format!(
+                "EAPI={eapi}\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nIUSE=\"foo\"\n\
+                 S=\"${{WORKDIR}}\"\npkg_setup() {{ use bogus; EM_RC=$?; }}\n"
+            ),
+        )
+        .unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let work = dir.path().join("work");
+        let res = shell
+            .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+            .await;
+        if dies {
+            let err = res.expect_err("EAPI 5 must die");
+            assert!(err.to_string().contains("bogus"), "{err}");
+        } else {
+            res.unwrap();
+            assert_eq!(shell.get_var("EM_RC").as_deref(), Some("1"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn src_prepare_must_call_eapply_user_from_eapi_6() {
     for (eapi, body, ok) in [
         ("8", "src_prepare() { :; }", false),

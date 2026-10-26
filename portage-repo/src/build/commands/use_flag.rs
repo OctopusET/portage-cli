@@ -4,6 +4,7 @@ use brush_core::builtins;
 use portage_metadata::Eapi;
 
 use super::die::DieFlag;
+use super::output;
 
 // ── use ───────────────────────────────────────────────────────────────────────
 
@@ -31,8 +32,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for UseCommand {
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if let Some(msg) = unknown_use_flag_msg(context.shell, &self.flag) {
-            return Ok(die_use_query(context, &msg));
+        if let Some(died) = check_iuse_effective(&context, &self.flag) {
+            return Ok(died);
         }
         let enabled = use_flag_enabled(context.shell, &self.flag);
         Ok(brush_core::ExecutionResult::new(u8::from(!enabled)))
@@ -68,8 +69,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for UsevCommand {
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if let Some(msg) = unknown_use_flag_msg(context.shell, &self.flag) {
-            return Ok(die_use_query(context, &msg));
+        if let Some(died) = check_iuse_effective(&context, &self.flag) {
+            return Ok(died);
         }
         let shell = context.shell;
         if use_flag_enabled(shell, &self.flag) {
@@ -122,8 +123,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for UsexCommand {
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if let Some(msg) = unknown_use_flag_msg(context.shell, &self.flag) {
-            return Ok(die_use_query(context, &msg));
+        if let Some(died) = check_iuse_effective(&context, &self.flag) {
+            return Ok(died);
         }
         let shell = context.shell;
         if use_flag_enabled(shell, &self.flag) {
@@ -170,8 +171,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for UseEnableCommand
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if let Some(msg) = unknown_use_flag_msg(context.shell, &self.flag) {
-            return Ok(die_use_query(context, &msg));
+        if let Some(died) = check_iuse_effective(&context, &self.flag) {
+            return Ok(died);
         }
         let shell = context.shell;
         // PMS/portage's use_enable() resolves the feature name with bash
@@ -224,8 +225,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for UseWithCommand {
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if let Some(msg) = unknown_use_flag_msg(context.shell, &self.flag) {
-            return Ok(die_use_query(context, &msg));
+        if let Some(died) = check_iuse_effective(&context, &self.flag) {
+            return Ok(died);
         }
         let shell = context.shell;
         // See the matching comment in UseEnableCommand: an explicitly empty
@@ -258,42 +259,38 @@ pub(crate) fn use_flag_enabled<SE: brush_core::ShellExtensions>(
     flag_in_use(shell.env_str("USE").as_deref().unwrap_or(""), flag)
 }
 
-/// PMS table 12.20: EAPI ≥ 4, `use*` on a flag not in IUSE_EFFECTIVE is an error.
+/// A `use*` query on a flag outside `IUSE_EFFECTIVE` dies from EAPI 5 and is a
+/// QA notice before (PMS table 12.20); `Some` carries the die status.
 ///
-/// Skipped when `IUSE_EFFECTIVE` is unset (metadata generation — PMS 11.1.1
+/// Skipped when `IUSE_EFFECTIVE` is unset (metadata generation: PMS 11.1.1
 /// leaves the set undefined there).
-fn unknown_use_flag_msg<SE: brush_core::ShellExtensions>(
-    shell: &brush_core::Shell<SE>,
+fn check_iuse_effective<SE: brush_core::ShellExtensions>(
+    context: &brush_core::ExecutionContext<'_, SE>,
     flag: &str,
-) -> Option<String> {
+) -> Option<brush_core::ExecutionResult> {
+    let shell = &*context.shell;
     let name = flag.strip_prefix('!').unwrap_or(flag);
+    let effective = shell.env_str("IUSE_EFFECTIVE")?;
+    if effective.is_empty() || effective.split_whitespace().any(|f| f == name) {
+        return None;
+    }
     let eapi = shell
         .env_str("EAPI")
         .and_then(|s| s.parse::<Eapi>().ok())
         .unwrap_or(Eapi::Zero);
     if !eapi.use_query_errors_outside_iuse_effective() {
+        let var = |v: &str| shell.env_str(v).unwrap_or_default();
+        let pkg = format!("{}/{}", var("CATEGORY"), var("PF"));
+        let msg = format!("QA Notice: USE Flag '{name}' not in IUSE for {pkg}");
+        output::eqawarn(context, &msg);
         return None;
     }
-    let effective = shell.env_str("IUSE_EFFECTIVE")?.into_owned();
-    if effective.is_empty() {
-        return None;
+    let msg = format!("USE flag '{name}' not in IUSE_EFFECTIVE");
+    if let Some(die) = shell.builtin_state::<DieFlag>() {
+        die.raise(&msg);
     }
-    if effective.split_whitespace().any(|f| f == name) {
-        return None;
-    }
-    Some(format!("USE flag '{name}' not in IUSE_EFFECTIVE"))
-}
-
-fn die_use_query<SE: brush_core::ShellExtensions>(
-    context: brush_core::ExecutionContext<'_, SE>,
-    msg: &str,
-) -> brush_core::ExecutionResult {
-    if let Some(die) = context.shell.builtin_state::<DieFlag>() {
-        die.raise(msg);
-    }
-    let shell = context.shell;
     let _ = writeln!(context.params.stderr(shell), "die: {msg}");
-    brush_core::ExecutionResult::new(1)
+    Some(brush_core::ExecutionResult::new(1))
 }
 
 /// Whether `flag` is satisfied by the space-separated `use_str`

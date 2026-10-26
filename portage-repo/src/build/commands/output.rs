@@ -174,6 +174,16 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EchoMessageComma
     }
 }
 
+/// Emit `msg` as `eqawarn` would, for a builtin that warns without dying
+pub(crate) fn eqawarn<SE: brush_core::ShellExtensions>(
+    context: &brush_core::ExecutionContext<'_, SE>,
+    msg: &str,
+) {
+    let prefix = marker(colors(context).qawarn);
+    elog_base(context.shell, "QA", msg);
+    let _ = writeln!(context.params.stderr(context.shell), "{prefix}{msg}");
+}
+
 /// `ebegin <message>`
 ///
 /// Prints ` * <message> ...` to stderr (beginning of a timed action); `eend`
