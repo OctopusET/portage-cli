@@ -61,7 +61,23 @@ impl ManifestEntry {
             | ManifestEntry::SubManifest { size, hashes, .. } => verify_hashes(path, *size, hashes),
         }
     }
+
+    /// Whether this entry lists a hash [`Self::verify_file`] can check
+    ///
+    /// Always `true` for `Ignore` and `Timestamp`, which need none.
+    pub fn has_supported_hash(&self) -> bool {
+        match self {
+            ManifestEntry::Ignore { .. } | ManifestEntry::Timestamp { .. } => true,
+            ManifestEntry::Dist { hashes, .. }
+            | ManifestEntry::Data { hashes, .. }
+            | ManifestEntry::SubManifest { hashes, .. } => hashes
+                .iter()
+                .any(|(a, _)| SUPPORTED_HASHES.contains(&a.as_str())),
+        }
+    }
 }
+
+const SUPPORTED_HASHES: [&str; 3] = ["BLAKE2B", "SHA512", "SHA256"];
 
 /// Single-pass size + multi-hash verification
 fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -> Result<()> {

@@ -242,6 +242,13 @@ impl Fetcher {
             });
         }
 
+        if manifest_entry.is_some_and(|e| !e.has_supported_hash()) {
+            return Err(Error::Verify {
+                filename: df.filename.clone(),
+                reason: "insufficient data for checksum verification: no supported hash".to_owned(),
+            });
+        }
+
         // Fast path: already present and valid (writable dir first, then the
         // read-only locations).
         for dir in std::iter::once(&self.distdir).chain(self.ro_distdirs.iter()) {
@@ -1102,6 +1109,39 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), 1, "identical bad downloads are kept once");
         assert!(!distdir.join(filename).exists());
+    }
+
+    #[tokio::test]
+    async fn an_entry_with_no_supported_hash_is_refused_before_any_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        let filename = "foo.tar.gz";
+        std::fs::write(distdir.join(filename), b"payload").unwrap();
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![ManifestEntry::Dist {
+                filename: filename.to_string(),
+                size: 7,
+                hashes: vec![("WHIRLPOOL".to_string(), "00".to_string())],
+            }],
+        });
+        let count = distdir.join("count");
+        let fetcher = command_fetcher(
+            &distdir,
+            &format!(r#"echo >> '{count}'; printf payload > "${{DISTDIR}}/${{FILE}}""#),
+        );
+        let err = fetcher
+            .fetch_distfile_digests(&one_url(filename), &digests)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Verify { .. }));
+        assert!(!count.exists(), "FETCHCOMMAND must not run");
+        assert_eq!(std::fs::read(distdir.join(filename)).unwrap(), b"payload");
+        assert!(!std::fs::read_dir(&distdir).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("_checksum_failure_")
+        }));
     }
 
     // Regression: two independent fetch calls for the same filename (e.g. one
