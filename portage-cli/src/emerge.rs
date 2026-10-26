@@ -1105,22 +1105,33 @@ fn match_installed_atoms(
     let mut matched: Vec<portage_vdb::InstalledPackage> = Vec::new();
     let mut unmatched: Vec<&str> = Vec::new();
     for raw in atoms {
-        let pkgs = crate::vdb::find_packages(vdb, raw);
+        let mut pkgs = crate::vdb::find_packages(vdb, raw);
         if pkgs.is_empty() {
             crate::style::warn_line!("no installed package matches '{raw}'");
             unmatched.push(raw.as_str());
             continue;
         }
         if !raw.contains('/') {
-            let mut cpns: Vec<String> = pkgs.iter().map(|p| p.cpn().to_string()).collect();
+            let mut cpns: Vec<portage_atom::Cpn> = pkgs.iter().map(|p| *p.cpn()).collect();
             cpns.sort();
             cpns.dedup();
+            // A virtual or account package sharing the name is not what the user means.
+            let virtual_like = |c: &portage_atom::Cpn| {
+                ["virtual", "acct-user", "acct-group"].contains(&c.category.as_str())
+            };
+            if cpns.iter().any(|c| !virtual_like(c)) {
+                cpns.retain(|c| !virtual_like(c));
+            }
             if cpns.len() > 1 {
                 bail!(
                     "the short package name '{raw}' is ambiguous, specify one of: {}",
-                    cpns.join(", ")
+                    cpns.iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
+            pkgs.retain(|p| *p.cpn() == cpns[0]);
         }
         for pkg in pkgs {
             if seen.insert(pkg.cpv().clone()) {
@@ -1984,6 +1995,20 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn match_installed_atoms_prefers_a_regular_package_over_an_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in ["acct-user/portage-0", "sys-apps/portage-3.0"] {
+            let d = tmp.path().join("var/db/pkg").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SLOT"), "0").unwrap();
+        }
+        let vdb = open_vdb(tmp.path());
+        let got = match_installed_atoms(&vdb, &["portage".to_string()], "-C/--unmerge").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cpn().to_string(), "sys-apps/portage");
     }
 
     #[test]
