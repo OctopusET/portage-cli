@@ -1147,6 +1147,48 @@ fn dropped_or_branch_keeps_multislot_sibling() {
     );
 }
 
+// dev-java/lzma `|| ( 7zip p7zip )` with 7zip masked: the dropped first branch must not
+// stand in as an empty, satisfied alternative, either in choose_version or on BROOT.
+#[test]
+fn or_branch_with_unavailable_atom_is_not_trivially_satisfied() {
+    for with_host in [false, true] {
+        let mut repo = InMemoryRepository::new();
+        for cpv in ["app-arch/p7zip-1.0", "app-misc/hosttool-1.0"] {
+            repo.add_version(
+                portage_atom::Cpv::parse(cpv).unwrap(),
+                Some(Interned::intern("0")),
+                None,
+                empty_deps(),
+            );
+        }
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-java/lzma-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: (DepEntry::parse("|| ( app-arch/7zip app-arch/p7zip )").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        if with_host {
+            let tool = PortagePackage::slotted(
+                Cpn::parse("app-misc/hosttool").unwrap(),
+                Interned::intern("0"),
+            );
+            provider.add_host_installed(tool, Version::parse("1.0").unwrap(), vec![], vec![]);
+        }
+        let lzma =
+            PortagePackage::slotted(Cpn::parse("dev-java/lzma").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(lzma, PortageVersionSet::any())])
+            .unwrap();
+        let p7zip =
+            PortagePackage::slotted(Cpn::parse("app-arch/p7zip").unwrap(), Interned::intern("0"));
+        assert!(solution.get(&p7zip).is_some(), "with_host={with_host}");
+    }
+}
+
 #[test]
 fn or_group_no_preference_when_both_installed() {
     // || ( A B ) where both A and B are installed — solver falls through to

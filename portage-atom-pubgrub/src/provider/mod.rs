@@ -703,12 +703,19 @@ impl PortageDependencyProvider {
 
         let mut dropped_deps = Vec::new();
         let mut dropped_parents = Vec::new();
+        let mut broken_branches: HashMap<PortagePackage, Vec<Version>> = HashMap::new();
         if needs_filtering {
             for (parent, data) in packages.iter_mut() {
                 for (parent_ver, vd) in data.versions.iter_mut() {
                     if let Dependencies::Available(constraints) = &mut vd.merged
                         && constraints.iter().any(|(pkg, _)| !known.contains(pkg))
                     {
+                        if matches!(parent, PortagePackage::Choice { .. }) {
+                            broken_branches
+                                .entry(parent.clone())
+                                .or_default()
+                                .push(parent_ver.clone());
+                        }
                         let taken = std::mem::take(constraints);
                         let (kept, dropped): (Vec<_>, Vec<_>) =
                             taken.into_iter().partition(|(pkg, _)| known.contains(pkg));
@@ -732,6 +739,17 @@ impl PortageDependencyProvider {
                     for class in &mut vd.by_class {
                         class.retain(|(pkg, _, _)| known.contains(pkg));
                     }
+                }
+            }
+        }
+        // An `||` branch with an unavailable atom cannot be satisfied; left in, it reads as an
+        // empty, trivially met alternative. When every branch broke, keep them for autounmask.
+        for (choice, broken) in broken_branches {
+            if let Some(data) = packages.get_mut(&choice)
+                && broken.len() < data.versions.len()
+            {
+                for ver in broken {
+                    data.versions.remove(&ver);
                 }
             }
         }
