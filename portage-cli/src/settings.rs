@@ -81,7 +81,8 @@ impl Key {
         }
     }
 
-    fn of(roots: &Roots) -> Self {
+    /// The key of the config root `roots` selects
+    pub(crate) fn of(roots: &Roots) -> Self {
         Self::new(
             roots.config(),
             roots.config_overlay(),

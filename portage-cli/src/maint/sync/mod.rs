@@ -31,6 +31,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::{RepoEntry, ReposConf};
 
 use crate::cli::Cli;
+use crate::settings::Key;
 use crate::style::{C_BOLD, C_ERROR, C_WARN};
 
 /// Run repository sync for `em sync` and `em maint sync`
@@ -235,19 +236,32 @@ impl Verify {
             .then(|| Self {
                 key: opt("sync-openpgp-key-path").map(Utf8PathBuf::from),
                 keyserver: opt("sync-openpgp-keyserver").map(String::from),
-                jobs: opt("sync-rsync-verify-jobs")
-                    .and_then(|v| v.parse().ok())
-                    .filter(|&n| n > 0),
+                jobs: opt("sync-rsync-verify-jobs").and_then(|v| match v.parse() {
+                    Ok(0) => None,
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        warn_line("sync-rsync-verify-jobs not a positive integer");
+                        None
+                    }
+                }),
             })
     }
 }
 
 async fn rsync_options(entry: &RepoEntry, globals: &Cli) -> Result<Vec<String>> {
     // A first sync has no main repo to evaluate make.conf in; Portage's defaults apply then.
-    let settings = crate::settings::load(globals).await.unwrap_or_else(|e| {
-        tracing::debug!("no settings for rsync options: {e:#}");
-        None
-    });
+    let settings = match crate::crossdev::main_repo(globals) {
+        Err(e) => {
+            tracing::debug!("no main repo for rsync options: {e:#}");
+            None
+        }
+        Ok(repo) => crate::settings::cached(Key::of(&globals.roots()), &repo)
+            .await
+            .unwrap_or_else(|e| {
+                warn_line(&format!("ignoring make.conf rsync options: {e:#}"));
+                None
+            }),
+    };
     let var = |name| settings.as_ref().and_then(|s| s.get(name)).unwrap_or("");
     let extra = entry
         .sync_options
