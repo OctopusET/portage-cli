@@ -4445,20 +4445,17 @@ fn elog_config(
 /// root-aware for the same reason as [`gentoo_mirrors_list`]
 fn fetch_commands(shell: &portage_repo::EbuildShell) -> FetchConfig {
     let var = |name: &str| shell.get_var(name).filter(|s| !s.is_empty());
-    let scheme_commands = shell
-        .var_names()
-        .iter()
-        .filter_map(|name| name.strip_prefix("FETCHCOMMAND_"))
-        .filter_map(|scheme| {
-            let fetch = var(&format!("FETCHCOMMAND_{scheme}"))?;
-            Some((
-                scheme.to_owned(),
-                (fetch, var(&format!("RESUMECOMMAND_{scheme}"))),
-            ))
-        })
-        .collect();
+    let names = shell.var_names();
+    let per_scheme = |prefix: &str| {
+        names
+            .iter()
+            .filter_map(|name| Some((name.strip_prefix(prefix)?, var(name)?)))
+            .map(|(scheme, cmd)| (scheme.to_owned(), cmd))
+            .collect()
+    };
     FetchConfig {
-        scheme_commands,
+        scheme_fetch: per_scheme("FETCHCOMMAND_"),
+        scheme_resume: per_scheme("RESUMECOMMAND_"),
         ..FetchConfig::from_make_conf(var("FETCHCOMMAND"), var("RESUMECOMMAND"))
     }
 }
@@ -4910,21 +4907,45 @@ mod tests {
     const BUILD_AND_MERGE: &[RunPhase] = &[RunPhase::SETUP, RunPhase::INSTALL, RunPhase::Qmerge];
 
     #[tokio::test]
-    async fn fetch_commands_reads_the_per_scheme_overrides() {
+    async fn fetch_commands_reads_the_per_scheme_overrides_from_make_globals() {
         let probe = Probe::new();
-        let mut shell = probe.repo().shell().await.unwrap();
-        shell.preset_var("FETCHCOMMAND_RSYNC", "rsync ${URI}");
-        shell.preset_var("RESUMECOMMAND_RSYNC", "rsync -P ${URI}");
-        shell.preset_var("FETCHCOMMAND_SSH", "");
+        fs::create_dir_all(probe.path("repo/profiles/test")).unwrap();
+        let repo = probe.repo();
+        let stack =
+            portage_repo::ProfileStack::build(probe.path("repo/profiles/test").into_std_path_buf())
+                .unwrap();
+        let env = portage_repo::Environment::default();
+        let confs = [portage_repo::ConfSource::Str(
+            "RESUMECOMMAND_SFTP=\"sftp -a\"\n",
+        )];
+        let settings = portage_repo::Settings::evaluate(
+            &mut repo.shell().await.unwrap(),
+            portage_repo::SettingsSources {
+                stack: &stack,
+                env_d: None,
+                globals: Some(portage_repo::ConfSource::Str(
+                    "FETCHCOMMAND_RSYNC=\"rsync \\${URI}\"\nFETCHCOMMAND_SSH=\"\"\n",
+                )),
+                confs: &confs,
+                env: &env,
+            },
+        )
+        .await
+        .unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        crate::settings::seed_build_shell(&mut shell, Some(&settings))
+            .await
+            .unwrap();
         let config = fetch_commands(&shell);
         assert_eq!(
-            config.scheme_commands.get("RSYNC"),
-            Some(&(
-                "rsync ${URI}".to_owned(),
-                Some("rsync -P ${URI}".to_owned())
-            ))
+            config.scheme_fetch.get("RSYNC").map(String::as_str),
+            Some("rsync ${URI}")
         );
-        assert!(!config.scheme_commands.contains_key("SSH"));
+        assert!(!config.scheme_fetch.contains_key("SSH"));
+        assert_eq!(
+            config.scheme_resume.get("SFTP").map(String::as_str),
+            Some("sftp -a")
+        );
     }
 
     async fn run_alone(

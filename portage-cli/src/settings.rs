@@ -217,15 +217,26 @@ pub(crate) fn features(settings: Option<&Settings>) -> &str {
     settings.map_or(EM_FEATURES, |s| s.get("FEATURES").unwrap_or_default())
 }
 
-/// Give a build shell the [`SEEDED`] values and the stacked `FEATURES` (make.globals included)
-/// for `package.env` to stack onto; without settings (no profile), em's own default features
+/// Give a build shell the [`SEEDED`] values, every `FETCHCOMMAND_<SCHEME>`/`RESUMECOMMAND_<SCHEME>`,
+/// and the stacked `FEATURES` (make.globals included) for `package.env` to stack onto; without
+/// settings (no profile), em's own default features
+///
+/// The global `FETCHCOMMAND`/`RESUMECOMMAND` stay make.conf's: em's own client replaces
+/// make.globals' wget.
 pub(crate) async fn seed_build_shell(
     shell: &mut EbuildShell,
     settings: Option<&Settings>,
 ) -> Result<()> {
+    let per_scheme = settings
+        .into_iter()
+        .flat_map(|s| s.iter())
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("FETCHCOMMAND_") || name.starts_with("RESUMECOMMAND_"));
     let mut script: String = SEEDED
         .iter()
-        .filter_map(|&name| {
+        .copied()
+        .chain(per_scheme)
+        .filter_map(|name| {
             let value = settings?.get(name)?;
             Some(format!("export {name}={}\n", shell_quote(value)))
         })
