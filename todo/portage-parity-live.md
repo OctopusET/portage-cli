@@ -22,6 +22,11 @@ needed under the default profile).
   (known for multi-target; also seen single-target).
 - em prints "Installed packages kept although masked" for unrelated installed packages
   (gnupg, elfutils, libxcrypt keyworded ~amd64 after the tree moved); emerge stays silent.
+  Portage never masks an installed package by KEYWORDS/PROPERTIES/RESTRICT/CHOST
+  (`Package._eval_visibility`), only by package.mask, LICENSE, invalid metadata or EAPI. em
+  also drops a dep satisfied only by such an installed package and fails with autounmask
+  (`a_masked_installed_package_is_reported_when_nothing_replaces_it` pins exit 1); emerge
+  exits 0. Resolver change, needs confirmation.
 - `-v` old-version column: emerge `[4.1.2-r7:4.1.2::gentoo, ...]`, em `[4.1.2-r7, ...]`
   (`convert_myoldbest`: slot/subslot and repo at verbosity 3).
 - done `7b605e56`: missing second space before the size when a line has no USE column.
@@ -35,15 +40,17 @@ needed under the default profile).
 - No implicit `>=sys-libs/glibc-<installed>` in RDEPEND (portage `_inject_libc_dep`).
 - VDB lacks `CC`, `CXX`, `FEATURES`, `REPO_REVISIONS`.
 - setgid lost: app-misc/screen `/usr/bin/screen-4.9.1` 2755 (emerge) vs 0755 (em).
-- sys-apps/pciutils `/usr/lib64/libpci.so.3.15.0` 0755 (emerge) vs 0644 (em).
-- econf argument order: em puts `--libdir` after `--localstatedir`, portage after
-  `--with-sysroot`; it ends up in curl-config and other embedded configure lines.
-- Global counter in `var/db/pkg/COUNTER`; portage uses `/var/cache/edb/counter`.
+- done `49fcae32`: sys-apps/pciutils `libpci.so.3.15.0` 0755 (emerge) vs 0644 (em); portage's
+  install QA makes `.so` in library dirs executable and `.a`/`.la` not.
+- done `40bb85d8`: econf argument order (`--libdir` after the probed flags, only for
+  LIBDIR_${ABI}, under the ebuild's `--exec-prefix`/`--prefix`; CONF_PREFIX exported).
+- done `6bddd350`: global counter in `var/db/pkg/COUNTER`; portage uses `/var/cache/edb/counter`.
 - env-update: no `/etc/csh.env`, no `/etc/environment.d/10-gentoo-env.conf`, `profile.env`
   lacks `export GCC_SPECS=''`.
 - No `/usr/share/info/dir` regeneration after merging info pages.
 - `/var/lib/portage/config` (config-protect-if-modified md5s) never written.
-- `preserved_libs_registry` written 0600 with em's own JSON; portage writes 0660 `{}`.
+- done `2cb80dc4`: `preserved_libs_registry` written 0600 in em's own JSON shape; now portage's
+  `[cpv, "counter", [paths]]`, keeping the file's mode/owner, never rewriting an unparsable file.
 - Two tools fetching one distfile into a shared DISTDIR: emerge's verified file was
   truncated under it; em writes the final name in place.
 - SIZE: portage measures `${D}` before compression, em after; left as is.
