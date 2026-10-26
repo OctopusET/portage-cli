@@ -142,7 +142,7 @@ impl PreservedLibsRegistry {
     /// Load the registry under `root` (the merge root / EROOT), or start
     /// empty if it doesn't exist yet or fails to parse.
     pub fn load(root: &Utf8Path) -> Self {
-        Self::load_path(&root.join("var/lib/portage/preserved_libs_registry"))
+        Self::load_path(&root.join("var/lib/portage/preserved_libs_registry"), None)
     }
 
     /// [`Self::load`] under the registry's lock, for a merge or unmerge that will update it
@@ -150,12 +150,12 @@ impl PreservedLibsRegistry {
     /// The lock creates the file, empty, as portage's does.
     pub(crate) fn load_for_update(root: &Utf8Path) -> Self {
         let path = root.join("var/lib/portage/preserved_libs_registry");
-        let _lock = crate::util::lock_state_file(&path);
-        Self::load_path(&path)
+        let lock = crate::util::lock_state_file(&path);
+        Self::load_path(&path, lock.as_ref())
     }
 
-    fn load_path(path: &Utf8Path) -> Self {
-        let data = Self::read(path).unwrap_or_default();
+    fn load_path(path: &Utf8Path, lock: Option<&std::fs::File>) -> Self {
+        let data = Self::read(path, lock).unwrap_or_default();
         Self {
             path: path.to_owned(),
             original: data.clone(),
@@ -164,8 +164,11 @@ impl PreservedLibsRegistry {
     }
 
     /// The file's entries; `None` when it exists but does not parse (empty means no entries)
-    fn read(path: &Utf8Path) -> Option<HashMap<String, RegistryEntry>> {
-        match std::fs::read_to_string(path) {
+    fn read(
+        path: &Utf8Path,
+        lock: Option<&std::fs::File>,
+    ) -> Option<HashMap<String, RegistryEntry>> {
+        match crate::util::read_state_file(path, lock) {
             Ok(s) if s.trim().is_empty() => Some(HashMap::new()),
             Ok(s) => serde_json::from_str(&s).ok(),
             Err(_) => Some(HashMap::new()),
@@ -189,8 +192,8 @@ impl PreservedLibsRegistry {
         if self.data == self.original {
             return;
         }
-        let _lock = crate::util::lock_state_file(&self.path);
-        let Some(mut disk) = Self::read(&self.path) else {
+        let lock = crate::util::lock_state_file(&self.path);
+        let Some(mut disk) = Self::read(&self.path, lock.as_ref()) else {
             crate::style::warn_line!("not rewriting unparsable {}", self.path);
             return;
         };

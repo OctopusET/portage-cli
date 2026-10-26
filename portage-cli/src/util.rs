@@ -80,6 +80,23 @@ pub(crate) fn lock_state_file(path: &Utf8Path) -> Option<std::fs::File> {
     }
 }
 
+/// Read the state file `path` through its `lock` when held
+///
+/// Opening `path` again would drop the record lock when that fd closes, as POSIX record locks are per process.
+pub(crate) fn read_state_file(
+    path: &Utf8Path,
+    lock: Option<&std::fs::File>,
+) -> std::io::Result<String> {
+    use std::io::{Read, Seek};
+    let Some(mut f) = lock else {
+        return std::fs::read_to_string(path.as_std_path());
+    };
+    let mut text = String::new();
+    f.rewind()?;
+    f.read_to_string(&mut text)?;
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

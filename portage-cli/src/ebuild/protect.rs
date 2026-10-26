@@ -207,7 +207,7 @@ impl ConfigMemory {
     ) -> Self {
         let file = eroot.join("var/lib/portage/config");
         let lock = crate::util::lock_state_file(&file);
-        let text = std::fs::read_to_string(file.as_std_path()).unwrap_or_default();
+        let text = crate::util::read_state_file(&file, lock.as_ref()).unwrap_or_default();
         let mut entries: Vec<(String, String)> = vec![];
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let mut words = line.split_whitespace().take_while(|w| !w.starts_with('#'));
@@ -489,6 +489,38 @@ mod tests {
         m.remember("/etc/a", "111");
         m.store().unwrap();
         assert_eq!(other.join().unwrap().as_deref(), Some("111"));
+    }
+
+    /// Whether another process gets emerge's `lockf` on `file`; reruns this test binary as the probe
+    fn record_lock_free_elsewhere(file: &Utf8Path) -> bool {
+        let test = concat!(
+            module_path!(),
+            "::memory_lock_excludes_record_locks_of_another_process"
+        );
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test.split_once("::").unwrap().1, "--exact", "--quiet"])
+            .env("EM_TEST_LOCK_PROBE", file)
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn memory_lock_excludes_record_locks_of_another_process() {
+        if let Some(file) = std::env::var_os("EM_TEST_LOCK_PROBE") {
+            let f = std::fs::OpenOptions::new().write(true).open(file).unwrap();
+            let lock =
+                rustix::fs::fcntl_lock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+            std::process::exit(i32::from(lock.is_err()));
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let file = root.join("var/lib/portage/config");
+        let mut m = ConfigMemory::load(root, vec![], false, false);
+        assert!(!record_lock_free_elsewhere(&file));
+        m.remember("/etc/a", "111");
+        m.store().unwrap();
+        assert!(record_lock_free_elsewhere(&file));
     }
 
     #[test]
