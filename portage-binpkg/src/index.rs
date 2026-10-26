@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use sokgi::Dialect;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::scan::{ContainerFacts, find_gpkg_containers};
 
 /// One `Packages` index entry, parsed into the fields the reuse check needs
@@ -54,6 +54,37 @@ pub struct BinpkgEntry {
     /// [`BinpkgIndex::find_reusable`] / [`RemoteBinpkgIndex::find_reusable`]
     /// instead of the first one listed.
     pub build_id: u32,
+    /// Recorded container `SIZE`, if the index has one
+    pub size: Option<u64>,
+    /// Recorded container `MD5` (empty if absent)
+    pub md5: String,
+    /// Recorded container `SHA1` (empty if absent)
+    pub sha1: String,
+}
+
+impl BinpkgEntry {
+    /// Check the container at `path` against whichever of `SIZE`/`MD5`/`SHA1` the entry records
+    pub fn verify_file(&self, path: &Path) -> Result<()> {
+        let (md5, sha1, size, _) = crate::scan::checksum(path)?;
+        let mismatch = |what: &str, want: &dyn std::fmt::Display, got: &dyn std::fmt::Display| {
+            Err(Error::Corrupt(format!(
+                "{}: {what} {got} does not match the index's {want}",
+                path.display()
+            )))
+        };
+        if let Some(want) = self.size
+            && want != size
+        {
+            return mismatch("SIZE", &want, &size);
+        }
+        if !self.md5.is_empty() && !self.md5.eq_ignore_ascii_case(&md5) {
+            return mismatch("MD5", &self.md5, &md5);
+        }
+        if !self.sha1.is_empty() && !self.sha1.eq_ignore_ascii_case(&sha1) {
+            return mismatch("SHA1", &self.sha1, &sha1);
+        }
+        Ok(())
+    }
 }
 
 /// A parsed `Packages` index, keyed by `cpv`, answering reuse queries
@@ -126,6 +157,9 @@ impl BinpkgIndex {
                 rustflags: facts.rustflags,
                 build_id,
                 build_env_key,
+                size: None,
+                md5: String::new(),
+                sha1: String::new(),
             };
             entries.entry(facts.cpv).or_default().push(entry);
         }
@@ -342,6 +376,9 @@ pub fn parse_packages_entries(text: &str) -> BTreeMap<String, Vec<BinpkgEntry>> 
             rustflags,
             build_id,
             build_env_key,
+            size: fields.get("SIZE").and_then(|s| s.parse().ok()),
+            md5: fields.get("MD5").copied().unwrap_or("").to_string(),
+            sha1: fields.get("SHA1").copied().unwrap_or("").to_string(),
         };
         entries.entry(cpv.to_string()).or_default().push(entry);
     }
@@ -433,7 +470,7 @@ impl RemoteBinpkgIndex {
         self.entries.is_empty()
     }
 
-    /// Find a reusable remote binpkg for `cpv`, returning its download URL
+    /// Find a reusable remote binpkg for `cpv`, returning its download URL and entry
     ///
     /// `None` if the cpv is absent or its USE/CHOST/build_env_key does not
     /// match (same rules as the local index). URL = `base_uri` + `/` + `PATH`.
@@ -446,7 +483,7 @@ impl RemoteBinpkgIndex {
         desired_use: &[String],
         desired_chost: &str,
         desired_build_env_key: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, &BinpkgEntry)> {
         let best = best_reusable_entry(
             &self.entries,
             cpv,
@@ -454,7 +491,7 @@ impl RemoteBinpkgIndex {
             desired_chost,
             desired_build_env_key,
         )?;
-        Some(format!("{}/{path}", self.base_uri, path = best.path))
+        Some((format!("{}/{path}", self.base_uri, path = best.path), best))
     }
 
     /// Look up the raw index entries for `cpv` (including CFLAGS/CXXFLAGS/
@@ -699,6 +736,30 @@ mod tests {
     }
 
     #[test]
+    fn a_download_is_checked_against_the_digests_the_index_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo-1.0-1.gpkg.tar");
+        std::fs::write(&file, b"payload").unwrap();
+        let entry = |extra: &str| {
+            let text =
+                format!("VERSION: 0\n\nCPV: app-test/foo-1.0\nPATH: foo-1.0-1.gpkg.tar\n{extra}");
+            RemoteBinpkgIndex::new(&text, "https://binhost.example")
+                .find_reusable("app-test/foo-1.0", &[], "", "")
+                .unwrap()
+                .1
+                .clone()
+        };
+        let md5 = format!("{:x}", md5::compute(b"payload"));
+        assert!(entry("").verify_file(&file).is_ok());
+        assert!(
+            entry(&format!("SIZE: 7\nMD5: {md5}\n"))
+                .verify_file(&file)
+                .is_ok()
+        );
+        assert!(entry("SIZE: 8\n").verify_file(&file).is_err());
+    }
+
+    #[test]
     fn identical_use_is_reusable() {
         // binpkg built with nls,debug; IUSE nls,debug,ssl; desired nls,debug.
         assert!(use_compatible(
@@ -862,7 +923,8 @@ USE: nls
         // Trailing slash on base_uri is trimmed; URL = base + "/" + PATH.
         assert_eq!(
             idx.find_reusable("app-test/foo-1.0", &desired(&["nls"]), "", "",)
-                .unwrap(),
+                .unwrap()
+                .0,
             "https://binhost.example/app-test/foo-1.0-1.gpkg.tar"
         );
         // Stale USE → None (same use_compatible rule as the local index).
@@ -1181,7 +1243,8 @@ USE: nls
         assert_eq!(idx.base_uri(), "https://cdn.example/gentoo/arm64");
         assert_eq!(
             idx.find_reusable("app-test/foo-1.0", &desired(&["nls"]), "", "",)
-                .unwrap(),
+                .unwrap()
+                .0,
             "https://cdn.example/gentoo/arm64/app-test/foo-1.0-1.gpkg.tar"
         );
     }
@@ -1203,7 +1266,8 @@ USE: nls
         assert_eq!(idx.base_uri(), "https://cdn.example/gentoo/arm64");
         assert_eq!(
             idx.find_reusable("app-test/foo-1.0", &desired(&["nls"]), "", "",)
-                .unwrap(),
+                .unwrap()
+                .0,
             "https://cdn.example/gentoo/arm64/app-test/foo-1.0-1.gpkg.tar"
         );
     }

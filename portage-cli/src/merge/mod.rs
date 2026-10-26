@@ -68,8 +68,17 @@ pub(crate) struct ActivityTrack {
 #[derive(Debug)]
 struct BinpkgReuse {
     local: Option<std::path::PathBuf>,
-    /// Remote URL and its binrepo's signature-verification setting.
-    remote: Option<(String, bool)>,
+    remote: Option<RemoteBinpkg>,
+}
+
+/// A reusable binpkg on a binhost
+#[derive(Debug)]
+struct RemoteBinpkg {
+    url: String,
+    /// The binrepo's `verify-signature` setting
+    verify_signature: bool,
+    /// The index entry, whose digests the download must match
+    entry: portage_binpkg::BinpkgEntry,
 }
 
 impl BinpkgReuse {
@@ -112,7 +121,11 @@ fn find_binpkg_reuse(
                 desired_chost,
                 desired_build_env_key,
             )
-            .map(|url| (url, idx.verify_signature()))
+            .map(|(url, entry)| RemoteBinpkg {
+                url,
+                verify_signature: idx.verify_signature(),
+                entry: entry.clone(),
+            })
         })
     } else {
         None
@@ -725,7 +738,6 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         local: reused,
         remote: remote_match,
     } = reuse;
-    let remote_url = remote_match.as_ref().map(|(url, _)| url.clone());
 
     let root_ctx = ebuild::RootContext {
         config_root: entry_roots.config(),
@@ -746,9 +758,9 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
             return Ok(());
         }
         // Remote binpkg: download into the run cache, do not merge.
-        if let Some(url) = remote_url {
-            let path = fetch_remote_binpkg(&url, work_base).await?;
-            tracing::info!("Fetched binary package: {url} -> {path}");
+        if let Some(remote) = &remote_match {
+            let path = fetch_remote_binpkg(remote, work_base).await?;
+            tracing::info!("Fetched binary package: {} -> {path}", remote.url);
             return Ok(());
         }
         if enforce_no_source {
@@ -794,8 +806,9 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         .await;
     }
 
-    if let Some((url, verify_signature)) = remote_match {
-        match fetch_remote_binpkg(&url, work_base).await {
+    if let Some(remote) = remote_match {
+        let url = &remote.url;
+        match fetch_remote_binpkg(&remote, work_base).await {
             Ok(path) => {
                 tracing::info!("Fetched binary package: {url}");
                 ebuild::merge_binpkg(ebuild::MergeBinpkg {
@@ -808,7 +821,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
                     quiet,
                     roots: root_ctx,
                     merge_gate,
-                    force_verify_signature: verify_signature,
+                    force_verify_signature: remote.verify_signature,
                     activity: activity_pkg.clone(),
                 })
                 .await
@@ -1239,26 +1252,29 @@ async fn merge_sequential(run: &MergeRun<'_>) -> (usize, usize, Vec<MergeFailure
     (merged, skipped, failures)
 }
 
-/// Download a remote binpkg from `url` into a per-run cache under `work_base`, returning
-/// the local path
+/// Download a remote binpkg into the cache under `work_base`, checked against its index entry
 ///
-/// Cached per filename so a retry doesn't re-download.
+/// Cached by URL, so another binhost's or a rebuilt package of the same name is never taken for it.
 async fn fetch_remote_binpkg(
-    url: &str,
+    remote: &RemoteBinpkg,
     work_base: &camino::Utf8Path,
 ) -> Result<camino::Utf8PathBuf> {
-    let cache_dir = work_base.join("binpkg-cache");
-    tokio::fs::create_dir_all(cache_dir.as_std_path())
-        .await
-        .with_context(|| format!("creating {cache_dir}"))?;
-    // Filename: the last path segment of the URL (e.g. foo-1.0-1.gpkg.tar).
+    let url = &remote.url;
     let name = url.rsplit('/').next().unwrap_or("binpkg.gpkg.tar");
-    let dest = cache_dir.join(name);
-    if !dest.exists() {
-        portage_distfiles::fetch_binpkg(url, dest.as_std_path())
-            .await
-            .with_context(|| format!("downloading {url}"))?;
+    let dest = work_base
+        .join("binpkg-cache")
+        .join(format!("{:x}", md5::compute(url.as_bytes())))
+        .join(name);
+    if dest.exists() && remote.entry.verify_file(dest.as_std_path()).is_ok() {
+        return Ok(dest);
     }
+    portage_distfiles::fetch_binpkg(url, dest.as_std_path())
+        .await
+        .with_context(|| format!("downloading {url}"))?;
+    remote
+        .entry
+        .verify_file(dest.as_std_path())
+        .with_context(|| format!("verifying {url}"))?;
     Ok(dest)
 }
 
