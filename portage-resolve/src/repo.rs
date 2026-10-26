@@ -4124,6 +4124,7 @@ mod tests {
         let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
         let force_mask = ForceMask {
             iuse_injection: crate::force_mask::IuseInjection::new(
+                Vec::new(),
                 vec!["prefix".into()],
                 Vec::new(),
                 Vec::new(),
