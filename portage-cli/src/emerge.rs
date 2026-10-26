@@ -1111,6 +1111,17 @@ fn match_installed_atoms(
             unmatched.push(raw.as_str());
             continue;
         }
+        if !raw.contains('/') {
+            let mut cpns: Vec<String> = pkgs.iter().map(|p| p.cpn().to_string()).collect();
+            cpns.sort();
+            cpns.dedup();
+            if cpns.len() > 1 {
+                bail!(
+                    "the short package name '{raw}' is ambiguous, specify one of: {}",
+                    cpns.join(", ")
+                );
+            }
+        }
         for pkg in pkgs {
             if seen.insert(pkg.cpv().clone()) {
                 matched.push(pkg);
@@ -1954,6 +1965,25 @@ mod tests {
         let err =
             match_installed_atoms(&vdb, &["app-misc/foo".to_string()], "-P/--prune").unwrap_err();
         assert!(err.to_string().contains("-P/--prune"));
+    }
+
+    #[test]
+    fn match_installed_atoms_refuses_an_ambiguous_short_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in ["app-misc/foo-1.0", "dev-libs/foo-2.0"] {
+            let d = tmp.path().join("var/db/pkg").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SLOT"), "0").unwrap();
+        }
+        let vdb = open_vdb(tmp.path());
+        let err = match_installed_atoms(&vdb, &["foo".to_string()], "-C/--unmerge").unwrap_err();
+        assert!(err.to_string().contains("app-misc/foo, dev-libs/foo"));
+        assert_eq!(
+            match_installed_atoms(&vdb, &["app-misc/foo".to_string()], "-C/--unmerge")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
