@@ -5108,6 +5108,51 @@ mod tests {
         assert_eq!(probe.log(), "setup");
     }
 
+    #[tokio::test]
+    async fn features_digest_writes_the_dist_lines_from_the_fetch_phase() {
+        let probe = Probe::new();
+        fs::write(
+            probe.path("repo/metadata/layout.conf"),
+            "masters =\nthin-manifests = true\n",
+        )
+        .unwrap();
+        fs::create_dir_all(probe.path("distfiles")).unwrap();
+        fs::write(probe.path("distfiles/probe-1.tar.gz"), b"hello").unwrap();
+        let src_uri = "SRC_URI=\"http://example.invalid/probe-1.tar.gz\"\n";
+        let ebuild = probe.ebuild("probe", "1", src_uri);
+        run_alone(&probe, &ebuild, RunPhase::Fetch, "digest")
+            .await
+            .unwrap();
+        let manifest = fs::read_to_string(probe.path("repo/app-misc/probe/Manifest")).unwrap();
+        assert!(
+            manifest.starts_with("DIST probe-1.tar.gz 5 BLAKE2B "),
+            "{manifest}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_manifest_phase_of_a_thick_repo_lists_the_ebuild_and_misc_files() {
+        let probe = Probe::new();
+        let ebuild = probe.ebuild("probe", "1", "");
+        let pkg_dir = probe.path("repo/app-misc/probe");
+        fs::write(pkg_dir.join("metadata.xml"), "<pkgmetadata/>\n").unwrap();
+        run_alone(&probe, &ebuild, "manifest".parse().unwrap(), "")
+            .await
+            .unwrap();
+        let manifest = fs::read_to_string(pkg_dir.join("Manifest")).unwrap();
+        let tags: Vec<(&str, &str)> = manifest
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split(' ');
+                Some((f.next()?, f.next()?))
+            })
+            .collect();
+        assert_eq!(
+            tags,
+            [("EBUILD", "probe-1.ebuild"), ("MISC", "metadata.xml")]
+        );
+    }
+
     /// Fetch `body`'s one distfile, which has no Manifest entry and so fails without a download;
     /// returns whether `pkg_nofetch` is defined afterwards
     async fn failed_fetch(probe: &Probe, body: &str) -> bool {
