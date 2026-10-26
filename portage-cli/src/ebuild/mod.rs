@@ -3033,11 +3033,11 @@ fn run_clean(work_root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-/// Set a symlink's own atime/mtime
+/// Give a merged path, not what it links to, the image entry's atime/mtime, as CONTENTS records
 ///
 /// `std::fs` always follows symlinks, so we go through `utimensat(AT_SYMLINK_NOFOLLOW)`.
-/// Best-effort: failures are ignored, matching the regular-file mtime path.
-fn set_symlink_times(path: &Utf8Path, meta: &std::fs::Metadata) {
+/// Best-effort: failures are ignored.
+fn set_entry_times(path: &Utf8Path, meta: &std::fs::Metadata) {
     use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
     let to_ts = |t: std::io::Result<std::time::SystemTime>| -> Timespec {
         let d = t
@@ -3281,7 +3281,7 @@ impl ImagePass<'_> {
                 .with_context(|| format!("symlink {write_path}"))?;
             // Preserve the link's own mtime (std follows symlinks; this
             // does not), so the on-disk time matches CONTENTS.
-            set_symlink_times(&write_path, meta);
+            set_entry_times(&write_path, meta);
             preserve_owner(&write_path, meta);
         }
         self.record(ContentsKind::Sym, entry, None, Some(target));
@@ -3381,41 +3381,33 @@ impl ImagePass<'_> {
             std::fs::create_dir_all(parent.as_std_path())
                 .with_context(|| format!("mkdir {parent}"))?;
         }
+        // Written beside the destination and renamed over it, as portage's movefile does: the old
+        // file stays whole until then, and a read-only one needs only directory write permission.
+        let tmp = Utf8PathBuf::from(format!("{write_path}#new"));
+        let _ = std::fs::remove_file(tmp.as_std_path());
         // A file already hardlinked inside the image (nlink > 1) is recreated
         // as a hardlink in ROOT, sharing one inode, rather than copied
         // independently (matches portage's source-inode `_hardlink_merge_map`).
         let inode = (meta.dev(), meta.ino());
-        let mut linked = false;
-        if meta.nlink() > 1
-            && let Some(first) = self.hardlinks.get(&inode)
-        {
-            let _ = std::fs::remove_file(write_path.as_std_path());
-            linked = std::fs::hard_link(first.as_std_path(), write_path.as_std_path()).is_ok();
-        }
+        let linked = meta.nlink() > 1
+            && self.hardlinks.get(&inode).is_some_and(|first| {
+                std::fs::hard_link(first.as_std_path(), tmp.as_std_path()).is_ok()
+            });
         if !linked {
-            // Portage unlinks the destination before installing: `copy` would
-            // open an existing file for writing, which fails on a read-only
-            // one (bash's mode-0555 `bashbug` on re-merge). A fresh file needs
-            // write permission on the directory only.
-            let _ = std::fs::remove_file(write_path.as_std_path());
-            std::fs::copy(src_path.as_std_path(), write_path.as_std_path())
-                .with_context(|| format!("copy {src_path} → {write_path}"))?;
+            std::fs::copy(src_path.as_std_path(), tmp.as_std_path())
+                .with_context(|| format!("copy {src_path} to {tmp}"))?;
             // chown clears setuid/setgid, so it must precede chmod.
-            preserve_owner(write_path, meta);
-            std::fs::set_permissions(write_path.as_std_path(), meta.permissions())
-                .with_context(|| format!("chmod {write_path}"))?;
-            // Preserve the image file's mtime (portage does), so the on-disk
-            // time matches what CONTENTS records.
-            if let Ok(modified) = meta.modified()
-                && let Ok(f) = std::fs::File::options()
-                    .write(true)
-                    .open(write_path.as_std_path())
-            {
-                let _ = f.set_modified(modified);
-            }
-            if meta.nlink() > 1 {
-                self.hardlinks.insert(inode, write_path.to_owned());
-            }
+            preserve_owner(&tmp, meta);
+            std::fs::set_permissions(tmp.as_std_path(), meta.permissions())
+                .with_context(|| format!("chmod {tmp}"))?;
+            set_entry_times(&tmp, meta);
+        }
+        if let Err(e) = std::fs::rename(tmp.as_std_path(), write_path.as_std_path()) {
+            let _ = std::fs::remove_file(tmp.as_std_path());
+            return Err(e).with_context(|| format!("renaming {tmp} to {write_path}"));
+        }
+        if !linked && meta.nlink() > 1 {
+            self.hardlinks.insert(inode, write_path.to_owned());
         }
         Ok(())
     }
@@ -5180,9 +5172,7 @@ mod tests {
 
     #[test]
     fn walk_image_overwrites_readonly_file() {
-        // Re-merging over an existing read-only file (e.g. bash's mode-0555
-        // bashbug) must not EACCES: the destination is unlinked before copy, so
-        // the copy creates a fresh file (directory write perm is enough).
+        // Re-merging over a read-only file (e.g. bash's mode-0555 bashbug) must not EACCES.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
@@ -5199,6 +5189,13 @@ mod tests {
 
         fs::create_dir_all(image.join("usr/bin").as_std_path()).unwrap();
         fs::write(image.join("usr/bin/bug").as_std_path(), b"new\n").unwrap();
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(image.join("usr/bin/bug").as_std_path())
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
 
         let WalkResult { contents, .. } = walk_image(
             &image,
@@ -5208,15 +5205,40 @@ mod tests {
             false,
             Walk::Merge,
         )
-        .expect("re-merge over a read-only file must succeed (unlink before copy)");
+        .expect("re-merge over a read-only file must succeed");
 
         assert_eq!(
             fs::read(root.join("usr/bin/bug").as_std_path()).unwrap(),
             b"new\n"
         );
-        // The image mode is applied after copy; the read-only 0555 dest was
-        // replaced, so the new content is readable.
+        let merged = fs::metadata(root.join("usr/bin/bug").as_std_path()).unwrap();
+        assert_eq!(merged.modified().unwrap(), mtime);
         assert!(contents.iter().any(|e| e.path == "/usr/bin/bug"));
+    }
+
+    #[test]
+    fn walk_image_keeps_the_old_file_when_its_replacement_cannot_be_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(image.join("usr/lib").as_std_path()).unwrap();
+        fs::write(image.join("usr/lib/libx.so").as_std_path(), b"new\n").unwrap();
+        // A directory in the temp file's place makes writing the replacement fail, even as root.
+        fs::create_dir_all(root.join("usr/lib/libx.so#new").as_std_path()).unwrap();
+        let dest = root.join("usr/lib/libx.so");
+        fs::write(dest.as_std_path(), b"old\n").unwrap();
+
+        let merged = walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Merge,
+        );
+
+        assert!(merged.is_err());
+        assert_eq!(fs::read(dest.as_std_path()).unwrap(), b"old\n");
     }
 
     #[test]
