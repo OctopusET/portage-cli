@@ -42,9 +42,9 @@ pub(crate) use protect::ConfigProtect;
 /// process. [`PhaseGroup::Debug`] backs `em ebuild`.
 #[derive(Clone, Debug)]
 enum PhaseGroup {
-    /// Full source build + merge: clean → `pretend..qmerge` → buildpkg → tree-drop
+    /// Full source build + merge: clean → `setup..qmerge` → buildpkg → tree-drop
     Full,
-    /// Pre-install phases only (the un-wrapped parent): clean → `pretend..compile` → dump env
+    /// Pre-install phases only (the un-wrapped parent): clean → `setup..compile` → dump env
     /// to `worker-env`
     ///
     /// No buildpkg, no tree-drop — the compile artifacts must survive for the Install worker.
@@ -55,12 +55,12 @@ enum PhaseGroup {
     /// Does NOT wipe `work/` (the compile artifacts live there); only `image/temp/homedir`.
     Install,
     /// Merge a pre-built GPKG (`-k`/`-g`): clean → extract image and saved environment →
-    /// `pretend,setup,qmerge` → tree-drop
+    /// `setup,qmerge` → tree-drop
     ///
     /// PMS has a binary install skip the `src_*` phases only; the extracted image is the
     /// payload.
     BinpkgMerge,
-    /// `-B`/`--buildpkgonly`: clean → `pretend..install` → buildpkg → tree-drop
+    /// `-B`/`--buildpkgonly`: clean → `setup..install` → buildpkg → tree-drop
     ///
     /// No `qmerge` at all, unlike every other merge-shaped group — the image is packaged but
     /// never installed into the live ROOT/VDB. Real emerge's own caveat applies: this doesn't
@@ -75,6 +75,11 @@ enum PhaseGroup {
     /// `-F`/`--fetch-all-uri`: every `SRC_URI` entry regardless of USE, instead of just what
     /// the plan's own USE selection asks for.
     FetchOnly { all_uri: bool },
+    /// `pkg_pretend` alone, run for the whole merge list before the first build
+    ///
+    /// A binary package's saved environment is read after its signature check; its image is not
+    /// extracted.
+    Pretend(portage_repo::MergeType),
     /// Debug (`em ebuild`): run the given phases only; no clean/drop/buildpkg
     Debug(Vec<RunPhase>),
 }
@@ -139,7 +144,6 @@ impl PhaseGroup {
         use RunPhase as P;
         match self {
             Self::Full => vec![
-                P::PRETEND,
                 P::SETUP,
                 P::Fetch,
                 P::UNPACK,
@@ -151,7 +155,6 @@ impl PhaseGroup {
                 P::Qmerge,
             ],
             Self::Compile => vec![
-                P::PRETEND,
                 P::SETUP,
                 P::Fetch,
                 P::UNPACK,
@@ -161,9 +164,8 @@ impl PhaseGroup {
                 P::TEST,
             ],
             Self::Install => vec![P::INSTALL, P::Qmerge],
-            Self::BinpkgMerge => vec![P::PRETEND, P::SETUP, P::Qmerge],
+            Self::BinpkgMerge => vec![P::SETUP, P::Qmerge],
             Self::BuildOnly => vec![
-                P::PRETEND,
                 P::SETUP,
                 P::Fetch,
                 P::UNPACK,
@@ -176,6 +178,7 @@ impl PhaseGroup {
             // `run_fetch` sources the ebuild when needed and reads SRC_URI/USE
             // from the live shell — no pretend/setup required for download.
             Self::FetchOnly { .. } => vec![P::Fetch],
+            Self::Pretend(_) => vec![P::PRETEND],
             Self::Debug(p) => p.clone(),
         }
     }
@@ -198,7 +201,7 @@ impl PhaseGroup {
     /// would drop that staged state.
     fn clean_subs(&self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Full | Self::Compile | Self::BinpkgMerge | Self::BuildOnly => {
+            Self::Full | Self::Compile | Self::BinpkgMerge | Self::BuildOnly | Self::Pretend(_) => {
                 Some(&["work", "image", "temp", "homedir"])
             }
             Self::Install => Some(&["image", "homedir"]),
@@ -949,6 +952,70 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
     result
 }
 
+/// Inputs for [`pkg_pretend`]
+pub struct PkgPretend<'a> {
+    pub ebuild_path: &'a Utf8Path,
+    pub cpv: &'a portage_atom::Cpv,
+    pub use_flags:
+        &'a [portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
+    pub work_base: &'a Utf8Path,
+    pub root: &'a Utf8Path,
+    pub roots: RootContext<'a>,
+    /// The binary package the merge will install, whose saved `pkg_pretend` runs
+    pub binpkg: Option<&'a Utf8Path>,
+    /// See [`MergeBinpkg::force_verify_signature`]
+    pub force_verify_signature: bool,
+    /// `-B`/`--buildpkgonly`, which `MERGE_TYPE` reports
+    pub buildpkgonly: bool,
+}
+
+/// Run one merge-list entry's `pkg_pretend`, as emerge does for the whole list before the first
+/// build; its output always reaches the terminal
+pub async fn pkg_pretend(opts: PkgPretend<'_>) -> Result<()> {
+    let PkgPretend {
+        ebuild_path,
+        cpv,
+        use_flags,
+        work_base,
+        root,
+        roots,
+        binpkg,
+        force_verify_signature,
+        buildpkgonly,
+    } = opts;
+    let pf = format!("{}-{}", cpv.cpn.package, cpv.version);
+    let work_dir = package_work_dir(work_base, root, cpv.cpn.category.as_str(), &pf);
+    let log = work_dir.join("build.log");
+    let merge_type = match (binpkg, buildpkgonly) {
+        (Some(_), _) => portage_repo::MergeType::Binary,
+        (None, true) => portage_repo::MergeType::BuildOnly,
+        (None, false) => portage_repo::MergeType::Source,
+    };
+    println!(">>> Running pre-merge checks for {cpv}");
+    let result = run_phase_group(PhaseGroupRun {
+        ebuild_path: ebuild_path.as_str(),
+        cpv: Some(cpv),
+        group: &PhaseGroup::Pretend(merge_type),
+        work_dir: Some(&work_dir),
+        repo_override: None,
+        root,
+        use_flags: Some(use_flags),
+        distdir: None,
+        phase_log: Some((log.clone(), false)),
+        roots,
+        merge_gate: None,
+        buildpkg: false,
+        binpkg,
+        force_verify_signature,
+        ignore_blockers: false,
+        activity: None,
+    })
+    .await
+    .context(BuildLog(log.clone()));
+    crate::elog::take_pending(cpv, &work_dir, root);
+    result
+}
+
 /// Inputs for [`run_install_worker`] (the privilege-wrapped `__worker` child)
 pub struct InstallWorker<'a> {
     pub ebuild_path: &'a str,
@@ -1654,6 +1721,7 @@ impl PackageSetup {
         shell.set_merge_type(match group {
             PhaseGroup::BinpkgMerge => portage_repo::MergeType::Binary,
             PhaseGroup::BuildOnly => portage_repo::MergeType::BuildOnly,
+            PhaseGroup::Pretend(merge_type) => *merge_type,
             _ => portage_repo::MergeType::Source,
         });
 
@@ -1678,10 +1746,11 @@ impl PackageSetup {
                 features.contains("binpkg-request-signature") || force_verify_signature;
             // Where src_install would have put it: the package holds `ED`.
             let image = shell.image_ed(&ebuild, wd.as_std_path(), root.as_std_path());
+            let image = (!matches!(group, PhaseGroup::Pretend(_))).then_some(image);
             let saved = extract_binpkg(
                 &shell,
                 bp,
-                &image,
+                image.as_deref(),
                 config_root,
                 require_signature,
                 &features,
@@ -1698,6 +1767,7 @@ impl PackageSetup {
                 // supplies the phases, because EAPI, FILESDIR, and the VDB
                 // copy follow that text.
                 let copy = wd.join(format!("{}-{}.ebuild", ebuild.name(), ebuild.version()));
+                std::fs::create_dir_all(wd).with_context(|| format!("creating {wd}"))?;
                 std::fs::write(copy.as_std_path(), shipped)
                     .with_context(|| format!("writing {copy}"))?;
                 ebuild = Ebuild::with_cpv(ebuild.cpv().clone(), &copy);
@@ -1883,21 +1953,18 @@ async fn add_feature(shell: &mut portage_repo::EbuildShell, feature: &str) -> Re
         .with_context(|| format!("adding {feature} to FEATURES"))
 }
 
-/// Extract a binary package's image into `image_dir` and return its saved
-/// environment, still compressed
+/// Extract a binary package's image into `image_dir`, or with none only check it, and return
+/// its saved environment, still compressed
 ///
 /// Runs after the stale-tree clean, which wipes the image.
 fn extract_binpkg(
     shell: &portage_repo::EbuildShell,
     bp: &Utf8Path,
-    image_dir: &std::path::Path,
+    image_dir: Option<&std::path::Path>,
     config_root: Option<&Utf8Path>,
     require_signature: bool,
     features: &std::collections::HashSet<String>,
 ) -> Result<Option<Vec<u8>>> {
-    std::fs::create_dir_all(image_dir)
-        .with_context(|| format!("creating {}", image_dir.display()))?;
-
     // BINPKG_GPG_VERIFY_GPG_HOME names the keyring. The default is under the
     // config root, never the host's path for another --root/--target/--prefix.
     let verify_home = shell
@@ -1922,8 +1989,16 @@ fn extract_binpkg(
         keyring: keyring.as_ref(),
         ignore_signature,
     };
-    portage_binpkg::extract_image(bp.as_std_path(), image_dir, policy)
-        .with_context(|| format!("extracting image from {bp}"))?;
+    match image_dir {
+        Some(image_dir) => {
+            std::fs::create_dir_all(image_dir)
+                .with_context(|| format!("creating {}", image_dir.display()))?;
+            portage_binpkg::extract_image(bp.as_std_path(), image_dir, policy)
+                .with_context(|| format!("extracting image from {bp}"))?;
+        }
+        None => portage_binpkg::check_container(bp.as_std_path(), policy)
+            .with_context(|| format!("checking {bp}"))?,
+    }
     portage_binpkg::read_environment(bp.as_std_path())
         .with_context(|| format!("reading the saved environment of {bp}"))
 }
@@ -5012,11 +5087,27 @@ mod tests {
     #[test]
     fn full_phase_group_runs_fetch_before_unpack_and_ends_on_qmerge() {
         let phases = PhaseGroup::Full.phases();
-        assert_eq!(phases.first(), Some(&RunPhase::PRETEND));
+        assert_eq!(phases.first(), Some(&RunPhase::SETUP));
         assert_eq!(phases.last(), Some(&RunPhase::Qmerge));
         let fetch_pos = phases.iter().position(|p| *p == RunPhase::Fetch).unwrap();
         let unpack_pos = phases.iter().position(|p| *p == RunPhase::UNPACK).unwrap();
         assert!(fetch_pos < unpack_pos);
+    }
+
+    #[test]
+    fn only_the_up_front_group_runs_pkg_pretend() {
+        let groups = [
+            PhaseGroup::Full,
+            PhaseGroup::Compile,
+            PhaseGroup::Install,
+            PhaseGroup::BinpkgMerge,
+            PhaseGroup::BuildOnly,
+        ];
+        for group in groups {
+            assert!(!group.phases().contains(&RunPhase::PRETEND), "{group:?}");
+        }
+        let pretend = PhaseGroup::Pretend(portage_repo::MergeType::Source);
+        assert_eq!(pretend.phases(), [RunPhase::PRETEND]);
     }
 
     // Full/Compile/BinpkgMerge start genuinely fresh, so they wipe
@@ -7273,5 +7364,38 @@ mod tests {
                 .unwrap();
         assert!(shipped.contains("EAPI=8"), "{shipped}");
         assert!(shipped.contains("pkg_pretend"), "{shipped}");
+    }
+
+    #[tokio::test]
+    async fn a_binary_pretend_runs_the_shipped_pretend_without_the_image() {
+        if pkgdir_is_redirected() {
+            return;
+        }
+        let probe = Probe::new();
+        let ebuild = probe.ebuild(
+            "probe",
+            "1",
+            &format!(
+                "pkg_pretend() {{ note \"pretend=${{MERGE_TYPE}}\"; }}\n\
+                 pkg_setup() {{ note setup; }}\n\
+                 {INSTALLS_A_FILE}"
+            ),
+        );
+        probe
+            .run_group(&ebuild, PhaseGroup::BuildOnly, "root", None)
+            .await
+            .unwrap();
+        assert_eq!(probe.log(), "setup install");
+        let package = probe.package("root").unwrap();
+
+        fs::write(probe.path("log"), "").unwrap();
+        fs::create_dir_all(probe.path("root2")).unwrap();
+        let group = PhaseGroup::Pretend(portage_repo::MergeType::Binary);
+        probe
+            .run_group(&ebuild, group, "root2", Some(&package))
+            .await
+            .unwrap();
+        assert_eq!(probe.log(), "pretend=binary");
+        assert!(!probe.path("work/root2/probe-1/image/usr").exists());
     }
 }

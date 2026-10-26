@@ -71,6 +71,8 @@ pub struct PlannedMerge {
     pub interactive: bool,
     /// The `BUILD_ID` a build-id target atom pinned: merge only that binary package
     pub build_id: Option<u64>,
+    /// EAPI 4+ and `DEFINED_PHASES` lists `pretend`: runs before the first build of the merge list
+    pub pretend: bool,
 }
 
 #[derive(Default)]

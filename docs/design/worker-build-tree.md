@@ -4,7 +4,7 @@
 (`portage-cli/src/ebuild.rs`'s `PhaseGroup`), to keep pseudoroot's
 per-syscall tax (and sudo's real root) off the compile:
 
-- **`PhaseGroup::Compile`** (the un-wrapped parent): `pretend`, `setup`,
+- **`PhaseGroup::Compile`** (the un-wrapped parent): `setup`,
   `fetch`, `unpack`, `prepare`, `configure`, `compile`, `test`. Runs
   unprivileged, no fake/real root involved.
 - **`PhaseGroup::Install`** (a spawned, hidden `em __worker` child): `install`,

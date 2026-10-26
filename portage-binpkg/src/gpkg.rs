@@ -648,18 +648,19 @@ fn find_member<'a>(members: &'a [String], prefix: &str, container: &Path) -> Res
         .ok_or_else(|| Error::Corrupt(format!("no {prefix}.* member in {}", container.display())))
 }
 
-/// Extract the GPKG container's installed image into `dest` (e.g. `${D}`
-/// or a merge `work_root/image`), stripping the inner `image/` prefix so
-/// members land at `dest/<path>` (e.g. `dest/usr/bin/foo`).
+/// Accept or reject `container` under `policy` exactly as [`extract_image`]
+/// does, without extracting its image
 ///
-/// Used by the `-k`/`--usepkg` consumer to merge a pre-built package
-/// without compiling. Requires `tar` and `zstd` on `PATH`.
-///
-/// `policy` is checked first (via [`verify_container_signature`]) — a
-/// signature-required-but-missing or fails-to-verify container is rejected
-/// before any extraction happens, and so is a signed one with no keyring to
-/// check it against unless `policy.ignore_signature` is set.
-pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Result<()> {
+/// For running phases from a container's saved environment before any merge.
+pub fn check_container(container: &Path, policy: VerifyPolicy) -> Result<()> {
+    stage_accepted_container(container, policy, false).map(drop)
+}
+
+fn stage_accepted_container(
+    container: &Path,
+    policy: VerifyPolicy,
+    include_image: bool,
+) -> Result<VerifiedContainer> {
     let policy = if policy.ignore_signature {
         VerifyPolicy {
             keyring: None,
@@ -668,7 +669,7 @@ pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Res
     } else {
         policy
     };
-    let staged = stage_verified_container(container, &policy, true)?;
+    let staged = stage_verified_container(container, &policy, include_image)?;
     let report = &staged.report;
     if report.signed && report.signature_valid.is_none() && !policy.ignore_signature {
         return Err(Error::Signature(format!(
@@ -690,7 +691,22 @@ pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Res
             )));
         }
     }
+    Ok(staged)
+}
 
+/// Extract the GPKG container's installed image into `dest` (e.g. `${D}`
+/// or a merge `work_root/image`), stripping the inner `image/` prefix so
+/// members land at `dest/<path>` (e.g. `dest/usr/bin/foo`).
+///
+/// Used by the `-k`/`--usepkg` consumer to merge a pre-built package
+/// without compiling. Requires `tar` and `zstd` on `PATH`.
+///
+/// `policy` is checked first (via [`verify_container_signature`]) — a
+/// signature-required-but-missing or fails-to-verify container is rejected
+/// before any extraction happens, and so is a signed one with no keyring to
+/// check it against unless `policy.ignore_signature` is set.
+pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Result<()> {
+    let staged = stage_accepted_container(container, policy, true)?;
     let member = staged.image_member.as_deref().ok_or_else(|| {
         Error::Corrupt(format!("no image.tar.* member in {}", container.display()))
     })?;
@@ -1269,6 +1285,8 @@ mod tests {
 
         let err = extract_image(&container, &root.join("a"), VerifyPolicy::default()).unwrap_err();
         assert!(matches!(err, Error::Signature(_)), "{err}");
+        let err = check_container(&container, VerifyPolicy::default()).unwrap_err();
+        assert!(matches!(err, Error::Signature(_)), "{err}");
         for keyring in [None, Some(&wrong_keyring)] {
             let policy = VerifyPolicy {
                 keyring,
@@ -1277,6 +1295,11 @@ mod tests {
             };
             extract_image(&container, &root.join("b"), policy).unwrap();
         }
+        let policy = VerifyPolicy {
+            ignore_signature: true,
+            ..Default::default()
+        };
+        check_container(&container, policy).unwrap();
     }
 
     // `FEATURES=binpkg-request-signature` (`require_signature: true`)

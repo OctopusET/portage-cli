@@ -276,7 +276,6 @@ struct MergeRun<'a> {
 /// Per-run mode bits derived once from [`MergeRun`] / [`cli::MergeFlags`]
 struct ActionFlags {
     keep_going: bool,
-    emptytree: bool,
     buildpkg: bool,
     buildpkgonly: bool,
     fetchonly: bool,
@@ -291,7 +290,6 @@ impl MergeRun<'_> {
     fn action_flags(&self) -> ActionFlags {
         ActionFlags {
             keep_going: self.merge_flags.keep_going,
-            emptytree: self.merge_flags.emptytree,
             buildpkg: self.merge_flags.buildpkg,
             buildpkgonly: self.merge_flags.buildpkgonly,
             fetchonly: self.merge_flags.fetchonly,
@@ -309,6 +307,114 @@ impl MergeRun<'_> {
         self.binpkg_index.is_some_and(|idx| !idx.is_empty())
             || self.remote_indices.iter().any(|idx| !idx.is_empty())
     }
+
+    /// An entry an interrupted install already merged, which the merge loop skips
+    ///
+    /// `--emptytree` must not use this: its tree starts installed, and resume completion is
+    /// filtered out of the plan via `maint::resume` instead. Intentional reinstalls always build.
+    fn already_installed(
+        &self,
+        planned: &query::depgraph::PlannedMerge,
+        merge_root: &camino::Utf8Path,
+    ) -> bool {
+        !self.merge_flags.emptytree
+            && !planned.reinstall
+            && merge_root
+                .join("var/db/pkg")
+                .join(planned.cpv.to_string())
+                .exists()
+    }
+
+    /// The binpkg `planned` would be merged from, if any
+    async fn binpkg_reuse(&self, planned: &query::depgraph::PlannedMerge) -> BinpkgReuse {
+        if !self.has_binpkg_candidates() {
+            return BinpkgReuse {
+                local: None,
+                remote: None,
+            };
+        }
+        // Per-entry desired build_env_key (package.env-aware) and CHOST, host vs target
+        // selected the same way entry_roots is.
+        let (desired_env, desired_dirs) = entry_desired_env(
+            planned,
+            (self.target_env, self.target_dirs),
+            (self.host_env, self.host_dirs),
+        );
+        let desired_build_env_key = desired_env.key_for(desired_dirs, &planned.cpv).await;
+        find_binpkg_reuse(
+            planned,
+            entry_binpkg_index(planned, self.binpkg_index, self.host_binpkg_index),
+            self.remote_indices,
+            &desired_env.chost,
+            &desired_build_env_key,
+        )
+    }
+}
+
+/// The root views a plan entry's phases run with
+fn root_context<'a>(
+    entry_roots: &'a portage_resolve::Roots,
+    host_roots: &'a portage_resolve::Roots,
+    flags: &ActionFlags,
+    extra_path: &'a [camino::Utf8PathBuf],
+) -> ebuild::RootContext<'a> {
+    ebuild::RootContext {
+        config_root: entry_roots.config(),
+        sysroot: entry_roots.build_sysroot(),
+        eprefix: entry_roots.build_eprefix(),
+        broot: Some(host_roots.merge_root()),
+        self_contained_bootstrap: flags.self_contained_bootstrap,
+        extra_path,
+    }
+}
+
+/// emerge's `_run_pkg_pretend`: every entry's `pkg_pretend` before the first build, the first
+/// failure stopping the run
+async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
+    let flags = run.action_flags();
+    if flags.fetchonly || flags.fetch_all_uri {
+        return Ok(());
+    }
+    for planned in run.plan.iter().filter(|p| p.pretend) {
+        if crate::interrupt::requested() {
+            return Ok(());
+        }
+        let entry_roots = entry_roots(planned, run.roots, run.host_roots, run.base_roots);
+        let merge_root = entry_roots.merge_root();
+        if run.already_installed(planned, merge_root) {
+            continue;
+        }
+        let reuse = run.binpkg_reuse(planned).await;
+        let (binpkg, force_verify_signature) = if let Some(local) = reuse.local {
+            (camino::Utf8PathBuf::from_path_buf(local).ok(), false)
+        } else if let Some(remote) = &reuse.remote {
+            match fetch_remote_binpkg(remote, run.work_base).await {
+                Ok(path) => (Some(path), remote.verify_signature),
+                Err(e) if flags.enforce_no_source => return Err(e),
+                // The merge warns and builds from source.
+                Err(_) => (None, false),
+            }
+        } else if flags.enforce_no_source {
+            continue;
+        } else {
+            (None, false)
+        };
+        ebuild::pkg_pretend(ebuild::PkgPretend {
+            ebuild_path: &planned.ebuild_path,
+            cpv: &planned.cpv,
+            use_flags: &planned.use_flags,
+            work_base: run.work_base,
+            root: merge_root,
+            roots: root_context(entry_roots, run.host_roots, &flags, run.extra_path),
+            binpkg: binpkg.as_deref(),
+            force_verify_signature,
+            buildpkgonly: flags.buildpkgonly,
+        })
+        .instrument(tracing::info_span!("pkg", cpv = %planned.cpv))
+        .await
+        .with_context(|| format!("pkg_pretend of {} failed", planned.cpv))?;
+    }
+    Ok(())
 }
 
 /// Everything needed to act on one plan entry (fetch / binpkg / source)
@@ -693,6 +799,11 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         activity,
     };
 
+    if let Err(e) = run_pretend_checks(&run).await {
+        crate::elog::finalize_echo();
+        return Err(e);
+    }
+
     let (merged, skipped, failures) = if jobs <= 1 {
         merge_sequential(&run).await
     } else {
@@ -785,7 +896,6 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         ignore_blockers,
         enforce_no_source,
         quiet,
-        self_contained_bootstrap,
         ..
     } = *flags;
 
@@ -795,14 +905,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
     } = reuse;
     let enforce_no_source = !source_build_allowed(enforce_no_source, planned);
 
-    let root_ctx = ebuild::RootContext {
-        config_root: entry_roots.config(),
-        sysroot: entry_roots.build_sysroot(),
-        eprefix: entry_roots.build_eprefix(),
-        broot: Some(host_roots.merge_root()),
-        self_contained_bootstrap,
-        extra_path,
-    };
+    let root_ctx = root_context(entry_roots, host_roots, flags, extra_path);
 
     if fetchonly || fetch_all_uri {
         // Local binpkg already present → nothing to download.
@@ -1210,47 +1313,16 @@ async fn merge_sequential(run: &MergeRun<'_>) -> (usize, usize, Vec<MergeFailure
         }
         let entry_roots = entry_roots(planned, run.roots, run.host_roots, run.base_roots);
         let merge_root = entry_roots.merge_root();
-        let entry_index = entry_binpkg_index(planned, run.binpkg_index, run.host_binpkg_index);
-
-        // VDB-presence skip for non-emptytree non-reinstall entries (an
-        // interrupted ordinary install/upgrade). `--emptytree` must not use
-        // this path — the tree starts installed — resume completion is
-        // tracked via `maint::resume` and filtered out of the plan before
-        // we get here. Intentional reinstalls (explicit target / USE rebuild)
-        // always build.
         // Under `-f`, still skip fully-installed packages that are not being
-        // reinstalled — their distfiles are not needed for this plan step.
-        let pkg_vdb = merge_root.join("var/db/pkg").join(planned.cpv.to_string());
-        if !flags.emptytree && !planned.reinstall && pkg_vdb.exists() {
+        // reinstalled: their distfiles are not needed for this plan step.
+        if run.already_installed(planned, merge_root) {
             // Skips are silent during the merge (counted in the end summary);
             // the `HumanStdoutSink` only renders packages that actually start.
             skipped += 1;
             continue;
         }
 
-        let reuse = if run.has_binpkg_candidates() {
-            // Per-entry desired build_env_key (S6: package.env-aware) and CHOST
-            // — proper binpkg reuse across cross-compilation and multi-arch
-            // scenarios, host vs target selected the same way entry_roots is.
-            let (desired_env, desired_dirs) = entry_desired_env(
-                planned,
-                (run.target_env, run.target_dirs),
-                (run.host_env, run.host_dirs),
-            );
-            let desired_build_env_key = desired_env.key_for(desired_dirs, &planned.cpv).await;
-            find_binpkg_reuse(
-                planned,
-                entry_index,
-                run.remote_indices,
-                &desired_env.chost,
-                &desired_build_env_key,
-            )
-        } else {
-            BinpkgReuse {
-                local: None,
-                remote: None,
-            }
-        };
+        let reuse = run.binpkg_reuse(planned).await;
 
         // `>>> Emerging (N of M)` is rendered by `HumanStdoutSink` from the
         // `PkgStart` event emitted below — no ad-hoc print here.
@@ -1521,15 +1593,7 @@ async fn merge_parallel(
             )
             .to_string();
             inflight_workdirs.insert(work_key.clone());
-            let entry_index = entry_binpkg_index(planned, run.binpkg_index, run.host_binpkg_index);
-
-            if !flags.emptytree
-                && !planned.reinstall
-                && merge_root
-                    .join("var/db/pkg")
-                    .join(planned.cpv.to_string())
-                    .exists()
-            {
+            if run.already_installed(planned, merge_root) {
                 // Skips are silent (counted in the end summary); the
                 // `HumanStdoutSink` renders only packages that actually start.
                 skipped += 1;
@@ -1538,28 +1602,7 @@ async fn merge_parallel(
                 continue;
             }
 
-            let reuse = if run.has_binpkg_candidates() {
-                // Per-entry desired build_env_key (S6: package.env-aware) and
-                // CHOST — see the matching comment in `merge_sequential`.
-                let (desired_env, desired_dirs) = entry_desired_env(
-                    planned,
-                    (run.target_env, run.target_dirs),
-                    (run.host_env, run.host_dirs),
-                );
-                let desired_build_env_key = desired_env.key_for(desired_dirs, &planned.cpv).await;
-                find_binpkg_reuse(
-                    planned,
-                    entry_index,
-                    run.remote_indices,
-                    &desired_env.chost,
-                    &desired_build_env_key,
-                )
-            } else {
-                BinpkgReuse {
-                    local: None,
-                    remote: None,
-                }
-            };
+            let reuse = run.binpkg_reuse(planned).await;
             started += 1;
             // `>>> Emerging (N of M)` is rendered by `HumanStdoutSink` from the
             // `PkgStart` event emitted below — no ad-hoc print here.
@@ -1715,6 +1758,7 @@ mod entry_roots_tests {
             reinstall: false,
             interactive: false,
             build_id: None,
+            pretend: false,
         })
     }
 
@@ -1873,7 +1917,6 @@ mod entry_roots_tests {
         let p = planned(MergeRoot::Target)?;
         let flags = ActionFlags {
             keep_going: false,
-            emptytree: false,
             buildpkg: false,
             buildpkgonly: false,
             fetchonly: false,
@@ -2026,6 +2069,7 @@ mod unmerge_scheduling_tests {
             reinstall: false,
             interactive: false,
             build_id: None,
+            pretend: false,
         }
     }
 

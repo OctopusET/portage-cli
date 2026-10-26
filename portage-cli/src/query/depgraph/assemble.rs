@@ -481,6 +481,12 @@ pub(super) fn assemble(
                 portage_metadata::RestrictExpr::flat_tokens(&c.metadata.properties)
                     .contains(&"interactive")
             });
+            let pretend = cache.is_some_and(|c| {
+                c.metadata.eapi.has_pkg_pretend()
+                    && c.metadata
+                        .defined_phases
+                        .contains(&portage_metadata::Phase::PkgPretend)
+            });
             let (depend, bdepend, mut flags) = if let Some(cache) = cache {
                 let repo = repo::repo_name_of(&data, &cpv);
                 let stable = accept_keywords.is_stable(
@@ -564,6 +570,7 @@ pub(super) fn assemble(
                 },
                 interactive,
                 build_id: build_ids.get(&cpv).copied(),
+                pretend,
             }
         })
         .collect();

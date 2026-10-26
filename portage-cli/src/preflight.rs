@@ -200,6 +200,7 @@ mod tests {
             reinstall: false,
             interactive: false,
             build_id: None,
+            pretend: false,
         })
     }
 
