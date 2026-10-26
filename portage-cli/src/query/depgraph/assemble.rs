@@ -205,13 +205,20 @@ pub(super) fn assemble(
     // Pretty/JSON/Tree preview built from it) inherit the exclusion for free.
     let plan_entries = root_aware::build_plan(order.clone());
 
+    let repo_path_of = |cpv: &Cpv| -> camino::Utf8PathBuf {
+        let name = repo::repo_name_of(&data, cpv);
+        set.by_name(name.as_str())
+            .unwrap_or(set.main())
+            .path()
+            .to_owned()
+    };
     // Verbose mode shows per-package download size and a total; skip the
     // Manifest/DISTDIR work entirely in plain mode. Shared by Pretty and
     // Tree — Tree renders the same per-package row, so it needs the same
     // sizes and the same `PrettyCtx`.
     let sizes = if verbose >= 1 {
         download_size::compute(
-            set.main().path(),
+            &repo_path_of,
             &distdir,
             &data,
             &order,
@@ -477,13 +484,6 @@ pub(super) fn assemble(
     // The merge plan for the build loop: ebuild paths come from the package's
     // source repo (main or overlay), USE from the same effective fold the
     // displayed plan used.
-    let repo_path_of = |cpv: &Cpv| -> camino::Utf8PathBuf {
-        let name = repo::repo_name_of(&data, cpv);
-        set.by_name(name.as_str())
-            .unwrap_or(set.main())
-            .path()
-            .to_owned()
-    };
     let plan: Vec<PlannedMerge> = plan_entries
         .iter()
         .filter(|e| !e.pkg.is_virtual())
