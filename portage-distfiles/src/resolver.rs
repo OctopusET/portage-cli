@@ -50,30 +50,17 @@ fn push_unique(list: &mut Vec<String>, urls: impl IntoIterator<Item = String>) {
     }
 }
 
-/// Parse `/etc/portage/mirrors` (a file, or a directory of them): `name url...` per line
+/// Parse `/etc/portage/mirrors` (a file, or a directory walked recursively): `name url...` per line
 ///
-/// A later line for a name replaces an earlier one. A missing or unreadable path yields no mirrors.
+/// A repeated name adds its URLs to the earlier ones, and a token starting with `#` ends the
+/// line, as portage's `grabdict` reads it. A missing or unreadable path yields no mirrors.
 pub fn read_custom_mirrors(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
-    let mut files = vec![path.to_path_buf()];
-    if path.is_dir() {
-        files = std::fs::read_dir(path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| !n.starts_with('.') && !n.ends_with('~'))
-            })
-            .collect();
-        files.sort();
-    }
+    let files = portage_repo::list_config_files(path, portage_repo::ConfigFilesMode::Recursive)
+        .unwrap_or_default();
     let mut mirrors: Vec<(String, Vec<String>)> = Vec::new();
     for text in files.iter().filter_map(|f| std::fs::read_to_string(f).ok()) {
         for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("");
-            let mut fields = line.split_whitespace();
+            let mut fields = line.split_whitespace().take_while(|t| !t.starts_with('#'));
             let Some(name) = fields.next() else {
                 continue;
             };
@@ -81,8 +68,10 @@ pub fn read_custom_mirrors(path: &std::path::Path) -> Vec<(String, Vec<String>)>
             if urls.is_empty() {
                 continue;
             }
-            mirrors.retain(|(n, _)| n != name);
-            mirrors.push((name.to_owned(), urls));
+            match mirrors.iter_mut().find(|(n, _)| n == name) {
+                Some((_, list)) => list.extend(urls),
+                None => mirrors.push((name.to_owned(), urls)),
+            }
         }
     }
     mirrors
@@ -695,19 +684,30 @@ mod tests {
     }
 
     #[test]
-    fn read_custom_mirrors_lets_a_later_line_replace_a_name() {
+    fn read_custom_mirrors_appends_a_repeated_name_and_keeps_a_hash_inside_a_url() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mirrors");
+        std::fs::create_dir_all(path.join("sub")).unwrap();
         std::fs::write(
-            &path,
-            "# comment\nlocal /srv/a\ngnu https://g.example\nlocal /srv/b # x\n",
+            path.join("a"),
+            "# comment\nlocal /srv/a\ngnu https://g.example/x#frag\nlocal /srv/b #x y\n",
         )
         .unwrap();
+        std::fs::write(path.join("sub/b"), "gnu https://g2.example\n").unwrap();
         assert_eq!(
             read_custom_mirrors(&path),
             [
-                ("gnu".to_owned(), vec!["https://g.example".to_owned()]),
-                ("local".to_owned(), vec!["/srv/b".to_owned()]),
+                (
+                    "local".to_owned(),
+                    vec!["/srv/a".to_owned(), "/srv/b".to_owned()]
+                ),
+                (
+                    "gnu".to_owned(),
+                    vec![
+                        "https://g.example/x#frag".to_owned(),
+                        "https://g2.example".to_owned()
+                    ]
+                ),
             ]
         );
         assert!(read_custom_mirrors(&dir.path().join("absent")).is_empty());
