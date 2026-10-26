@@ -14,7 +14,7 @@ use portage_resolve::{conflicts, installed, repo, root_aware, use_env};
 
 use super::{
     DepgraphOpts, ResolveMetrics, RootTargets, classify_root_targets, package_needs_use_reinstall,
-    provided_availability,
+    provided_availability, target_build_ids,
 };
 
 /// Owned inputs for one [`super::depgraph`] call.
@@ -75,6 +75,7 @@ pub(super) struct Prepared<'a> {
     pub(super) root_cpns: std::collections::HashSet<Cpn>,
     pub(super) unsatisfiable: Vec<super::output::UnsatisfiableTarget>,
     pub(super) masked_root_targets: Vec<(Cpv, Option<Interned<DefaultInterner>>, String)>,
+    pub(super) build_ids: HashMap<Cpv, u64>,
     pub(super) slot_map: SlotMap,
     pub(super) widened_slot_map: Option<SlotMap>,
     pub(super) sysroot_installed: Vec<(PortagePackage, Version)>,
@@ -336,6 +337,7 @@ pub(super) async fn prepare<'a>(
         selective,
         set.is_multi(),
     )?;
+    let build_ids = target_build_ids(atoms, binpkg_index)?;
 
     // The whole-repository slot map (unslotted-dep resolution against
     // multi-slot packages) computed once, up front, and reused by every
@@ -535,6 +537,7 @@ pub(super) async fn prepare<'a>(
         root_cpns,
         unsatisfiable,
         masked_root_targets,
+        build_ids,
         slot_map,
         widened_slot_map,
         sysroot_installed,

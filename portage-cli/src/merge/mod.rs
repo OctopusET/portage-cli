@@ -135,6 +135,7 @@ fn find_binpkg_reuse(
     let local = binpkg_index.and_then(|idx| {
         idx.find_reusable(
             &planned.cpv.to_string(),
+            planned.build_id,
             &desired_use,
             desired_chost,
             desired_build_env_key,
@@ -144,6 +145,7 @@ fn find_binpkg_reuse(
         remote_indices.iter().find_map(|idx| {
             idx.find_reusable(
                 &planned.cpv.to_string(),
+                planned.build_id,
                 &desired_use,
                 desired_chost,
                 desired_build_env_key,
@@ -777,6 +779,8 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         local: reused,
         remote: remote_match,
     } = reuse;
+    // A build-id atom names one binary package, which no source build reproduces.
+    let enforce_no_source = enforce_no_source || planned.build_id.is_some();
 
     let root_ctx = ebuild::RootContext {
         config_root: entry_roots.config(),
@@ -1692,6 +1696,7 @@ mod entry_roots_tests {
             bdepend: Vec::new(),
             reinstall: false,
             interactive: false,
+            build_id: None,
         })
     }
 
@@ -1792,7 +1797,7 @@ mod entry_roots_tests {
         let picked = entry_binpkg_index(&host_entry, Some(&target_idx), Some(&host_idx)).unwrap();
         assert_eq!(
             picked
-                .find_reusable("dev-python/jinja2-3.1.6", &[], "", "")
+                .find_reusable("dev-python/jinja2-3.1.6", None, &[], "", "")
                 .unwrap(),
             host_dir.path().join("dev-python/jinja2-3.1.6-1.gpkg.tar")
         );
@@ -1800,7 +1805,7 @@ mod entry_roots_tests {
         let picked = entry_binpkg_index(&target_entry, Some(&target_idx), Some(&host_idx)).unwrap();
         assert_eq!(
             picked
-                .find_reusable("dev-python/jinja2-3.1.6", &[], "", "")
+                .find_reusable("dev-python/jinja2-3.1.6", None, &[], "", "")
                 .unwrap(),
             target_dir.path().join("dev-python/jinja2-3.1.6-1.gpkg.tar")
         );
@@ -1984,6 +1989,7 @@ mod unmerge_scheduling_tests {
             bdepend: Vec::new(),
             reinstall: false,
             interactive: false,
+            build_id: None,
         }
     }
 

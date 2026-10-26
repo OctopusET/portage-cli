@@ -45,6 +45,7 @@ struct Solve<'a> {
     complete_graph: bool,
     exclude: &'a [String],
     resume: HashSet<(MergeRoot, String)>,
+    binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
 }
 
 impl<'a> Solve<'a> {
@@ -63,6 +64,7 @@ impl<'a> Solve<'a> {
             complete_graph: false,
             exclude: &[],
             resume: HashSet::new(),
+            binpkg_index: None,
         }
     }
 }
@@ -213,7 +215,7 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         extra_use_override: None,
         extra_package_use: extra,
         pending_config: None,
-        binpkg_index: None,
+        binpkg_index: opts.binpkg_index,
         exclude: opts.exclude,
         resume_completed: opts.resume,
         complete_graph: opts.complete_graph,
@@ -1168,4 +1170,42 @@ fn changed_deps_rebuilds_a_dependency_under_deep_update() {
     opts.deep = true;
     opts.changed_deps = true;
     assert_eq!(names(&solve(&fix, opts)), ["app-misc/dep-1"]);
+}
+
+/// A local `PKGDIR` index holding `app-misc/bar-1` builds 1 and 3
+fn bar_binpkgs(dir: &tempfile::TempDir) -> portage_binpkg::BinpkgIndex {
+    let entry = |id: u32| {
+        format!("CPV: app-misc/bar-1\nPATH: app-misc/bar/bar-1-{id}.gpkg.tar\nBUILD_ID: {id}\n")
+    };
+    let text = format!("VERSION: 0\n\n{}\n{}", entry(1), entry(3));
+    std::fs::write(dir.path().join("Packages"), text).unwrap();
+    portage_binpkg::BinpkgIndex::open(dir.path()).unwrap()
+}
+
+#[test]
+fn a_build_id_target_pins_its_binary_package() {
+    let fix = fixture(&pair(), &[]);
+    let pkgdir = tempfile::tempdir().unwrap();
+    let index = bar_binpkgs(&pkgdir);
+    let atoms = [TargetAtom::explicit("=app-misc/bar-1-3")];
+    let outcome = solve(
+        &fix,
+        Solve {
+            binpkg_index: Some(&index),
+            ..Solve::new(&atoms)
+        },
+    );
+    assert_eq!(names(&outcome), ["app-misc/bar-1"]);
+    assert_eq!(outcome.plan[0].build_id, Some(3));
+}
+
+#[test]
+fn a_build_id_needs_that_binary_package() {
+    let pkgdir = tempfile::tempdir().unwrap();
+    let index = bar_binpkgs(&pkgdir);
+    let cpv = Cpv::parse("app-misc/bar-1").unwrap();
+    let atom = "=app-misc/bar-1-3";
+    assert!(super::require_binpkg_build(Some(&index), atom, &cpv, 3).is_ok());
+    assert!(super::require_binpkg_build(Some(&index), atom, &cpv, 2).is_err());
+    assert!(super::require_binpkg_build(None, atom, &cpv, 3).is_err());
 }

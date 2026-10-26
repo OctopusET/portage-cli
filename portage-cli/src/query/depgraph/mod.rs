@@ -69,6 +69,8 @@ pub struct PlannedMerge {
     pub reinstall: bool,
     /// `PROPERTIES` names `interactive` (USE conditionals not evaluated): the build needs the terminal
     pub interactive: bool,
+    /// The `BUILD_ID` a build-id target atom pinned: merge only that binary package
+    pub build_id: Option<u64>,
 }
 
 #[derive(Default)]
@@ -1048,6 +1050,46 @@ fn narrow_to_required_iuse(
             set.union(&PortageVersionSet::singleton(cpv.version.clone()))
         });
     Ok((PortagePackage::slotted(dep.cpn, slot), narrowed))
+}
+
+/// The binary package each build-id target atom pins, by cpv
+fn target_build_ids(
+    atoms: &[TargetAtom],
+    binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
+) -> anyhow::Result<HashMap<Cpv, u64>> {
+    let mut build_ids = HashMap::new();
+    for target in atoms {
+        let Ok(dep) = Dep::parse(&target.atom) else {
+            continue;
+        };
+        if let (Some(id), Some(cpv)) = (dep.build_id, dep.cpv()) {
+            require_binpkg_build(binpkg_index, &target.atom, &cpv, id)?;
+            build_ids.insert(cpv, id);
+        }
+    }
+    Ok(build_ids)
+}
+
+/// Check that the local binary packages (`-k`/`-K`) hold `cpv`'s build `id`; no ebuild has a build id
+fn require_binpkg_build(
+    binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
+    atom: &str,
+    cpv: &Cpv,
+    id: u64,
+) -> anyhow::Result<()> {
+    let Some(index) = binpkg_index else {
+        let message =
+            format!("there are no ebuilds to satisfy \"{atom}\" (a build id needs --usepkg)");
+        return Err(crate::error::UnsatisfiableTarget(message).into());
+    };
+    let held = index
+        .get(&cpv.to_string())
+        .is_some_and(|entries| entries.iter().any(|e| u64::from(e.build_id) == id));
+    if !held {
+        let message = format!("there are no binary packages to satisfy \"{atom}\"");
+        return Err(crate::error::UnsatisfiableTarget(message).into());
+    }
+    Ok(())
 }
 
 /// The solver identity of an installed `(cpn, slot)`; an empty VDB `SLOT` is unslotted

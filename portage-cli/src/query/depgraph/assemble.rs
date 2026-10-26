@@ -56,6 +56,7 @@ pub(super) fn assemble(
         root_cpns,
         unsatisfiable,
         masked_root_targets,
+        build_ids,
         host_installed_cpvs,
         base_installed_cpvs,
         target_installed_cpvs,
@@ -547,6 +548,7 @@ pub(super) fn assemble(
                     MergeRoot::Target => target_installed_cpvs.contains(&cpv),
                 },
                 interactive,
+                build_id: build_ids.get(&cpv).copied(),
             }
         })
         .collect();

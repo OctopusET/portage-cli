@@ -199,6 +199,7 @@ mod tests {
             bdepend: Vec::new(),
             reinstall: false,
             interactive: false,
+            build_id: None,
         })
     }
 

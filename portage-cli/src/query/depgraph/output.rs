@@ -1641,7 +1641,7 @@ fn format_plan_parts(
             .collect();
         // Empty CHOST and build_env_key: preview skips both gates (same as "unknown");
         // the real merge path passes make.conf CHOST and build_env_key.
-        idx.find_reusable(&cpv.to_string(), &desired_use, "", "")
+        idx.find_reusable(&cpv.to_string(), None, &desired_use, "", "")
             .is_some()
     });
 

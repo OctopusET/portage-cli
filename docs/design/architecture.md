@@ -640,6 +640,11 @@ PubGrub core" in *some* way:
   with no warning:
   - old-slot wrapper/shim packages (`autoconf-wrapper`, `gcc-config`).
 
+**Build-id atoms** (`=cat/pkg-1.0-r1-3`). Binary packages are not solver
+candidates: em resolves the atom as `=cat/pkg-1.0-r1` and pins that plan entry
+to the local binary package with `BUILD_ID` 3. The target fails unless `-k`/`-K`
+is set and the local `PKGDIR` index holds that build; a remote binhost alone does not count.
+
 PMS 8.3.2: hard blocker conflicts (`PlannedCoexistence`, strong `StillNeeded`)
 fail with exit 1 after classify. `WouldUnmerge` victims are unmerged on a real
 merge — strong `!!` before the merge loop, weak `!` after. `-p` still exits 0.
