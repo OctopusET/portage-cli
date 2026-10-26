@@ -538,6 +538,21 @@ impl ConvertCtx<'_> {
                 .push((pkg, PortageVersionSet::any(), self.gating_flag));
             return;
         }
+        // A branch left empty by a disabled USE conditional is not an alternative (portage
+        // `use_reduce` drops it), so `|| ( systemd? ( systemd ) basu )` with -systemd needs basu.
+        let none = Version::new(&[0]);
+        let empty: Vec<Version> = versions
+            .iter()
+            .zip(&branch_blockers)
+            .zip(&branch_use_deps)
+            .filter(|(((v, d), (_, b)), (_, u))| {
+                !(allow_none && *v == none) && d.is_empty() && b.is_empty() && u.is_empty()
+            })
+            .map(|(((v, _), _), _)| v.clone())
+            .collect();
+        versions.retain(|(v, _)| !empty.contains(v));
+        branch_use_deps.retain(|(v, _)| !empty.contains(v));
+        branch_blockers.retain(|(v, _)| !empty.contains(v));
 
         self.virtual_choices.push(VirtualChoice {
             package: pkg.clone(),

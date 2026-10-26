@@ -1354,6 +1354,39 @@ fn or_group_prefers_use_satisfied_branch_over_installed() {
     assert_eq!(picked(Some(vec![f])), "x", "x installed with f");
 }
 
+// dev-libs/libei `|| ( systemd? ( sys-apps/systemd ) sys-libs/basu )` with -systemd.
+#[test]
+fn or_branch_emptied_by_disabled_use_is_no_alternative() {
+    let mut repo = InMemoryRepository::new();
+    for cpv in ["sys-apps/systemd-1", "sys-libs/basu-1"] {
+        repo.add_version(
+            portage_atom::Cpv::parse(cpv).unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+    }
+    repo.add_version_with_iuse(
+        portage_atom::Cpv::parse("dev-libs/libei-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        vec![Interned::intern("systemd")],
+        PackageDeps {
+            rdepend: (DepEntry::parse("|| ( systemd? ( sys-apps/systemd ) sys-libs/basu )")
+                .unwrap())
+            .into(),
+            ..empty_deps()
+        },
+    );
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let mut provider = PortageDependencyProvider::new(repo);
+    let solution = provider
+        .resolve_targets(vec![(pkg("dev-libs/libei"), PortageVersionSet::any())])
+        .unwrap();
+    assert!(solution.get(&pkg("sys-libs/basu")).is_some());
+    assert!(solution.get(&pkg("sys-apps/systemd")).is_none());
+}
+
 #[test]
 fn or_group_no_preference_when_both_installed() {
     // || ( A B ) where both A and B are installed — solver falls through to
