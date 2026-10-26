@@ -1379,11 +1379,35 @@ fn deselect_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
         bail!("-W/--deselect needs at least one atom or @set");
     }
     let roots = cli.roots();
-    let removed = maint::world::remove_atoms(Some(roots.merge_root()), atoms)?;
-    println!(
-        ">>> Removed {removed} entr{} from the world file",
-        if removed == 1 { "y" } else { "ies" }
-    );
+    let root = Some(roots.merge_root());
+    // A root with no VDB yet still has a world file to edit.
+    let installed: Vec<portage_vdb::InstalledPackage> = open_cli_vdb(cli)
+        .map(|v| v.packages().into_iter().collect())
+        .unwrap_or_default();
+    let lines = maint::world::deselect_lines(root, atoms, &installed)?;
+    if lines.is_empty() {
+        println!(">>> No matching atoms found in \"world\" favorites file...");
+        return Ok(());
+    }
+    let pretend = cli.pretend();
+    let action = if pretend { "Would remove" } else { "Removing" };
+    for line in &lines {
+        let file = if line.starts_with('@') {
+            "world_sets"
+        } else {
+            "world"
+        };
+        println!(">>> {action} {line} from \"{file}\" favorites file...");
+    }
+    if pretend {
+        return Ok(());
+    }
+    if cli.merge_flags().ask && !confirm_action("remove these packages from your world favorites")?
+    {
+        println!(">>> Quitting.");
+        return Ok(());
+    }
+    maint::world::remove_lines(root, &lines)?;
     Ok(())
 }
 

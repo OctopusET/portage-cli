@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_atom::Dep;
-use portage_vdb::Vdb;
+use portage_atom::{Dep, SlotDep};
+use portage_vdb::{InstalledPackage, Vdb};
 
 use super::sets::KnownSets;
 use crate::query::which::dep_matches_cpv;
@@ -351,45 +351,144 @@ pub fn add_set_refs(root: Option<&Utf8Path>, names: &[String]) {
     }
 }
 
-/// Remove `tokens` (plain atoms or `@set` names) from the world files — `-W`/`--deselect`
+/// The world-file lines `-W`/`--deselect` drops for `tokens` (atoms, bare names or `@set`
+/// names), sorted, selected as real emerge's `action_deselect` does
 ///
-/// Mirrors real emerge's `action_deselect`: a plain-atom token is matched by `Cpn` against
-/// `world` (any version-qualified form); a `@name` token is matched by exact name against
-/// `world_sets` — the two files and token kinds are handled independently, never
-/// cross-matched.
-///
-/// `world` is also checked for a stray `@name` line for backward
-/// compatibility (`check_world_file` has long tolerated `@` lines living
-/// directly in `world` rather than `world_sets`). Tokens matching nothing
-/// are silent no-ops (matches real emerge). Returns the total lines removed.
-pub fn remove_atoms(root: Option<&Utf8Path>, tokens: &[String]) -> Result<usize> {
+/// An atom drops a line it intersects (same name, operator, version and USE deps, compatible
+/// slot) unless it names a slot or repository the line lacks; every installed package it
+/// matches adds its `cat/pkg:slot`. A `@name` drops that exact set reference.
+pub fn deselect_lines(
+    root: Option<&Utf8Path>,
+    tokens: &[String],
+    installed: &[InstalledPackage],
+) -> Result<Vec<String>> {
+    let world = entry_lines(&world_path(root));
     let mut set_names: HashSet<&str> = HashSet::new();
-    let mut cpns: HashSet<portage_atom::Cpn> = HashSet::new();
+    let mut args: Vec<Dep> = Vec::new();
     for tok in tokens {
-        match tok.strip_prefix('@') {
-            Some(name) => {
-                set_names.insert(name);
+        if let Some(name) = tok.strip_prefix('@') {
+            set_names.insert(name);
+            continue;
+        }
+        for dep in expand_deselect_arg(tok, &world, installed)? {
+            for pkg in installed {
+                if let Ok(slot) = pkg.slot()
+                    && dep.matches_cpv(pkg.cpv(), Some(&slot))
+                {
+                    args.extend(Dep::parse(&format!("{}:{}", pkg.cpv().cpn, slot.slot)).ok());
+                }
             }
-            None => {
-                let dep = Dep::parse(tok).with_context(|| format!("invalid atom '{tok}'"))?;
-                cpns.insert(dep.cpn);
-            }
+            args.push(dep);
         }
     }
 
-    let world_removed = remove_matching_lines(&world_path(root), |t| match t.strip_prefix('@') {
-        Some(name) => set_names.contains(name),
-        None => Dep::parse(t).is_ok_and(|d| cpns.contains(&d.cpn)),
-    })?;
-    let sets_removed = if set_names.is_empty() {
-        0
+    let sets = if set_names.is_empty() {
+        Vec::new()
     } else {
-        remove_matching_lines(&world_sets_path(root), |t| {
-            t.strip_prefix('@')
-                .is_some_and(|name| set_names.contains(name))
-        })?
+        entry_lines(&world_sets_path(root))
     };
-    Ok(world_removed + sets_removed)
+    let mut out: Vec<String> = world
+        .into_iter()
+        .chain(sets)
+        .filter(|l| match l.strip_prefix('@') {
+            Some(name) => set_names.contains(name),
+            None => Dep::parse(l).is_ok_and(|line| args.iter().any(|a| deselects(a, &line))),
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Drop `lines` (from [`deselect_lines`]) from the world files; returns the lines removed
+///
+/// `world_sets` is only touched for a `@name` line, so a `-W` of atoms never creates it.
+pub fn remove_lines(root: Option<&Utf8Path>, lines: &[String]) -> Result<usize> {
+    let drop: HashSet<&str> = lines.iter().map(String::as_str).collect();
+    let mut removed = remove_matching_lines(&world_path(root), |t| drop.contains(t))?;
+    if lines.iter().any(|l| l.starts_with('@')) {
+        removed += remove_matching_lines(&world_sets_path(root), |t| drop.contains(t))?;
+    }
+    Ok(removed)
+}
+
+/// The non-blank, non-comment lines of `path`, trimmed; empty when it is missing.
+fn entry_lines(path: &Utf8Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !t.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `tok` as atoms; a bare name takes its category from the installed packages (ambiguity is an
+/// error) or, when none is installed, from every world line with that name.
+fn expand_deselect_arg(
+    tok: &str,
+    world: &[String],
+    installed: &[InstalledPackage],
+) -> Result<Vec<Dep>> {
+    if let Ok(dep) = Dep::parse(tok) {
+        return Ok(vec![dep]);
+    }
+    let (op, rest) = tok.split_at(tok.find(|c: char| c.is_ascii_alphanumeric()).unwrap_or(0));
+    let bare =
+        Dep::parse(&format!("{op}null/{rest}")).with_context(|| format!("invalid atom '{tok}'"))?;
+    let pn = bare.cpn.package;
+    let mut cpns: Vec<portage_atom::Cpn> = installed
+        .iter()
+        .map(|p| p.cpv().cpn)
+        .filter(|c| c.package == pn)
+        .collect();
+    cpns.sort();
+    cpns.dedup();
+    if cpns.len() > 1 {
+        let names: Vec<String> = cpns.iter().map(|c| c.to_string()).collect();
+        bail!(
+            "the short package name '{tok}' is ambiguous, specify one of: {}",
+            names.join(", ")
+        );
+    }
+    if cpns.is_empty() {
+        cpns = world
+            .iter()
+            .filter_map(|l| Dep::parse(l).ok())
+            .map(|d| d.cpn)
+            .filter(|c| c.package == pn)
+            .collect();
+        cpns.sort();
+        cpns.dedup();
+    }
+    Ok(cpns
+        .into_iter()
+        .map(|cpn| Dep {
+            cpn,
+            ..bare.clone()
+        })
+        .collect())
+}
+
+/// Whether deselecting `arg` drops the world atom `line` (portage's `Atom.intersects` plus
+/// `action_deselect`'s slot and repository guards).
+fn deselects(arg: &Dep, line: &Dep) -> bool {
+    let slot = |d: &Dep| match &d.slot_dep {
+        Some(SlotDep::Slot { slot: Some(s), .. }) => Some(s.slot),
+        _ => None,
+    };
+    let slots_ok = match (slot(arg), slot(line)) {
+        (Some(a), Some(l)) => a == l,
+        (Some(_), None) => false,
+        _ => true,
+    };
+    arg.cpn == line.cpn
+        && arg.op == line.op
+        && arg.version == line.version
+        && arg.glob == line.glob
+        && arg.use_deps == line.use_deps
+        && slots_ok
+        && (arg.repo.is_none() || line.repo.is_some())
 }
 
 /// Drop the world entries for `cpn` that no package installed in `vdb` still matches
@@ -628,7 +727,7 @@ mod tests {
         std::fs::write(world_path(Some(&root)), "app-shells/bash\n").unwrap();
         std::fs::write(world_sets_path(Some(&root)), "@myset\n@other-set\n").unwrap();
 
-        let removed = remove_atoms(Some(&root), &["@myset".to_owned()]).unwrap();
+        let removed = deselect(&root, &["@myset".to_owned()]).unwrap();
 
         assert_eq!(removed, 1);
         assert_eq!(read_world(&root), "app-shells/bash\n");
@@ -642,7 +741,7 @@ mod tests {
         std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
         std::fs::write(world_path(Some(&root)), "app-shells/bash\n").unwrap();
 
-        remove_atoms(Some(&root), &["app-shells/bash".to_owned()]).unwrap();
+        deselect(&root, &["app-shells/bash".to_owned()]).unwrap();
 
         assert!(!world_sets_path(Some(&root)).exists());
     }
@@ -667,21 +766,64 @@ mod tests {
         assert_eq!(read_world(&root), "app-misc/foo:2\napp-misc/bar\n");
     }
 
-    #[test]
-    fn deselect_removes_a_versioned_or_bare_atom_by_cpn() {
+    fn deselect(root: &Utf8Path, tokens: &[String]) -> Result<usize> {
+        remove_lines(Some(root), &deselect_lines(Some(root), tokens, &[])?)
+    }
+
+    fn deselected(world: &str, token: &str, installed: &[InstalledPackage]) -> Vec<String> {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
         std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
-        std::fs::write(
-            world_path(Some(&root)),
-            "=app-editors/nano-8.0\napp-shells/bash\n",
-        )
-        .unwrap();
+        std::fs::write(world_path(Some(&root)), world).unwrap();
+        deselect_lines(Some(&root), &[token.to_owned()], installed).unwrap()
+    }
 
-        let removed = remove_atoms(Some(&root), &["app-editors/nano".to_owned()]).unwrap();
+    #[test]
+    fn deselect_matches_operator_version_and_slot_like_portage() {
+        let world = "=app-editors/nano-8.0\napp-editors/nano:0\napp-shells/bash\n";
+        assert_eq!(
+            deselected(world, "app-editors/nano", &[]),
+            ["app-editors/nano:0"]
+        );
+        assert_eq!(
+            deselected(world, "=app-editors/nano-8.0", &[]),
+            ["=app-editors/nano-8.0"]
+        );
 
-        assert_eq!(removed, 1);
-        assert_eq!(read_world(&root), "app-shells/bash\n");
+        let world = "dev-lang/python:3.11\ndev-lang/python:3.12\n";
+        assert_eq!(
+            deselected(world, "dev-lang/python:3.11", &[]),
+            ["dev-lang/python:3.11"]
+        );
+        assert_eq!(deselected(world, "dev-lang/python", &[]).len(), 2);
+        assert!(deselected("dev-lang/python\n", "dev-lang/python:3.11", &[]).is_empty());
+    }
+
+    #[test]
+    fn deselect_resolves_a_bare_name() {
+        let world = "dev-lang/python\napp-shells/bash\n";
+        assert_eq!(deselected(world, "python", &[]), ["dev-lang/python"]);
+        assert!(deselected(world, "nano", &[]).is_empty());
+    }
+
+    #[test]
+    fn deselect_adds_the_slot_of_each_installed_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        let pkg = root.join("var/db/pkg/dev-lang/python-3.11.9");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("SLOT"), "3.11\n").unwrap();
+        let installed: Vec<InstalledPackage> = Vdb::open(root.join("var/db/pkg"))
+            .unwrap()
+            .packages()
+            .into_iter()
+            .collect();
+
+        let world = "dev-lang/python:3.11\ndev-lang/python:3.12\n";
+        assert_eq!(
+            deselected(world, "=dev-lang/python-3.11.9", &installed),
+            ["dev-lang/python:3.11"]
+        );
     }
 
     #[test]
@@ -691,7 +833,7 @@ mod tests {
         std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
         std::fs::write(world_path(Some(&root)), "@some-set\napp-shells/bash\n").unwrap();
 
-        let removed = remove_atoms(Some(&root), &["@some-set".to_owned()]).unwrap();
+        let removed = deselect(&root, &["@some-set".to_owned()]).unwrap();
 
         assert_eq!(removed, 1);
         assert_eq!(read_world(&root), "app-shells/bash\n");
@@ -704,7 +846,7 @@ mod tests {
         std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
         std::fs::write(world_path(Some(&root)), "app-shells/bash\n").unwrap();
 
-        let removed = remove_atoms(Some(&root), &["app-editors/nano".to_owned()]).unwrap();
+        let removed = deselect(&root, &["app-editors/nano".to_owned()]).unwrap();
 
         assert_eq!(removed, 0);
         assert_eq!(read_world(&root), "app-shells/bash\n");
@@ -717,7 +859,7 @@ mod tests {
         std::fs::create_dir_all(root.join("var/lib/portage")).unwrap();
         std::fs::write(world_path(Some(&root)), "# a comment\napp-editors/nano\n").unwrap();
 
-        remove_atoms(Some(&root), &["app-editors/nano".to_owned()]).unwrap();
+        deselect(&root, &["app-editors/nano".to_owned()]).unwrap();
 
         assert_eq!(read_world(&root), "# a comment\n");
     }
@@ -727,7 +869,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
 
-        assert!(remove_atoms(Some(&root), &["not a valid atom!!!".to_owned()]).is_err());
+        assert!(deselect(&root, &["not a valid atom!!!".to_owned()]).is_err());
     }
 
     // A root `SetResolver` can resolve `@selected` in: any existing dir is a
