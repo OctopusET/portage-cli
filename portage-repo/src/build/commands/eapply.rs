@@ -106,7 +106,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapplyCommand {
         }
 
         if let Err(failure) = result {
-            // A failed patch is `die -n`: under `nonfatal` it only returns failure.
+            // Only a failed patch honours `nonfatal`; usage errors always die.
             if failure.patch && shell.env_str("PORTAGE_NONFATAL").as_deref() == Some("1") {
                 let _ = writeln!(
                     context.params.stderr(shell),
