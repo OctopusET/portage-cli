@@ -89,6 +89,10 @@ pub struct FetchConfig {
     pub fallback_command: Option<String>,
     /// Resume command template (`RESUMECOMMAND`)
     pub resume_command: Option<String>,
+    /// `FETCHCOMMAND_<SCHEME>` and `RESUMECOMMAND_<SCHEME>`, keyed by the upper-case URL scheme
+    ///
+    /// A URL whose scheme is listed uses these instead of `strategy` and `resume_command`.
+    pub scheme_commands: HashMap<String, (String, Option<String>)>,
     /// Maximum number of distfiles fetched concurrently.  Defaults to 4
     pub max_concurrent: usize,
     /// Accept an already-present file on **size alone**, skipping the full
@@ -115,6 +119,7 @@ impl Default for FetchConfig {
             strategy: FetchStrategy::default(),
             fallback_command: None,
             resume_command: None,
+            scheme_commands: HashMap::new(),
             max_concurrent: 4,
             trust_existing_size: false,
             allow_missing_digests: true,
@@ -289,23 +294,25 @@ impl Fetcher {
             });
         }
 
-        // Each URL with the primary strategy, then again with the fallback command.
-        let fallback = self
-            .config
-            .fallback_command
-            .clone()
-            .map(FetchStrategy::Command);
-        let attempts = df.urls.iter().map(|url| (&self.config.strategy, url));
-        let fallback_attempts = fallback
-            .iter()
-            .flat_map(|strategy| df.urls.iter().map(move |url| (strategy, url)));
+        // Each URL with its own strategy, then again with the fallback command.
+        let resume = self.config.resume_command.as_deref();
+        let attempts = df.urls.iter().map(|url| (self.strategy_for(url), url));
+        let fallback_attempts = self.config.fallback_command.iter().flat_map(|cmd| {
+            df.urls
+                .iter()
+                .map(move |url| (Ok((FetchStrategy::Command(cmd.clone()), resume)), url))
+        });
         let mut last_err = None;
         let mut verify_failures = 0;
         for (strategy, url) in attempts.chain(fallback_attempts) {
-            match self
-                .fetch_one_url(strategy, url, &dest, manifest_entry)
-                .await
-            {
+            let result = match strategy {
+                Ok((strategy, resume)) => {
+                    self.fetch_one_url(&strategy, resume, url, &dest, manifest_entry)
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(()) => return Ok(FetchStatus::Downloaded),
                 Err(e) => {
                     eprintln!("fetch: {url}: {e}");
@@ -383,10 +390,35 @@ impl Fetcher {
     // Internal
     // -----------------------------------------------------------------------
 
+    /// The strategy and resume command for `url`: its scheme's `FETCHCOMMAND_<SCHEME>`, else the
+    /// configured one, with wget standing in for the builtin client on FTP
+    fn strategy_for(&self, url: &str) -> Result<(FetchStrategy, Option<&str>)> {
+        let scheme = url.split_once("://").map_or("", |(s, _)| s);
+        let key = scheme.to_ascii_uppercase();
+        if let Some((fetch, resume)) = self.config.scheme_commands.get(&key) {
+            return Ok((FetchStrategy::Command(fetch.clone()), resume.as_deref()));
+        }
+        let resume = self.config.resume_command.as_deref();
+        match (&self.config.strategy, key.as_str()) {
+            (FetchStrategy::Command(_), _) | (FetchStrategy::Builtin, "HTTP" | "HTTPS") => {
+                Ok((self.config.strategy.clone(), resume))
+            }
+            (FetchStrategy::Builtin, "FTP" | "FTPS") => Ok((
+                FetchStrategy::Command(WGET_FETCH.to_owned()),
+                Some(WGET_RESUME),
+            )),
+            (FetchStrategy::Builtin, _) => Err(Error::UnsupportedScheme {
+                url: url.to_owned(),
+                variable: format!("FETCHCOMMAND_{key}"),
+            }),
+        }
+    }
+
     /// Download `url` with `strategy` to `dest`'s [`download_path`], verify it, then rename it over `dest`
     async fn fetch_one_url(
         &self,
         strategy: &FetchStrategy,
+        resume: Option<&str>,
         url: &str,
         dest: &Utf8Path,
         manifest_entry: Option<&ManifestEntry>,
@@ -395,7 +427,7 @@ impl Fetcher {
         match strategy {
             FetchStrategy::Builtin => self.fetch_builtin(url, &temp, manifest_entry).await?,
             FetchStrategy::Command(template) => {
-                self.fetch_command(template, url, &temp, manifest_entry)
+                self.fetch_command(template, resume, url, &temp, manifest_entry)
                     .await?
             }
         }
@@ -406,15 +438,13 @@ impl Fetcher {
     async fn fetch_command(
         &self,
         template: &str,
+        resume: Option<&str>,
         url: &str,
         temp: &Utf8Path,
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
-        let resume = self
-            .config
-            .resume_command
-            .as_deref()
-            .filter(|_| is_resumable(manifest_entry.and_then(dist_size), current_size(temp)));
+        let resume =
+            resume.filter(|_| is_resumable(manifest_entry.and_then(dist_size), current_size(temp)));
         if resume.is_none() {
             let _ = std::fs::remove_file(temp.as_std_path());
         }
@@ -601,6 +631,10 @@ impl Fetcher {
         }
     }
 }
+
+/// FTP commands used when no `FETCHCOMMAND` is set, since the builtin client speaks only HTTP
+const WGET_FETCH: &str = r#"wget -t 3 -T 60 -O "${DISTDIR}/${FILE}" "${URI}""#;
+const WGET_RESUME: &str = r#"wget -c -t 3 -T 60 -O "${DISTDIR}/${FILE}" "${URI}""#;
 
 /// Tries per URL for the builtin client, as make.globals' `wget -t 3`
 const BUILTIN_TRIES: usize = 3;
@@ -1276,6 +1310,49 @@ mod tests {
         assert_eq!(status, FetchStatus::Downloaded);
         assert_eq!(std::fs::read(distdir.join("foo.tar.gz")).unwrap(), body);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn strategy_for_picks_the_scheme_command_then_the_configured_one() {
+        let mut config = FetchConfig::default();
+        config.scheme_commands.insert(
+            "RSYNC".to_owned(),
+            (
+                "rsync ${URI}".to_owned(),
+                Some("rsync -P ${URI}".to_owned()),
+            ),
+        );
+        let fetcher = Fetcher::new(Utf8PathBuf::from("/nonexistent"), config);
+        let pick = |url| {
+            fetcher
+                .strategy_for(url)
+                .map(|(s, r)| (s, r.map(str::to_owned)))
+        };
+        assert!(matches!(
+            pick("rsync://host/foo.tar.gz"),
+            Ok((FetchStrategy::Command(c), Some(r))) if c == "rsync ${URI}" && r == "rsync -P ${URI}"
+        ));
+        assert!(matches!(
+            pick("https://host/foo.tar.gz"),
+            Ok((FetchStrategy::Builtin, None))
+        ));
+        assert!(matches!(
+            pick("ftp://host/foo.tar.gz"),
+            Ok((FetchStrategy::Command(c), Some(_))) if c == WGET_FETCH
+        ));
+        assert!(matches!(
+            pick("sftp://host/foo.tar.gz"),
+            Err(Error::UnsupportedScheme { variable, .. }) if variable == "FETCHCOMMAND_SFTP"
+        ));
+
+        let global = Fetcher::new(
+            Utf8PathBuf::from("/nonexistent"),
+            FetchConfig::from_make_conf(Some("curl ${URI}".to_owned()), None),
+        );
+        assert!(matches!(
+            global.strategy_for("ftp://host/foo.tar.gz"),
+            Ok((FetchStrategy::Command(c), None)) if c == "curl ${URI}"
+        ));
     }
 
     #[tokio::test]

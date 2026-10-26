@@ -2246,8 +2246,7 @@ async fn run_fetch(
         None => Manifest { entries: vec![] },
     };
 
-    let (fetch_cmd, resume_cmd) = read_fetch_commands(shell);
-    let defaults = FetchConfig::from_make_conf(fetch_cmd, resume_cmd);
+    let defaults = fetch_commands(shell);
     let config = FetchConfig {
         allow_missing_digests: allow_missing_digests(shell, repo),
         checksum_try_mirrors: checksum_try_mirrors(
@@ -4273,16 +4272,26 @@ fn elog_config(
     )
 }
 
-/// `FETCHCOMMAND`/`RESUMECOMMAND` from the live ebuild shell — root-aware for
-/// the same reason as [`gentoo_mirrors_list`]. Previously read via a
-/// hardcoded `[DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF]` scan of the *host's*
-/// make.conf regardless of the active root, and via a plain `MakeConf::get`
-/// that wouldn't expand a `${VAR}` self-reference the way `shell`'s real
-/// sourcing does.
-fn read_fetch_commands(shell: &portage_repo::EbuildShell) -> (Option<String>, Option<String>) {
-    let fetch = shell.get_var("FETCHCOMMAND").filter(|s| !s.is_empty());
-    let resume = shell.get_var("RESUMECOMMAND").filter(|s| !s.is_empty());
-    (fetch, resume)
+/// `FETCHCOMMAND`/`RESUMECOMMAND` and their `_<SCHEME>` overrides from the live ebuild shell,
+/// root-aware for the same reason as [`gentoo_mirrors_list`]
+fn fetch_commands(shell: &portage_repo::EbuildShell) -> FetchConfig {
+    let var = |name: &str| shell.get_var(name).filter(|s| !s.is_empty());
+    let scheme_commands = shell
+        .var_names()
+        .iter()
+        .filter_map(|name| name.strip_prefix("FETCHCOMMAND_"))
+        .filter_map(|scheme| {
+            let fetch = var(&format!("FETCHCOMMAND_{scheme}"))?;
+            Some((
+                scheme.to_owned(),
+                (fetch, var(&format!("RESUMECOMMAND_{scheme}"))),
+            ))
+        })
+        .collect();
+    FetchConfig {
+        scheme_commands,
+        ..FetchConfig::from_make_conf(var("FETCHCOMMAND"), var("RESUMECOMMAND"))
+    }
 }
 
 #[cfg(test)]
@@ -4730,6 +4739,24 @@ mod tests {
     }
 
     const BUILD_AND_MERGE: &[RunPhase] = &[RunPhase::SETUP, RunPhase::INSTALL, RunPhase::Qmerge];
+
+    #[tokio::test]
+    async fn fetch_commands_reads_the_per_scheme_overrides() {
+        let probe = Probe::new();
+        let mut shell = probe.repo().shell().await.unwrap();
+        shell.preset_var("FETCHCOMMAND_RSYNC", "rsync ${URI}");
+        shell.preset_var("RESUMECOMMAND_RSYNC", "rsync -P ${URI}");
+        shell.preset_var("FETCHCOMMAND_SSH", "");
+        let config = fetch_commands(&shell);
+        assert_eq!(
+            config.scheme_commands.get("RSYNC"),
+            Some(&(
+                "rsync ${URI}".to_owned(),
+                Some("rsync -P ${URI}".to_owned())
+            ))
+        );
+        assert!(!config.scheme_commands.contains_key("SSH"));
+    }
 
     /// Fetch `body`'s one distfile, which has no Manifest entry and so fails without a download;
     /// returns whether `pkg_nofetch` is defined afterwards

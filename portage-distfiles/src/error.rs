@@ -22,6 +22,9 @@ pub enum Error {
     #[error("fetch command exited with status {code}: {command}")]
     Command { command: String, code: i32 },
 
+    #[error("no {variable} to fetch {url}")]
+    UnsupportedScheme { url: String, variable: String },
+
     #[error("fetch command failed to start: {source}")]
     CommandSpawn { source: std::io::Error },
 
