@@ -200,6 +200,9 @@ const HONOURED_FEATURES: &[&str] = &[
     "keeptemp",
     "keepwork",
     "noclean",
+    "nodoc",
+    "noinfo",
+    "noman",
     "nostrip",
     "test",
 ];

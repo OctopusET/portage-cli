@@ -13,6 +13,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::Ebuild;
 use portage_vdb::Vdb;
 
+use super::install_mask::InstallMask;
 use super::{
     ConfigProtect, Walk, WalkResult, build_info, capture_environment, merge_spec_from_env,
     open_or_create_vdb, rewrite_d_symlinks, running_vdb, vdb_root_for, walk_image,
@@ -52,7 +53,7 @@ pub(crate) async fn build_binpkg_standalone(
     shell.apply_iuse_effective();
     let mut env = shell.collect_env();
     let env_dump = capture_environment(shell, work_root).await;
-    let image_dir = ed_image_dir(shell, work_root);
+    let image_dir = packaging_image(shell, work_root, ed_image_dir(shell, work_root))?;
     let cp = ConfigProtect::from_shell(shell);
 
     // CONTENTS records installed paths (`/usr/bin/foo`) whatever the
@@ -107,7 +108,7 @@ pub(crate) async fn build_binpkg_standalone(
     std::fs::write(key_file.as_std_path(), format!("{key}\n"))
         .with_context(|| format!("writing {key_file}"))?;
 
-    let (out, build_id) = write_binpkg(shell, ebuild, work_root, root, installed.path())?;
+    let (out, build_id) = write_binpkg(shell, ebuild, &image_dir, root, installed.path())?;
     let record = vec![
         ("BINPKGMD5", binpkg_md5(&out)?),
         ("BUILD_ID", build_id.to_string()),
@@ -154,6 +155,52 @@ fn binpkg_md5(bp: &Utf8Path) -> Result<String> {
         .0)
 }
 
+/// The image to package: `ed` itself, or with `PKG_INSTALL_MASK` set, a hardlinked copy
+/// under `${T}/packaging` without the masked paths
+fn packaging_image(
+    shell: &portage_repo::EbuildShell,
+    work_root: &Utf8Path,
+    ed: Utf8PathBuf,
+) -> Result<Utf8PathBuf> {
+    let mask = InstallMask::new(&shell.get_var("PKG_INSTALL_MASK").unwrap_or_default());
+    if mask.is_empty() || !ed.is_dir() {
+        return Ok(ed);
+    }
+    let proot = work_root.join("temp/packaging");
+    if proot.exists() {
+        std::fs::remove_dir_all(proot.as_std_path())
+            .with_context(|| format!("removing stale {proot}"))?;
+    }
+    link_tree(ed.as_std_path(), proot.as_std_path())
+        .with_context(|| format!("linking {ed} to {proot}"))?;
+    mask.apply(proot.as_std_path())
+        .context("applying PKG_INSTALL_MASK")?;
+    Ok(proot)
+}
+
+/// Mirror the tree `src` at `dst`, every non-directory hardlinked
+fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(src)?;
+    std::fs::create_dir(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            link_tree(&entry.path(), &to)?;
+        } else {
+            std::fs::hard_link(entry.path(), to)?;
+        }
+    }
+    // After the children: a read-only directory would refuse them.
+    std::fs::set_permissions(dst, meta.permissions())?;
+    let _ = std::os::unix::fs::lchown(dst, Some(meta.uid()), Some(meta.gid()));
+    if let (Ok(dir), Ok(mtime)) = (std::fs::File::open(dst), meta.modified()) {
+        let _ = dir.set_modified(mtime);
+    }
+    Ok(())
+}
+
 /// Shared GPKG-writing core: pack `image_dir` (`${D}`) + `metadata_dir` (a
 /// VDB-shaped directory -- the real VDB entry for a normal `-b` merge via
 /// [`build_binpkg_standalone`]) into a GPKG under `PKGDIR`, returning its
@@ -161,13 +208,12 @@ fn binpkg_md5(bp: &Utf8Path) -> Result<String> {
 fn write_binpkg(
     shell: &portage_repo::EbuildShell,
     ebuild: &Ebuild,
-    work_root: &Utf8Path,
+    image_dir: &Utf8Path,
     root: &Utf8Path,
     metadata_dir: &Utf8Path,
 ) -> Result<(Utf8PathBuf, u32)> {
     let cat = ebuild.category();
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
-    let image_dir = ed_image_dir(shell, work_root);
     // `ED` is `image/${EPREFIX}` under `--prefix`/`--local`. Packages that
     // install nothing (every `virtual/*`, many `*-toolchain-symlinks`) never
     // create that nested path — `walk_image` treats a missing dir as empty and

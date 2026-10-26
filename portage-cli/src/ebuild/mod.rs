@@ -20,10 +20,12 @@ use crate::preserve_libs;
 mod binpkg;
 mod build_info;
 mod flock;
+mod install_mask;
 mod protect;
 
 use binpkg::{BinpkgRecord, binpkg_record, build_binpkg_standalone, ed_image_dir};
 use flock::{CleanWhen, acquire_flock, filter_clean_subs, lock_builddir, lock_merge_flock};
+use install_mask::InstallMask;
 use protect::{ConfigMemory, Landing, LiveNode, link_md5, scan_cfg};
 // `etc`/`quickpkg` resolve config protection through this path.
 pub(crate) use protect::ConfigProtect;
@@ -2301,6 +2303,27 @@ fn register_merged(
     Ok((installed, spec))
 }
 
+/// Prune `INSTALL_MASK` from the image, with `/usr/share/{doc,man,info}` for FEATURES
+/// `nodoc`/`noman`/`noinfo`
+fn apply_install_mask(shell: &portage_repo::EbuildShell, image_dir: &Utf8Path) -> Result<()> {
+    let features = shell.get_var("FEATURES").unwrap_or_default();
+    let mut value = shell.get_var("INSTALL_MASK").unwrap_or_default();
+    let mut docs = false;
+    for dir in ["doc", "man", "info"] {
+        if features.split_whitespace().any(|f| f == format!("no{dir}")) {
+            value += &format!(" /usr/share/{dir}");
+            docs = true;
+        }
+    }
+    InstallMask::new(&value)
+        .apply(image_dir.as_std_path())
+        .context("applying INSTALL_MASK")?;
+    if docs {
+        let _ = std::fs::remove_dir(image_dir.join("usr/share"));
+    }
+    Ok(())
+}
+
 /// The config memory a merge into `root` decides protected updates against
 ///
 /// Like portage, a downgrade offers every differing update again, as `NOCONFMEM` does.
@@ -2391,6 +2414,9 @@ async fn run_merge(
     let image_dir = Utf8PathBuf::try_from(image_dir).context("image path is not UTF-8")?;
     let cp = ConfigProtect::from_shell(shell);
     let rewrite_d = rewrite_d_symlinks(&env);
+
+    // Masked paths go first, so INSTALL_MASK can avoid a collision.
+    apply_install_mask(shell, &image_dir)?;
 
     // Collisions are judged before pkg_preinst runs and before a single file
     // is written: an abort must leave the root as it was. As in Portage, what
