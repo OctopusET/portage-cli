@@ -35,6 +35,8 @@ pub(crate) struct MergePlanRequest<'a> {
     pub work_base: &'a camino::Utf8Path,
     pub distdir: Option<&'a camino::Utf8Path>,
     pub merge_flags: &'a cli::MergeFlags,
+    /// `--nodeps`: see `ebuild::BuildAndMerge::ignore_blockers`
+    pub ignore_blockers: bool,
     pub globals: &'a cli::Cli,
     /// Directories to put ahead of the sanitised build `PATH`, resolved by the caller
     ///
@@ -257,6 +259,7 @@ struct MergeRun<'a> {
     distdir: Option<&'a camino::Utf8Path>,
     quiet: bool,
     merge_flags: &'a cli::MergeFlags,
+    ignore_blockers: bool,
     extra_path: &'a [camino::Utf8PathBuf],
     binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
     host_binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
@@ -278,6 +281,7 @@ struct ActionFlags {
     buildpkgonly: bool,
     fetchonly: bool,
     fetch_all_uri: bool,
+    ignore_blockers: bool,
     enforce_no_source: bool,
     quiet: bool,
     self_contained_bootstrap: bool,
@@ -292,6 +296,7 @@ impl MergeRun<'_> {
             buildpkgonly: self.merge_flags.buildpkgonly,
             fetchonly: self.merge_flags.fetchonly,
             fetch_all_uri: self.merge_flags.fetch_all_uri,
+            ignore_blockers: self.ignore_blockers,
             enforce_no_source: self.enforce_no_source,
             quiet: self.quiet,
             // See `ebuild::RootContext::self_contained_bootstrap` — native
@@ -460,6 +465,7 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         work_base,
         distdir,
         merge_flags,
+        ignore_blockers,
         globals,
         extra_path,
         resume_job,
@@ -673,6 +679,7 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         distdir,
         quiet,
         merge_flags,
+        ignore_blockers,
         extra_path,
         binpkg_index: binpkg_index.as_ref(),
         host_binpkg_index,
@@ -775,6 +782,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         buildpkgonly,
         fetchonly,
         fetch_all_uri,
+        ignore_blockers,
         enforce_no_source,
         quiet,
         self_contained_bootstrap,
@@ -829,6 +837,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
             buildpkgonly: false,
             fetchonly,
             fetch_all_uri,
+            ignore_blockers,
             activity: activity_pkg.clone(),
         })
         .await;
@@ -849,6 +858,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
             roots: root_ctx,
             merge_gate,
             force_verify_signature: false,
+            ignore_blockers,
             activity: activity_pkg.clone(),
         })
         .await;
@@ -870,6 +880,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
                     roots: root_ctx,
                     merge_gate,
                     force_verify_signature: remote.verify_signature,
+                    ignore_blockers,
                     activity: activity_pkg.clone(),
                 })
                 .await
@@ -893,6 +904,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
                     buildpkgonly,
                     fetchonly: false,
                     fetch_all_uri: false,
+                    ignore_blockers,
                     activity: activity_pkg.clone(),
                 })
                 .await
@@ -915,6 +927,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
             buildpkgonly,
             fetchonly: false,
             fetch_all_uri: false,
+            ignore_blockers,
             activity: activity_pkg.clone(),
         })
         .await
@@ -1865,6 +1878,7 @@ mod entry_roots_tests {
             buildpkgonly: false,
             fetchonly: false,
             fetch_all_uri: false,
+            ignore_blockers: false,
             enforce_no_source: false,
             quiet: false,
             self_contained_bootstrap: false,

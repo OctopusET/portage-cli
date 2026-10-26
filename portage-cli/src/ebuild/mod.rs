@@ -492,6 +492,7 @@ pub async fn run(
         buildpkg: false,
         binpkg: None,
         force_verify_signature: false,
+        ignore_blockers: false,
         activity: None,
     })
     .await
@@ -679,6 +680,8 @@ pub struct BuildAndMerge<'a> {
     /// `-F`/`--fetch-all-uri`: like `fetchonly`, but ignores USE conditionals
     /// when resolving SRC_URI (every entry, not just what's USE-selected).
     pub fetch_all_uri: bool,
+    /// `--nodeps`: blockers are ignored, so the merge takes over no blocked package's files
+    pub ignore_blockers: bool,
     /// When set, emit phase enter/leave on the activity bus
     pub activity: Option<crate::activity::ActivityPkgCtx>,
 }
@@ -703,6 +706,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
         buildpkgonly,
         fetchonly,
         fetch_all_uri,
+        ignore_blockers,
         activity,
     } = opts;
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
@@ -732,6 +736,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             buildpkg: false,
             binpkg: None,
             force_verify_signature: false,
+            ignore_blockers,
             activity,
         })
         .await
@@ -754,6 +759,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             buildpkg: true,
             binpkg: None,
             force_verify_signature: false,
+            ignore_blockers,
             activity,
         })
         .await
@@ -779,6 +785,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             buildpkg,
             binpkg: None,
             force_verify_signature: false,
+            ignore_blockers,
             activity: activity.clone(),
         })
         .await
@@ -798,6 +805,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
                 buildpkg,
                 binpkg: None,
                 force_verify_signature: false,
+                ignore_blockers,
                 activity: activity.as_ref(),
                 log_label: "build",
                 log: &log,
@@ -820,6 +828,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             buildpkg,
             binpkg: None,
             force_verify_signature: false,
+            ignore_blockers,
             activity,
         })
         .await
@@ -850,6 +859,8 @@ pub struct MergeBinpkg<'a> {
     /// verification, independent of `FEATURES=binpkg-request-signature`.
     /// `false` for a local `-k` reuse.
     pub force_verify_signature: bool,
+    /// `--nodeps`: blockers are ignored, so the merge takes over no blocked package's files
+    pub ignore_blockers: bool,
     pub activity: Option<crate::activity::ActivityPkgCtx>,
 }
 
@@ -871,6 +882,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
         roots,
         force_verify_signature,
         merge_gate,
+        ignore_blockers,
         activity,
     } = opts;
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
@@ -895,6 +907,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
                 buildpkg: false,
                 binpkg: Some(binpkg_path),
                 force_verify_signature,
+                ignore_blockers,
                 activity: activity.as_ref(),
                 log_label: "merge",
                 log: &log,
@@ -919,6 +932,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
             buildpkg: false,
             binpkg: Some(binpkg_path),
             force_verify_signature,
+            ignore_blockers,
             activity,
         })
         .await
@@ -948,6 +962,8 @@ pub struct InstallWorker<'a> {
     /// `FEATURES`/`BINPKG_GPG_VERIFY_GPG_HOME` itself, same as everything
     /// else it re-derives.
     pub force_verify_signature: bool,
+    /// See [`BuildAndMerge::ignore_blockers`]
+    pub ignore_blockers: bool,
     pub buildpkg: bool,
     pub quiet: bool,
     pub activity_job_id: Option<&'a str>,
@@ -997,6 +1013,7 @@ struct WorkerStep<'a> {
     buildpkg: bool,
     binpkg: Option<&'a Utf8Path>,
     force_verify_signature: bool,
+    ignore_blockers: bool,
     activity: Option<&'a crate::activity::ActivityPkgCtx>,
     /// `build`/`merge` — names the log in the non-zero-exit error only
     log_label: &'a str,
@@ -1046,6 +1063,7 @@ async fn spawn_install_worker_step(
             quiet: step.quiet,
             binpkg: step.binpkg.map(|b| b.as_str()),
             force_verify_signature: step.force_verify_signature,
+            ignore_blockers: step.ignore_blockers,
             activity_job_id: act_job.as_deref(),
             activity_parent_job_id: act_parent.as_deref(),
             activity_live_root: act_live.as_deref(),
@@ -1110,6 +1128,7 @@ pub async fn run_install_worker(opts: InstallWorker<'_>) -> Result<()> {
         roots,
         binpkg,
         force_verify_signature,
+        ignore_blockers,
         buildpkg,
         quiet,
         activity_job_id,
@@ -1170,6 +1189,7 @@ pub async fn run_install_worker(opts: InstallWorker<'_>) -> Result<()> {
         buildpkg,
         binpkg: binpkg.map(Utf8Path::new),
         force_verify_signature,
+        ignore_blockers,
         activity,
     })
     .await
@@ -1290,6 +1310,8 @@ struct PhaseGroupRun<'a> {
     /// `FEATURES=binpkg-request-signature` is set. `false` for a local
     /// `-k` reuse or when the remote repo didn't request it.
     force_verify_signature: bool,
+    /// See [`BuildAndMerge::ignore_blockers`]
+    ignore_blockers: bool,
     activity: Option<crate::activity::ActivityPkgCtx>,
 }
 
@@ -1304,6 +1326,7 @@ async fn run_phase_group(opts: PhaseGroupRun<'_>) -> Result<()> {
         buildpkg,
         binpkg,
         force_verify_signature,
+        ignore_blockers,
         activity,
         ..
     } = opts;
@@ -1317,6 +1340,7 @@ async fn run_phase_group(opts: PhaseGroupRun<'_>) -> Result<()> {
             buildpkg,
             binpkg,
             force_verify_signature,
+            ignore_blockers,
             activity,
         })
         .await
@@ -1333,6 +1357,7 @@ struct GroupRun<'a> {
     buildpkg: bool,
     binpkg: Option<&'a Utf8Path>,
     force_verify_signature: bool,
+    ignore_blockers: bool,
     activity: Option<crate::activity::ActivityPkgCtx>,
 }
 
@@ -1615,6 +1640,7 @@ impl PackageSetup {
             buildpkg,
             binpkg,
             force_verify_signature,
+            ignore_blockers,
             activity,
         } = opts;
         let config_root = roots.config_root;
@@ -1739,6 +1765,7 @@ impl PackageSetup {
                         PhaseContext {
                             fetch_all_uri,
                             mirror_repos: &mirror_repos,
+                            ignore_blockers,
                             merge_state: _merge_guard.as_deref_mut(),
                             binpkg_metadata: binpkg_metadata.as_ref(),
                             binpkg_record: &record,
@@ -2072,6 +2099,7 @@ struct PhaseContext<'a> {
     fetch_all_uri: bool,
     /// See [`PackageSetup::mirror_repos`]
     mirror_repos: &'a [Repository],
+    ignore_blockers: bool,
     merge_state: Option<&'a mut MergeBatchState>,
     /// The merged binpkg's own metadata, whose dependencies were bound when it was built
     binpkg_metadata: Option<&'a std::collections::BTreeMap<String, String>>,
@@ -2134,24 +2162,7 @@ async fn run_one_phase(
             write_manifest(shell, ebuild, repo, &distfiles)
         }
         RunPhase::Clean => run_clean(work_root),
-        RunPhase::Qmerge => {
-            let PhaseContext {
-                merge_state,
-                binpkg_metadata,
-                binpkg_record,
-                ..
-            } = context;
-            run_merge(
-                shell,
-                ebuild,
-                work_root,
-                root,
-                merge_state,
-                binpkg_metadata,
-                binpkg_record,
-            )
-            .await
-        }
+        RunPhase::Qmerge => run_merge(shell, ebuild, work_root, root, context).await,
         RunPhase::Ebuild(p) => {
             if phase == RunPhase::UNPACK {
                 check_package_manifest(shell, ebuild, repo)?;
@@ -2874,10 +2885,15 @@ async fn run_merge(
     ebuild: &Ebuild,
     work_root: &Utf8Path,
     root: &Utf8Path,
-    mut merge_state: Option<&mut MergeBatchState>,
-    binpkg_metadata: Option<&std::collections::BTreeMap<String, String>>,
-    binpkg_record: &[(&'static str, String)],
+    context: PhaseContext<'_>,
 ) -> Result<()> {
+    let PhaseContext {
+        mut merge_state,
+        binpkg_metadata,
+        binpkg_record,
+        ignore_blockers,
+        ..
+    } = context;
     let temp_dir = work_root.join("temp");
     std::fs::create_dir_all(temp_dir.as_std_path()).context("creating temp dir")?;
 
@@ -2944,7 +2960,11 @@ async fn run_merge(
             blocked.len()
         );
     }
-    let victims = installed_blockers(&vdb, &env, ebuild.cpv());
+    let victims = if ignore_blockers {
+        vec![]
+    } else {
+        installed_blockers(&vdb, &env, ebuild.cpv())
+    };
     let mine: Vec<Cpv> = old_pkg
         .iter()
         .chain(&victims)
@@ -4985,6 +5005,8 @@ mod tests {
         prefixed: bool,
         /// Run in each shell of [`Self::run`] before its phases, as the settings would seed it
         setup: &'static str,
+        /// Merge as `--nodeps` does
+        ignore_blockers: bool,
     }
 
     impl Probe {
@@ -4993,6 +5015,7 @@ mod tests {
                 dir: tempfile::tempdir().unwrap(),
                 prefixed: false,
                 setup: "",
+                ignore_blockers: false,
             };
             let repo = probe.path("repo");
             fs::create_dir_all(repo.join("metadata")).unwrap();
@@ -5077,6 +5100,7 @@ mod tests {
                 let context = PhaseContext {
                     fetch_all_uri: false,
                     mirror_repos: &[],
+                    ignore_blockers: self.ignore_blockers,
                     merge_state: None,
                     binpkg_metadata: None,
                     binpkg_record: &[],
@@ -5127,6 +5151,7 @@ mod tests {
                     buildpkg: true,
                     binpkg,
                     force_verify_signature: false,
+                    ignore_blockers: self.ignore_blockers,
                     activity: None,
                 })
                 .await
@@ -5535,6 +5560,33 @@ mod tests {
     #[tokio::test]
     async fn a_package_takes_over_the_files_of_an_installed_one_blocking_it() {
         takes_over_from_blocked("RDEPEND=\"!app-misc/new\"\n", "").await;
+    }
+
+    #[tokio::test]
+    async fn a_nodeps_merge_takes_nothing_over_from_a_blocked_package() {
+        let probe = Probe {
+            setup: "export FEATURES=protect-owned",
+            ignore_blockers: true,
+            ..Probe::new()
+        };
+        let old = probe.ebuild("old", "1", INSTALLS_A_FILE);
+        let new = probe.ebuild(
+            "new",
+            "1",
+            &format!("RDEPEND=\"!app-misc/old\"\n{INSTALLS_A_FILE}"),
+        );
+        probe.run(&old, BUILD_AND_MERGE).await.unwrap();
+
+        assert!(probe.run(&new, BUILD_AND_MERGE).await.is_err());
+
+        let vdb = Vdb::open(probe.path("root/var/db/pkg")).unwrap();
+        let blocked = vdb
+            .packages()
+            .into_iter()
+            .find(|p| p.pf() == "old-1")
+            .unwrap();
+        let file = Utf8Path::new("/usr/share/probe/file");
+        assert!(blocked.contents().unwrap().iter().any(|e| e.path == file));
     }
 
     async fn takes_over_from_blocked(old_head: &str, new_head: &str) {

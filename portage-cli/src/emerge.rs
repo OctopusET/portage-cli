@@ -910,6 +910,7 @@ async fn emerge_atoms_inner(
             work_base: &work_base,
             distdir: distdir.as_deref(),
             merge_flags,
+            ignore_blockers: nodeps,
             globals: cli,
             extra_path,
             resume_job: resume_job_id.as_deref().map(|id| crate::merge::ResumeJob {

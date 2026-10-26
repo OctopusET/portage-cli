@@ -698,7 +698,8 @@ fail with exit 1 after classify. `WouldUnmerge` victims are unmerged on a real
 merge — strong `!!` before the merge loop, weak `!` after. `-p` still exits 0.
 A weak victim still installed when its blocker merges may own the same files: as in
 portage, the collision check skips it and the paths the new package installs leave its
-CONTENTS, so its later unmerge keeps them.
+CONTENTS, so its later unmerge keeps them. Under `--nodeps` blockers are ignored, so neither
+happens.
 
 **`@profile` / `profile-set` (package-set semantics).** Real portage's `@profile`
 set (`ProfilePackageSet`) reads only the *non-`*`* `packages` entries, and only
