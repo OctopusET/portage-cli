@@ -51,6 +51,43 @@ pub(crate) fn eval_violated_use_dep(
 }
 
 impl PortageDependencyProvider {
+    /// The value the solver chose for the parent's ceded (`SolverDecided`) `flag`, if it chose one
+    fn solved_parent_flag(
+        &self,
+        constraint: &convert::UseDepConstraint,
+        flag: Interned<DefaultInterner>,
+        solution: &SelectedDependencies<PortagePackage, Version>,
+    ) -> Option<bool> {
+        if self.use_decision_meta.is_empty() {
+            return None;
+        }
+        let node = convert::use_decision_package(&constraint.parent_cpn_str, &flag);
+        solution.get(&node).map(|v| *v == Version::new(&[1]))
+    }
+
+    /// Whether an `||` branch's real parent is kept at its installed version with `flag`
+    /// already demanded of it in this fixpoint
+    fn pending_installed_parent_enable(
+        &self,
+        constraint: &convert::UseDepConstraint,
+        flag: Interned<DefaultInterner>,
+        solution: &SelectedDependencies<PortagePackage, Version>,
+        by_target: &HashMap<PortagePackage, TargetAcc>,
+    ) -> bool {
+        let Some((cat, pn)) = constraint.parent_cpn_str.as_str().split_once('/') else {
+            return false;
+        };
+        by_target.iter().any(|(pkg, (_, enable, _, _))| {
+            enable.contains(&flag)
+                && pkg.cpn().package.as_str() == pn
+                && pkg.cpn().category.as_str() == cat
+                && self
+                    .installed
+                    .get(pkg)
+                    .is_some_and(|(iv, _)| solution.get(pkg) == Some(iv))
+        })
+    }
+
     /// Evaluate one parent's USE-dep constraints against the current
     /// solution and accumulate any violations into `by_target`
     ///
@@ -99,7 +136,11 @@ impl PortageDependencyProvider {
                 // this build run (already recorded in by_target.required_enabled).
                 // An || branch's constraints sit on its choice node, which has no USE of its own.
                 let parent_flag_enabled = if parent.is_virtual() {
-                    constraint.parent_enabled.contains(&ud.flag)
+                    self.solved_parent_flag(constraint, ud.flag, solution)
+                        .unwrap_or_else(|| constraint.parent_enabled.contains(&ud.flag))
+                        || self.pending_installed_parent_enable(
+                            constraint, ud.flag, solution, by_target,
+                        )
                 } else if parent_is_installed {
                     self.installed_use
                         .get(parent)
@@ -108,7 +149,10 @@ impl PortageDependencyProvider {
                             .get(parent)
                             .is_some_and(|(_, e, _, _)| e.contains(&ud.flag))
                 } else {
-                    self.effective_flag_new(parent, parent_ver, ud.flag, None)
+                    self.solved_parent_flag(constraint, ud.flag, solution)
+                        .unwrap_or_else(|| {
+                            self.effective_flag_new(parent, parent_ver, ud.flag, None)
+                        })
                 };
 
                 let dep_effective_enabled = if is_installed {
@@ -117,18 +161,15 @@ impl PortageDependencyProvider {
                         .get(target_pkg)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    let iuse = self
+                    let in_iuse = self
                         .packages
                         .get(target_pkg)
                         .and_then(|d| d.versions.get(target_ver))
-                        .map(|vd| vd.iuse.as_slice())
-                        // Empty == absent: a synthetic installed entry (or a repo
-                        // version with no IUSE) must fall back to the VDB-recorded
-                        // IUSE, matching pre-refactor behaviour.
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
-                        .unwrap_or(&[]);
-                    let in_iuse = iuse.contains(&ud.flag);
+                        .is_some_and(|vd| vd.iuse.contains(&ud.flag))
+                        || self
+                            .installed_iuse
+                            .get(target_pkg)
+                            .is_some_and(|i| i.contains(&ud.flag));
                     if in_iuse {
                         active.contains(&ud.flag)
                     } else {

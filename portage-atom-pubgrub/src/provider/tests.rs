@@ -1473,6 +1473,160 @@ fn or_branch_conditional_use_dep_violation_is_reported() {
     assert_eq!(x.required_enabled, vec![f]);
 }
 
+/// A slot-0 version whose only IUSE is `flag`, on when `on`
+fn with_flag(flag: Interned<DefaultInterner>, on: bool, rdepend: &str) -> PackageVersions {
+    PackageVersions {
+        slot: Some(Interned::intern("0")),
+        subslot: None,
+        repo: None,
+        iuse: vec![flag],
+        iuse_defaults: if on {
+            HashMap::from([(flag, IUseDefault::Enabled)])
+        } else {
+            HashMap::new()
+        },
+        deps: PackageDeps {
+            rdepend: if rdepend.is_empty() {
+                vec![].into()
+            } else {
+                DepEntry::parse(rdepend).unwrap().into()
+            },
+            ..empty_deps()
+        },
+        required_use: None,
+        empty_any_of_matches: true,
+        needs_unmask: false,
+        live: false,
+    }
+}
+
+#[test]
+fn or_branch_use_dep_is_judged_by_the_real_parents_use() {
+    use portage_atom::UseDepKind::*;
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let f = Interned::intern("f");
+    let forms = [
+        ("f", Enabled),
+        ("-f", Disabled),
+        ("f?", Conditional),
+        ("!f?", ConditionalInverse),
+        ("f=", Equal),
+        ("!f=", EqualInverse),
+    ];
+    for (form, kind) in forms {
+        for parent_on in [false, true] {
+            for target_on in [false, true] {
+                let mut repo = InMemoryRepository::new();
+                repo.add_package_versions(
+                    portage_atom::Cpv::parse("a/x-1").unwrap(),
+                    with_flag(f, target_on, ""),
+                );
+                let rdepend = format!("|| ( a/x[{form}] a/missing )");
+                repo.add_package_versions(
+                    portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+                    with_flag(f, parent_on, &rdepend),
+                );
+                let mut provider = PortageDependencyProvider::new(repo);
+                let solution = provider
+                    .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
+                    .unwrap();
+                assert!(solution.get(&pkg("a/x")).is_some());
+                let got = provider
+                    .use_flag_requirements()
+                    .iter()
+                    .find(|r| r.package == pkg("a/x"))
+                    .map(|r| (r.required_enabled.clone(), r.required_disabled.clone()));
+                let want = super::post_solve::eval_violated_use_dep(kind, target_on, parent_on)
+                    .map(|on| {
+                        if on {
+                            (vec![f], vec![])
+                        } else {
+                            (vec![], vec![f])
+                        }
+                    });
+                assert_eq!(
+                    got, want,
+                    "[{form}] parent_on={parent_on} target_on={target_on}"
+                );
+            }
+        }
+    }
+}
+
+// The tree's IUSE (here only an implicit flag) dropped `f` without a revbump; the build has it.
+#[test]
+fn an_installed_targets_use_dep_flag_counts_from_its_vdb_iuse() {
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let f = Interned::intern("f");
+    let mut repo = InMemoryRepository::new();
+    repo.add_package_versions(
+        portage_atom::Cpv::parse("a/x-1").unwrap(),
+        with_flag(Interned::intern("abi_x86_64"), true, ""),
+    );
+    repo.add_version(
+        portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        PackageDeps {
+            rdepend: (DepEntry::parse("a/x[f(-)]").unwrap()).into(),
+            ..empty_deps()
+        },
+    );
+    let mut provider = PortageDependencyProvider::new(repo);
+    provider.add_installed(InstalledPackage {
+        package: pkg("a/x"),
+        version: Version::parse("1").unwrap(),
+        policy: InstalledPolicy::Favor,
+        active_use: vec![f],
+        iuse: vec![f],
+    });
+    provider
+        .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
+        .unwrap();
+    assert!(provider.use_flag_requirements().is_empty());
+}
+
+// Installed P is kept at its build, so the X another dependent demands of it also binds the
+// `[X?]` inside P's own `||`.
+#[test]
+fn or_branch_use_dep_cascades_from_a_flag_demanded_of_an_installed_parent() {
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let x = Interned::intern("x");
+    let mut repo = InMemoryRepository::new();
+    repo.add_package_versions(
+        portage_atom::Cpv::parse("app-misc/q-1").unwrap(),
+        with_flag(x, false, "app-misc/p[x]"),
+    );
+    repo.add_package_versions(
+        portage_atom::Cpv::parse("app-misc/p-1").unwrap(),
+        with_flag(x, false, "|| ( a/a[x?] a/missing )"),
+    );
+    repo.add_package_versions(
+        portage_atom::Cpv::parse("a/a-1").unwrap(),
+        with_flag(x, false, ""),
+    );
+    let mut provider = PortageDependencyProvider::new(repo);
+    provider.add_installed(InstalledPackage {
+        package: pkg("app-misc/p"),
+        version: Version::parse("1").unwrap(),
+        policy: InstalledPolicy::Favor,
+        active_use: vec![],
+        iuse: vec![x],
+    });
+    provider
+        .resolve_targets(vec![(pkg("app-misc/q"), PortageVersionSet::any())])
+        .unwrap();
+    let enabled = |cpn: &str| {
+        provider
+            .use_flag_requirements()
+            .iter()
+            .find(|r| r.package == pkg(cpn))
+            .map(|r| r.required_enabled.clone())
+    };
+    assert_eq!(enabled("app-misc/p"), Some(vec![x]));
+    assert_eq!(enabled("a/a"), Some(vec![x]));
+}
+
 // Two slotted atoms of one package in a branch are separate demands: one slot cannot excuse
 // the other the way the slot copies of a single unslotted atom do.
 #[test]
@@ -2224,6 +2378,57 @@ fn ceded_flag_follows_preference() {
         !has_b(&build(false)),
         "prefer=off must leave flag off → no b"
     );
+}
+
+#[test]
+fn ceded_parent_flag_judges_use_deps_by_the_solved_value() {
+    let f = Interned::intern("f");
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let mut repo = InMemoryRepository::new();
+    repo.add_version(
+        portage_atom::Cpv::parse("dev-libs/b-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        empty_deps(),
+    );
+    for cpv in ["a/x-1", "a/y-1"] {
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse(cpv).unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![f],
+            empty_deps(),
+        );
+    }
+    repo.add_version_with_iuse(
+        portage_atom::Cpv::parse("app-misc/a-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        vec![f],
+        PackageDeps {
+            rdepend: (DepEntry::parse("f? ( dev-libs/b ) a/x[f?] || ( a/y[f?] a/missing )")
+                .unwrap())
+            .into(),
+            ..empty_deps()
+        },
+    );
+    let mut cfg = UseConfig::new();
+    cfg.solver_decide(f, true);
+    repo.set_use_config(cfg);
+    let mut provider = PortageDependencyProvider::new(repo);
+    let solution = provider
+        .resolve_targets(vec![(pkg("app-misc/a"), PortageVersionSet::any())])
+        .unwrap();
+    assert!(solution.get(&pkg("dev-libs/b")).is_some());
+    let enabled = |cpn: &str| {
+        provider
+            .use_flag_requirements()
+            .iter()
+            .find(|r| r.package == pkg(cpn))
+            .map(|r| r.required_enabled.clone())
+    };
+    assert_eq!(enabled("a/x"), Some(vec![f]));
+    assert_eq!(enabled("a/y"), Some(vec![f]));
 }
 
 // ---- Level-C REQUIRED_USE encoding (Phase 1b) ----
