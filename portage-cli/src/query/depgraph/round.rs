@@ -674,9 +674,11 @@ pub(super) fn solve_round(
             // and still selects the installed CPV for a same-version rebuild —
             // those must stay in the plan ([R]), not be dropped as "already
             // installed".
+            // A changed SLOT moves the rebuild to another slot node than the installed one.
             let use_rebuild = provider
                 .installed_policy(pkg)
-                .is_some_and(|p| matches!(p, InstalledPolicy::Rebuild));
+                .is_some_and(|p| matches!(p, InstalledPolicy::Rebuild))
+                || changed_rebuild_cpvs.contains(&cpv);
             !already_installed
         || reinstall_cpns.contains(pkg.cpn())
         || use_rebuild

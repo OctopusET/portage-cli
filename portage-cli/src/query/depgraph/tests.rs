@@ -41,6 +41,7 @@ struct Solve<'a> {
     deep: bool,
     newuse: bool,
     changed_deps: bool,
+    changed_slot: bool,
     complete_graph: bool,
     exclude: &'a [String],
     resume: HashSet<(MergeRoot, String)>,
@@ -58,6 +59,7 @@ impl<'a> Solve<'a> {
             deep: false,
             newuse: false,
             changed_deps: false,
+            changed_slot: false,
             complete_graph: false,
             exclude: &[],
             resume: HashSet::new(),
@@ -206,7 +208,7 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         changed_use: false,
         noreplace: opts.noreplace,
         changed_deps: opts.changed_deps,
-        changed_slot: false,
+        changed_slot: opts.changed_slot,
         nodeps: false,
         extra_use_override: None,
         extra_package_use: extra,
@@ -1128,4 +1130,42 @@ fn a_glob_target_matches_only_versions_with_that_prefix() {
         names(&solve(&fix, Solve::new(&atoms))),
         ["app-misc/foo-1.09"]
     );
+}
+
+#[test]
+fn changed_slot_rebuilds_the_installed_version_once() {
+    for tree_slot in ["0/2", "1"] {
+        let pkgs = [pkg("app-misc/bar-1", tree_slot, "")];
+        let fix = fixture(&pkgs, &[]);
+        plant_vdb_slot(&fix.root, "app-misc/bar-1", "0", "");
+        let atoms = [TargetAtom::explicit("app-misc/bar")];
+        let mut opts = Solve::new(&atoms);
+        opts.changed_slot = true;
+        assert_eq!(
+            names(&solve(&fix, opts)),
+            ["app-misc/bar-1"],
+            "SLOT {tree_slot}"
+        );
+        let mut opts = Solve::new(&atoms);
+        opts.noreplace = true;
+        assert!(names(&solve(&fix, opts)).is_empty(), "SLOT {tree_slot}");
+    }
+}
+
+#[test]
+fn changed_deps_rebuilds_a_dependency_under_deep_update() {
+    let pkgs = [
+        pkg("app-misc/top-1", "0", "app-misc/dep"),
+        pkg("app-misc/dep-1", "0", "app-misc/new"),
+        pkg("app-misc/new-1", "0", ""),
+    ];
+    let fix = fixture(&pkgs, &["app-misc/new-1"]);
+    plant_vdb_slot(&fix.root, "app-misc/top-1", "0", "app-misc/dep");
+    plant_vdb_slot(&fix.root, "app-misc/dep-1", "0", "");
+    let atoms = [TargetAtom::explicit("app-misc/top")];
+    let mut opts = Solve::new(&atoms);
+    opts.update = true;
+    opts.deep = true;
+    opts.changed_deps = true;
+    assert_eq!(names(&solve(&fix, opts)), ["app-misc/dep-1"]);
 }
