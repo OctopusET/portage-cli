@@ -84,7 +84,7 @@ struct VdbStamp {
 impl VdbStamp {
     fn capture(vdb: &Vdb) -> Option<Self> {
         let root = FileStamp::read(vdb.root())?;
-        let counter_path = vdb.root().join("COUNTER");
+        let counter_path = vdb.counter_path();
         let counter = match fs::read(counter_path.as_std_path()) {
             Ok(contents) => Some((FileStamp::read(&counter_path)?, contents)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
