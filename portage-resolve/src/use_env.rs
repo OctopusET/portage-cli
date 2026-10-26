@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_atom::interner::Interned;
 use portage_atom::{ConfigAtom, Dep, order_by_specificity};
 use portage_atom_pubgrub::{ProfileUseNode, UseLayer, UseOverride};
 use portage_repo::{
@@ -376,16 +375,10 @@ async fn compute_use_env(
     // node's make.defaults and below make.conf. Per-node so a child
     // make.defaults can restate a flag a parent package.use turned off.
     let expand_keys = &expand;
-    let expand_values = |key: &str| split_var(key);
     let expand_flags = |raw: Vec<(ConfigAtom, Vec<String>)>| {
         order_by_specificity(raw)
             .into_iter()
-            .map(|(atom, flags)| {
-                (
-                    atom,
-                    expand_use_expand_colon(&flags, expand_keys, &expand_values),
-                )
-            })
+            .map(|(atom, flags)| (atom, expand_use_expand_colon(&flags, expand_keys)))
             .collect::<Vec<_>>()
     };
     let profile_node = |raw: Vec<(Dep, Vec<String>)>, defaults: UseLayer| {
@@ -440,7 +433,8 @@ async fn compute_use_env(
             }
             for ov in overrides {
                 let sign = if ov.enable { "" } else { "-" };
-                conf_use.push_str(&format!(" {sign}{}", ov.flag));
+                let glob = if ov.prefix { "*" } else { "" };
+                conf_use.push_str(&format!(" {sign}{}{glob}", ov.flag));
             }
         }
     }
@@ -727,11 +721,7 @@ fn flags_have_use_clear_all(flags: &[String], use_expand: &[String]) -> bool {
     false
 }
 
-fn expand_use_expand_colon(
-    tokens: &[String],
-    use_expand: &[String],
-    expand_values: &dyn Fn(&str) -> Vec<String>,
-) -> Vec<UseOverride> {
+fn expand_use_expand_colon(tokens: &[String], use_expand: &[String]) -> Vec<UseOverride> {
     let mut out: Vec<UseOverride> = Vec::with_capacity(tokens.len());
     let mut group: Option<&str> = None;
     for tok in tokens {
@@ -745,25 +735,13 @@ fn expand_use_expand_colon(
             out.push(UseOverride::parse(tok));
             continue;
         };
+        // `-*` becomes the `-group_*` wildcard, clearing the group before the tokens after it.
         let prefix = key.to_lowercase();
-        if tok == "-*" {
-            // Clear the group's live values; the tokens after rebuild it.
-            for v in expand_values(key) {
-                out.push(UseOverride {
-                    flag: Interned::intern(&format!("{prefix}_{v}")),
-                    enable: false,
-                });
-            }
-        } else {
-            let (enable, val) = match tok.strip_prefix('-') {
-                Some(v) => (false, v),
-                None => (true, tok.as_str()),
-            };
-            out.push(UseOverride {
-                flag: Interned::intern(&format!("{prefix}_{val}")),
-                enable,
-            });
-        }
+        let flag = match tok.strip_prefix('-') {
+            Some(val) => format!("-{prefix}_{val}"),
+            None => format!("{prefix}_{tok}"),
+        };
+        out.push(UseOverride::parse(&flag));
     }
     out
 }
@@ -1319,11 +1297,9 @@ mod tests {
     fn colon_form_expands_values() {
         // `cat/pkg L10N: de en` ⇒ l10n_de l10n_en; a plain flag is untouched.
         let keys = ["L10N".to_string()];
-        let none = |_: &str| Vec::new();
         let out = expand_use_expand_colon(
             &["foo".into(), "L10N:".into(), "de".into(), "en".into()],
             &keys,
-            &none,
         );
         assert_eq!(out, vec![ov("foo"), ov("l10n_de"), ov("l10n_en")]);
     }
@@ -1331,42 +1307,30 @@ mod tests {
     #[test]
     fn colon_form_negates_value() {
         let keys = ["L10N".to_string()];
-        let none = |_: &str| Vec::new();
-        let out = expand_use_expand_colon(&["L10N:".into(), "-de".into()], &keys, &none);
+        let out = expand_use_expand_colon(&["L10N:".into(), "-de".into()], &keys);
         assert_eq!(out, vec![ov("-l10n_de")]);
     }
 
     #[test]
-    fn colon_form_dash_star_clears_group_defaults() {
-        // `PYTHON_TARGETS: -* python2_7` clears the live defaults (python3_13)
-        // then adds python2_7 — the documented "pin a single impl" pattern.
+    fn colon_form_dash_star_is_a_group_wildcard() {
         let keys = ["PYTHON_TARGETS".to_string()];
-        let defaults = |k: &str| {
-            if k == "PYTHON_TARGETS" {
-                vec!["python3_13".to_string()]
-            } else {
-                Default::default()
-            }
-        };
         let out = expand_use_expand_colon(
             &["PYTHON_TARGETS:".into(), "-*".into(), "python2_7".into()],
             &keys,
-            &defaults,
         );
-        assert_eq!(
-            out,
-            vec![
-                ov("-python_targets_python3_13"),
-                ov("python_targets_python2_7")
-            ]
-        );
+        let glob = UseOverride {
+            flag: portage_atom::interner::Interned::intern("python_targets_"),
+            enable: false,
+            prefix: true,
+        };
+        assert_eq!(out, vec![glob, ov("python_targets_python2_7")]);
+        assert_eq!(ov("-python_targets_*"), glob);
     }
 
     #[test]
     fn colon_form_switches_group_mid_line() {
         // A new `KEY:` switches the active group; both groups expand.
         let keys = ["L10N".to_string(), "PYTHON_TARGETS".to_string()];
-        let none = |_: &str| Vec::new();
         let out = expand_use_expand_colon(
             &[
                 "L10N:".into(),
@@ -1375,7 +1339,6 @@ mod tests {
                 "python3_13".into(),
             ],
             &keys,
-            &none,
         );
         assert_eq!(out, vec![ov("l10n_de"), ov("python_targets_python3_13")]);
     }
@@ -1385,16 +1348,14 @@ mod tests {
         // A `:` suffix on something that isn't a USE_EXPAND key is parsed as a
         // plain flag (left intact, interned verbatim).
         let keys = ["L10N".to_string()];
-        let none = |_: &str| Vec::new();
-        let out = expand_use_expand_colon(&["WEIRD:".into(), "x".into()], &keys, &none);
+        let out = expand_use_expand_colon(&["WEIRD:".into(), "x".into()], &keys);
         assert_eq!(out, vec![ov("WEIRD:"), ov("x")]);
     }
 
     #[test]
     fn colon_form_passes_through_plain_flags() {
         let keys = ["L10N".to_string()];
-        let none = |_: &str| Vec::new();
-        let out = expand_use_expand_colon(&["nls".into(), "-debug".into()], &keys, &none);
+        let out = expand_use_expand_colon(&["nls".into(), "-debug".into()], &keys);
         assert_eq!(out, vec![ov("nls"), ov("-debug")]);
     }
 

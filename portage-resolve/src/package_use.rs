@@ -204,18 +204,27 @@ where
     // Flags pinned by the caller's configuration (profile + user package.use):
     // never forced, matching emerge's refusal to override explicit config.
     let mut pinned: HashSet<(Cpn, Interned<DefaultInterner>)> = HashSet::new();
-    let mut pinned_wildcard = Vec::new();
+    let mut pinned_wildcard: Vec<(ConfigAtom, UseOverride)> = Vec::new();
     for (atom, overrides) in &package_use {
-        match atom.cpn() {
-            Some(cpn) => pinned.extend(overrides.iter().map(|o| (*cpn, o.flag))),
-            None => pinned_wildcard.extend(overrides.iter().map(|o| (atom.clone(), o.flag))),
+        for o in overrides {
+            match atom.cpn() {
+                Some(cpn) if !o.prefix => {
+                    pinned.insert((*cpn, o.flag));
+                }
+                _ => pinned_wildcard.push((atom.clone(), *o)),
+            }
         }
     }
-    let is_pinned = |cpn: Cpn, flag| {
+    let is_pinned = |cpn: Cpn, flag: Interned<DefaultInterner>| {
         pinned.contains(&(cpn, flag))
-            || pinned_wildcard
-                .iter()
-                .any(|(atom, f)| *f == flag && atom.matches_cpn(&cpn))
+            || pinned_wildcard.iter().any(|(atom, o)| {
+                let named = if o.prefix {
+                    flag.as_str().starts_with(o.flag.as_str())
+                } else {
+                    o.flag == flag
+                };
+                named && atom.matches_cpn(&cpn)
+            })
     };
 
     let mut applied: HashMap<(Cpn, Interned<DefaultInterner>), bool> = HashMap::new();
@@ -233,10 +242,11 @@ where
                 }
                 applied.insert((cpn, flag), enable);
                 contributed = true;
-                new_by_cpn
-                    .entry(cpn)
-                    .or_default()
-                    .push(UseOverride { flag, enable });
+                new_by_cpn.entry(cpn).or_default().push(UseOverride {
+                    flag,
+                    enable,
+                    prefix: false,
+                });
             }
             if contributed {
                 applied_reqs.push(req);

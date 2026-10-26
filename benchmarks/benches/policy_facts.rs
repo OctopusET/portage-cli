@@ -141,6 +141,7 @@ fn package_use(flag: &str) -> Vec<(ConfigAtom, Vec<UseOverride>)> {
         vec![UseOverride {
             flag: Interned::intern(flag),
             enable: true,
+            prefix: false,
         }],
     )]
 }

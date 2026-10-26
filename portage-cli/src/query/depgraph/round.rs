@@ -555,6 +555,7 @@ pub(super) fn solve_round(
                 .map(|c| UseOverride {
                     flag: c.flag,
                     enable: c.value,
+                    prefix: false,
                 })
                 .collect();
             combined.push((ConfigAtom::Dep(dep), overrides));

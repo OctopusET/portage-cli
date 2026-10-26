@@ -181,22 +181,29 @@ pub struct UseOverride {
     pub flag: Interned<DefaultInterner>,
     /// `true` enables the flag, `false` disables it
     pub enable: bool,
+    /// [`Self::flag`] is a prefix such as `l10n_`, from Portage's `l10n_*` wildcard
+    ///
+    /// Enabling covers the package's IUSE flags with that prefix; disabling covers
+    /// every flag with it set so far.
+    pub prefix: bool,
 }
 
 impl UseOverride {
     /// Parse a single `package.use` token: `flag`/`+flag` enables, `-flag`
-    /// disables.
+    /// disables; `group_*` is a prefix wildcard.
     pub fn parse(token: &str) -> Self {
         let name = token.strip_prefix('+').unwrap_or(token);
-        match name.strip_prefix('-') {
-            Some(rest) => Self {
-                flag: Interned::intern(rest),
-                enable: false,
-            },
-            None => Self {
-                flag: Interned::intern(name),
-                enable: true,
-            },
+        let (enable, name) = match name.strip_prefix('-') {
+            Some(rest) => (false, rest),
+            None => (true, name),
+        };
+        let stem = name
+            .strip_suffix('*')
+            .filter(|s| s.len() > 1 && s.ends_with('_'));
+        Self {
+            flag: Interned::intern(stem.unwrap_or(name)),
+            enable,
+            prefix: stem.is_some(),
         }
     }
 }
@@ -420,6 +427,10 @@ pub fn resolve_effective_use(
             .any(|n| n.puse_clear_all && node_matches(n, cpv, slot));
 
     let mut overlay: HashMap<Interned<DefaultInterner>, UseFlagState> = HashMap::new();
+    let scope = GlobScope {
+        iuse: iuse_defaults,
+        bases: [defaults, conf],
+    };
 
     if replay {
         apply_iuse(&mut overlay, iuse_defaults, defaults);
@@ -429,12 +440,14 @@ pub fn resolve_effective_use(
                 if node.puse_clear_all {
                     overlay.clear();
                 }
-                apply_overrides(&mut overlay, &node.package_use, cpv, slot, |_| false);
+                apply_overrides(&mut overlay, &node.package_use, cpv, slot, &scope, |_| {
+                    false
+                });
             }
         }
     } else if !conf_wipes_below {
         apply_iuse(&mut overlay, iuse_defaults, defaults);
-        apply_profile_package_use(&mut overlay, profile_package_use, cpv, slot);
+        apply_profile_package_use(&mut overlay, profile_package_use, cpv, slot, &scope);
     }
 
     if !conf_wipes_below {
@@ -442,7 +455,7 @@ pub fn resolve_effective_use(
         apply_layer_tokens(&mut overlay, conf);
     }
 
-    apply_overrides(&mut overlay, package_use, cpv, slot, |_| false);
+    apply_overrides(&mut overlay, package_use, cpv, slot, &scope, |_| false);
 
     apply_group_clears(
         &mut overlay,
@@ -509,6 +522,7 @@ fn apply_profile_package_use(
     nodes: &[ProfileUseNode],
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
+    scope: &GlobScope<'_>,
 ) {
     if nodes.is_empty() {
         return;
@@ -517,11 +531,39 @@ fn apply_profile_package_use(
         if !node_matches(node, cpv, slot) {
             continue;
         }
-        apply_overrides(overlay, &node.package_use, cpv, slot, |flag| {
+        apply_overrides(overlay, &node.package_use, cpv, slot, scope, |flag| {
             nodes[i + 1..]
                 .iter()
                 .any(|later| later.defaults.has_clear_all || later.defaults.mentions(flag))
         });
+    }
+}
+
+/// The flags a prefix [`UseOverride`] can reach besides the overlay's own
+struct GlobScope<'a> {
+    /// The package's `+`/`-` IUSE defaults, what an enabling wildcard expands to
+    iuse: &'a HashMap<Interned<DefaultInterner>, IUseDefault>,
+    /// The folded layers under the overlay that may have set a flag
+    bases: [&'a UseLayer; 2],
+}
+
+impl GlobScope<'_> {
+    /// The flags prefix override `ov` names, given the overlay so far
+    fn expand(
+        &self,
+        ov: &UseOverride,
+        overlay: &HashMap<Interned<DefaultInterner>, UseFlagState>,
+    ) -> Vec<Interned<DefaultInterner>> {
+        let prefix = ov.flag.as_str();
+        let iuse = self.iuse.keys().copied();
+        let mut flags: Vec<_> = if ov.enable {
+            iuse.collect()
+        } else {
+            let bases = self.bases.iter().flat_map(|l| l.frozen.keys().copied());
+            iuse.chain(bases).chain(overlay.keys().copied()).collect()
+        };
+        flags.retain(|f| f.as_str().starts_with(prefix));
+        flags
     }
 }
 
@@ -530,6 +572,7 @@ fn apply_overrides(
     entries: &[(ConfigAtom, Vec<UseOverride>)],
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
+    scope: &GlobScope<'_>,
     skip: impl Fn(Interned<DefaultInterner>) -> bool,
 ) {
     for (atom, overrides) in entries {
@@ -537,17 +580,22 @@ fn apply_overrides(
             continue;
         }
         for ov in overrides {
-            if skip(ov.flag) {
+            let state = if ov.enable {
+                UseFlagState::Enabled
+            } else {
+                UseFlagState::Disabled
+            };
+            if !ov.prefix {
+                if !skip(ov.flag) {
+                    overlay.insert(ov.flag, state);
+                }
                 continue;
             }
-            overlay.insert(
-                ov.flag,
-                if ov.enable {
-                    UseFlagState::Enabled
-                } else {
-                    UseFlagState::Disabled
-                },
-            );
+            for flag in scope.expand(ov, overlay) {
+                if !skip(flag) {
+                    overlay.insert(flag, state);
+                }
+            }
         }
     }
 }
@@ -986,6 +1034,34 @@ mod tests {
             &none(),
         );
         assert_eq!(cfg.get(flag("ssl")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn package_use_prefix_wildcards_reach_iuse_and_base_flags() {
+        let iuse = iuse_defaults(&[
+            ("l10n_af", IUseDefault::Enabled),
+            ("l10n_de", IUseDefault::Enabled),
+            ("l10n_fr", IUseDefault::Disabled),
+        ]);
+        let resolve = |base: &str, flags: &[&str]| {
+            resolve_effective_use(
+                &iuse,
+                &layer(base),
+                &cpv(),
+                None,
+                &pkg_use("dev-libs/openssl", flags),
+                &layer(""),
+                &[],
+                &none(),
+            )
+        };
+        let cfg = resolve("l10n_ja", &["-l10n_*", "l10n_de"]);
+        assert_eq!(cfg.get(flag("l10n_af")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("l10n_ja")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("l10n_de")), UseFlagState::Enabled);
+
+        let cfg = resolve("", &["l10n_*"]);
+        assert_eq!(cfg.get(flag("l10n_fr")), UseFlagState::Enabled);
     }
 
     #[test]

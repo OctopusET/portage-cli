@@ -503,6 +503,12 @@ for every bundled locale) keeps every flag on — which is exactly what real
 `L10N="en-GB"` plus `/etc/portage/package.use` `l10n_fr` → `en-GB fr`; env
 `L10N=de` on top of both → `de` alone.
 
+In `package.use` (profile or site), `GROUP: -*` is the `-group_*` wildcard, and
+`group_*`/`-group_*` tokens are prefix wildcards: `-group_*` disables every
+flag with that prefix set so far, the ebuild's `+` IUSE defaults included.
+Divergence: an enabling `group_*` reaches only the ebuild's `+`/`-` IUSE
+defaults, not its plain IUSE flags, which the fold does not see.
+
 Layers 2 (`profile package.use`) and 4 (`/etc/portage/package.use`) are applied
 **per package** at solve/display time. Layer 6 force/mask is applied as a true
 post-fold step by `force_mask.rs`

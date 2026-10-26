@@ -3108,6 +3108,7 @@ mod tests {
             vec![UseOverride {
                 flag: Interned::intern("flag"),
                 enable: true,
+                prefix: false,
             }],
         )];
         assert_ne!(
@@ -3136,6 +3137,7 @@ mod tests {
             vec![UseOverride {
                 flag: Interned::intern("licensed"),
                 enable: true,
+                prefix: false,
             }],
         )];
         let off_policy = ResolvePolicy {
