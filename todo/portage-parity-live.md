@@ -15,7 +15,15 @@ needed under the default profile).
   `SolverInstalledPackage` gains per-class VDB deps; needs shape confirmation).
 - `dev-lang/go` BDEPEND `|| ( >=dev-lang/go-1.24.6 >=dev-lang/go-bootstrap-1.24.6 )`: em picks
   the branch only the package itself satisfies, so preflight fails; emerge pulls go-bootstrap.
-- dev-java/qdox <-> dev-java/jmock: em reports a hard cycle, emerge resolves it.
+  Full sweep: 119 targets (every Go package). Cause: `choose_version` falls back to `max()`, the
+  first branch, which only the package being built satisfies; portage demotes it as circular
+  (`dep_check.py` `circular_atom`). Fix shape: demote a DEPEND/BDEPEND choice branch that depends
+  on its owner node unless host-satisfied, root-stamped for cross builds.
+- `|| ( a b )` whose alternative is masked or unkeyworded: `provider/mod.rs` strips the unknown
+  dep from the Choice branch and keeps it as an empty branch, which `virtual_satisfied_on_broot`
+  then counts as satisfied, so the BDEPEND edge vanishes (dev-java/lzma `|| ( 7zip p7zip )`,
+  rust-r1 slot groups). Fix shape: drop such a branch when a sibling survives.
+- dev-java/qdox <-> dev-java/jmock: em reports a hard cycle, emerge resolves it (17 targets).
 - `||` choice differs: pulseaudio-daemon (emerge) vs pipewire (em) for media-libs/pulseaudio-qt,
   clang (emerge) vs gcc (em) for gnustep-apps/projectcenter, virtual/w3m pulled only by em.
 - Both fail: emerge stops at the first unsatisfiable REQUIRED_USE, em completes the USE cascade
