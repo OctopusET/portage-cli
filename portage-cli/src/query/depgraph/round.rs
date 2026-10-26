@@ -275,6 +275,7 @@ pub(super) fn solve_round(
         // `-n`/`-N`/`-U` without `-u`: a root target an installed version
         // already satisfies keeps that version instead of taking the newest.
         provider.set_selective_no_update(selective && !update);
+        provider.set_selective(selective);
         for (pkg, version) in sysroot_installed {
             provider.add_sysroot_installed(pkg.clone(), version.clone());
         }

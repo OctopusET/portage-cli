@@ -4311,3 +4311,52 @@ fn kept_installed_dep_is_expanded_only_under_deep() {
     assert_eq!(solve(true), Some(Version::parse("1.0").unwrap()));
     assert_eq!(solve(false), None);
 }
+
+// `-N` without `--deep`: a kept world entry is too deep to descend into, so its
+// drifted dependency is not rebuilt. A non-selective resolve reinstalls the target.
+#[test]
+fn kept_selective_root_target_is_expanded_only_under_deep() {
+    let solve = |selective: bool, deep: bool| {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/drift-1.0").unwrap(),
+            None,
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/app-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (DepEntry::parse("dev-libs/drift").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        provider.set_expand_kept(deep);
+        provider.set_selective(selective);
+        provider.set_selective_no_update(selective);
+        let app = PortagePackage::unslotted(Cpn::parse("app-misc/app").unwrap());
+        let drift = PortagePackage::unslotted(Cpn::parse("dev-libs/drift").unwrap());
+        for (package, policy) in [
+            (app.clone(), InstalledPolicy::Favor),
+            (drift.clone(), InstalledPolicy::Rebuild),
+        ] {
+            provider.add_installed(InstalledPackage {
+                package,
+                version: Version::parse("1.0").unwrap(),
+                policy,
+                active_use: vec![],
+                iuse: vec![],
+            });
+        }
+        let solution = provider
+            .resolve_targets(vec![(app, PortageVersionSet::any())])
+            .unwrap();
+        solution.get(&drift).is_some()
+    };
+    assert!(!solve(true, false));
+    assert!(solve(true, true));
+    assert!(solve(false, false));
+}

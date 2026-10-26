@@ -350,6 +350,9 @@ pub struct PortageDependencyProvider {
     /// this when it is set. Off by default, which keeps the plain
     /// `em <atom>` reinstall.
     pub(crate) selective_no_update: bool,
+    /// Selective resolution (`-u`/`-n`/`-N`/`-U`): a root target kept at its installed version is
+    /// left alone rather than reinstalled, so without `--deep` its deps are not listed either
+    pub(crate) selective: bool,
 
     /// `--root-deps=rdeps` (crossdev cross builds): discard a target package's
     /// `DEPEND` from the target-root graph
@@ -839,6 +842,7 @@ impl PortageDependencyProvider {
             root_use_deps: Vec::new(),
             expand_kept: true,
             selective_no_update: false,
+            selective: false,
             root_deps_rdeps: false,
             nodeps: false,
             use_decision_prefer,
@@ -1003,6 +1007,11 @@ impl PortageDependencyProvider {
     /// one
     pub fn set_selective_no_update(&mut self, active: bool) {
         self.selective_no_update = active;
+    }
+
+    /// Selective resolution: a root target kept at its installed version is not reinstalled
+    pub fn set_selective(&mut self, active: bool) {
+        self.selective = active;
     }
 
     /// Policy registered for an installed package, if any (`-N`/`-U` mark USE

@@ -324,8 +324,8 @@ impl PortageDependencyProvider {
             return Dependencies::Available(DependencyConstraints::default());
         }
 
-        // An installed package kept at its version lists its runtime deps only under
-        // `expand_kept` (`--deep`) or as a target, and its build deps only under `kept_build_deps`.
+        // An installed package kept at its version lists its runtime deps only under `expand_kept`
+        // (`--deep`) or as a reinstalled target, and its build deps only under `kept_build_deps`.
         // `--emptytree` (`InstalledPolicy::Rebuild`) expands the full build-time closure instead.
         if let Some((inst, policy)) = self.installed.get(package)
             && inst == version
@@ -333,7 +333,8 @@ impl PortageDependencyProvider {
         {
             // `package.provided` has no VDB record to trust past its existence, so no deps.
             if matches!(policy, InstalledPolicy::Provided)
-                || (!self.expand_kept && !self.root_targets.contains_key(package))
+                || (!self.expand_kept
+                    && (self.selective || !self.root_targets.contains_key(package)))
             {
                 return Dependencies::Available(DependencyConstraints::default());
             }
