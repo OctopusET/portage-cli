@@ -46,6 +46,13 @@ pub async fn run(repos: &[String], globals: &Cli) -> Result<()> {
         return Ok(());
     }
 
+    let portage_dir = globals
+        .roots()
+        .config()
+        .unwrap_or(Utf8Path::new("/"))
+        .join("etc/portage");
+    let repo_hooks = postsync_hooks(&portage_dir.join("repo.postsync.d"));
+    let mut any_synced = false;
     let mut failed = 0usize;
     for entry in &selected {
         match sync_one(entry, globals).await {
@@ -58,6 +65,16 @@ pub async fn run(repos: &[String], globals: &Cli) -> Result<()> {
                 info_repo(&entry.name, &format!("Would sync — {msg}"));
             }
             Ok(SyncOutcome::Synced { changed }) => {
+                any_synced = true;
+                let uri = entry.sync_uri.as_deref().unwrap_or("").trim();
+                let location = entry.location.as_path().map(|p| p.as_os_str());
+                for hook in &repo_hooks {
+                    let mut cmd = std::process::Command::new(hook);
+                    cmd.arg(entry.name.as_str())
+                        .arg(uri)
+                        .arg(location.unwrap_or_default());
+                    run_hook(hook, cmd);
+                }
                 if !globals.quiet() {
                     if changed {
                         info_repo(&entry.name, "Synced (updated)");
@@ -73,10 +90,46 @@ pub async fn run(repos: &[String], globals: &Cli) -> Result<()> {
         }
     }
 
+    if any_synced {
+        for hook in postsync_hooks(&portage_dir.join("postsync.d")) {
+            run_hook(&hook, std::process::Command::new(&hook));
+        }
+    }
+
     if failed > 0 {
         bail!("{failed} of {} repo(s) failed to sync", selected.len());
     }
     Ok(())
+}
+
+/// The executable files under a `postsync.d`-style directory, in Portage's walk order
+fn postsync_hooks(dir: &Utf8Path) -> Vec<Utf8PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let files = portage_repo::ini::collect_conf_files(dir.as_std_path()).unwrap_or_else(|e| {
+        warn_line(&format!("reading {dir}: {e}"));
+        Vec::new()
+    });
+    files
+        .into_iter()
+        .filter_map(|f| Utf8PathBuf::try_from(f).ok())
+        .filter(|f| {
+            let exec = std::fs::metadata(f).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
+            if !exec {
+                tracing::debug!("{dir} hook: '{f}' is not executable");
+            }
+            exec
+        })
+        .collect()
+}
+
+/// A failed hook is reported but does not fail the sync
+fn run_hook(hook: &Utf8Path, mut cmd: std::process::Command) {
+    tracing::debug!("Spawning post_sync hook: {hook}");
+    match cmd.status() {
+        Ok(st) if st.success() => {}
+        Ok(st) => warn_line(&format!("post_sync hook {hook} failed ({st})")),
+        Err(e) => warn_line(&format!("Spawn failed for: {hook}: {e}")),
+    }
 }
 
 fn select_repos<'a>(conf: &'a ReposConf, names: &[String]) -> Result<Vec<&'a RepoEntry>> {
@@ -499,6 +552,27 @@ sync-uri = https://example/local.git
     #[test]
     fn portage_uid_is_none_without_a_matching_entry() {
         assert_eq!(parse_portage_uid("root:x:0:0:root:/root:/bin/bash\n"), None);
+    }
+
+    #[test]
+    fn postsync_hooks_are_the_executable_entries_in_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        for (name, mode) in [
+            ("20-b", 0o755),
+            ("10-a", 0o755),
+            ("15-data", 0o644),
+            (".hidden", 0o755),
+        ] {
+            let p = root.join(name);
+            write(p.as_std_path(), "#!/bin/sh\n");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let hooks = postsync_hooks(root);
+        let names: Vec<_> = hooks.iter().map(|h| h.file_name().unwrap()).collect();
+        assert_eq!(names, ["10-a", "20-b"]);
+        assert!(postsync_hooks(&root.join("missing")).is_empty());
     }
 
     #[test]
