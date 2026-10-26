@@ -640,8 +640,8 @@ fn lock_path(dest: &Utf8Path) -> Utf8PathBuf {
 
 /// Acquire the exclusive lock guarding `dest`, or `None` when it cannot be taken (read-only DISTDIR)
 ///
-/// `flock` excludes other em tasks and processes; the POSIX record lock is the one portage's
-/// distlocks take, and the two kinds do not conflict on Linux.
+/// `flock` excludes other em tasks and processes; the POSIX record lock is what portage's distlocks
+/// take, and the two kinds do not conflict on Linux. Where record locks fail, portage falls back to `flock` too.
 async fn lock_distfile(dest: &Utf8Path) -> Option<DistLock> {
     let path = lock_path(dest);
     tokio::task::spawn_blocking(move || {
@@ -654,7 +654,9 @@ async fn lock_distfile(dest: &Utf8Path) -> Option<DistLock> {
                 .open(path.as_std_path())
                 .ok()?;
             rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive).ok()?;
-            let _ = rustix::fs::fcntl_lock(&f, rustix::fs::FlockOperation::LockExclusive);
+            while rustix::fs::fcntl_lock(&f, rustix::fs::FlockOperation::LockExclusive)
+                == Err(rustix::io::Errno::INTR)
+            {}
             // The previous holder unlinks the file before releasing it; retry on the new one.
             let held = rustix::fs::fstat(&f).ok()?;
             if let Ok(now) = rustix::fs::stat(path.as_std_path())
