@@ -1,9 +1,7 @@
 //! Minimal single-level INI parsing shared by `repos.conf`/`binrepos.conf`-style
 //! config files: `[section]` headers, `key = value` lines, `#`/`;` comments,
-//! later files overriding earlier keys within the same section. No value
-//! interpolation (`%(VAR)s`) — real portage's `ConfigParser` supports it, but
-//! no configured value either format actually needs it here, so this is a
-//! documented simplification rather than a silent gap.
+//! later files overriding earlier keys within the same section, and `[DEFAULT]` keys
+//! inherited by every section. No value interpolation (`%(VAR)s`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -54,9 +52,34 @@ pub fn merge_sections(
     }
 }
 
+/// Section `name`'s keys over the `[DEFAULT]` section's, as `ConfigParser` reads an option
+pub fn section_with_defaults(
+    sections: &HashMap<String, HashMap<String, String>>,
+    name: &str,
+) -> HashMap<String, String> {
+    let mut out = sections.get("DEFAULT").cloned().unwrap_or_default();
+    if let Some(s) = sections.get(name) {
+        out.extend(s.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_keys_override_inherited_defaults() {
+        let mut sections = HashMap::new();
+        let mut order = Vec::new();
+        merge_sections(
+            &mut sections,
+            &mut order,
+            "[DEFAULT]\nx = 1\ny = 2\n[a]\ny = 3\n",
+        );
+        let a = section_with_defaults(&sections, "a");
+        assert_eq!((a["x"].as_str(), a["y"].as_str()), ("1", "3"));
+    }
 
     #[test]
     fn merge_sections_tracks_first_seen_order_and_overrides() {

@@ -103,6 +103,9 @@ pub struct ReposConf {
     main_repo: Option<String>,
 }
 
+/// The running Portage install's own defaults, which `--config-root` does not move
+const GLOBAL_REPOS_CONF: &str = "/usr/share/portage/config/repos.conf";
+
 impl ReposConf {
     /// Load `repos.conf` for a system rooted at `/` (`config_root = /`, no
     /// overlay).
@@ -110,28 +113,45 @@ impl ReposConf {
         Self::load_rooted(Utf8Path::new("/"), &[])
     }
 
-    /// Load `repos.conf` in portage's search order, rooted at `config_root`: the
-    /// global defaults (`<config_root>/usr/share/portage/config/repos.conf`),
-    /// then the user confdir (`<config_root>/etc/portage/repos.conf`), then each
-    /// `extra` confdir's `repos.conf` (e.g. a `--local`/`--prefix` overlay that
-    /// layers on a host `config_root`). Mirrors portage's
-    /// `load_repository_config()`. Missing paths are skipped.
+    /// Load `repos.conf` in portage's `load_repository_config()` order: the global
+    /// defaults (the host's, else `config_root`'s copy), `<config_root>/etc/portage/repos.conf`,
+    /// then each `extra` confdir's `repos.conf` (a `--local`/`--prefix` overlay).
+    ///
+    /// A non-empty `PORTAGE_REPOSITORIES` in the environment replaces the first two.
+    /// Missing paths are skipped.
     pub fn load_rooted(config_root: &Utf8Path, extra: &[&Utf8Path]) -> Result<Self> {
-        let mut paths: Vec<Utf8PathBuf> = vec![
-            config_root.join("usr/share/portage/config/repos.conf"),
-            config_root.join("etc/portage/repos.conf"),
-        ];
+        let inline = std::env::var("PORTAGE_REPOSITORIES")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let mut paths: Vec<Utf8PathBuf> = Vec::new();
+        if inline.is_none() {
+            let global = Utf8Path::new(GLOBAL_REPOS_CONF);
+            paths.push(if global.exists() {
+                global.to_path_buf()
+            } else {
+                config_root.join(GLOBAL_REPOS_CONF.trim_start_matches('/'))
+            });
+            paths.push(config_root.join("etc/portage/repos.conf"));
+        }
         paths.extend(extra.iter().map(|d| d.join("repos.conf")));
-        Self::load_from(&paths)
+        Self::load_with(inline.as_deref(), &paths)
     }
 
-    /// Load from explicit paths in override order. Each path may be a file
-    /// or a directory; directories contribute every `*.conf` they contain
-    /// in alphabetical order. Missing paths are silently skipped.
+    /// Load from explicit paths in override order. Each path may be a file or a
+    /// directory, read as [`ini::collect_conf_files`] lists it. Missing paths are
+    /// silently skipped.
     pub fn load_from<P: AsRef<Path>>(paths: &[P]) -> Result<Self> {
+        Self::load_with(None, paths)
+    }
+
+    /// [`load_from`](Self::load_from) after `inline` repos.conf text
+    fn load_with<P: AsRef<Path>>(inline: Option<&str>, paths: &[P]) -> Result<Self> {
         let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
 
+        if let Some(text) = inline {
+            ini::merge_sections(&mut sections, &mut order, text);
+        }
         for path in paths {
             for file in ini::collect_conf_files(path.as_ref())? {
                 let contents = match std::fs::read_to_string(&file) {
@@ -151,7 +171,7 @@ impl ReposConf {
         let mut repos: Vec<RepoEntry> = order
             .iter()
             .filter_map(|name| {
-                let s = sections.get(name)?;
+                let s = &ini::section_with_defaults(&sections, name);
                 let masters: Option<Vec<String>> = s
                     .get("masters")
                     .map(|v| v.split_whitespace().map(String::from).collect());
@@ -403,6 +423,34 @@ mod tests {
         let opts = &rc.repos()[0].sync_options;
         assert_eq!(opts.len(), 1);
         assert_eq!(opts["sync-openpgp-key-path"], "/k.asc");
+    }
+
+    #[test]
+    fn sections_inherit_default_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("repos.conf");
+        write(
+            &conf,
+            "[DEFAULT]\nsync-type = git\nsync-git-verify-commit-signature = true\n\
+             [foo]\nlocation = /a\n[bar]\nlocation = /b\nsync-type = rsync\n",
+        );
+        let rc = ReposConf::load_from(&[&conf]).unwrap();
+        let foo = rc.find("foo").unwrap();
+        assert_eq!(foo.sync_type.as_deref(), Some("git"));
+        assert_eq!(foo.sync_options["sync-git-verify-commit-signature"], "true");
+        assert_eq!(rc.find("bar").unwrap().sync_type.as_deref(), Some("rsync"));
+    }
+
+    #[test]
+    fn inline_repositories_come_before_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("repos.conf");
+        write(&conf, "[b]\nlocation = /b2\n");
+        let inline = "[DEFAULT]\nmain-repo = a\n[a]\nlocation = /a\n[b]\nlocation = /b\n";
+        let rc = ReposConf::load_with(Some(inline), &[&conf]).unwrap();
+        assert_eq!(rc.main_repo().unwrap().name, "a");
+        let b = rc.find("b").unwrap().location.as_path().unwrap();
+        assert_eq!(b, Path::new("/b2"));
     }
 
     #[test]
