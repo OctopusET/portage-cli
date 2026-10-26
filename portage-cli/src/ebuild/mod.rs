@@ -1411,9 +1411,7 @@ impl PackageSetup {
                 "no usable profile at {cr}/etc/portage/make.profile — building without profile defaults"
             );
         }
-        if let Some(settings) = &settings {
-            crate::settings::seed_build_shell(&mut shell, settings).await?;
-        }
+        crate::settings::seed_build_shell(&mut shell, settings.as_deref()).await?;
         let revisions = repo_revisions(&repo, repos_conf.as_ref());
         shell
             .run_string(&format!(
@@ -1511,7 +1509,7 @@ impl PackageSetup {
 
         // The ebuild sees, and em acts on, the FEATURES em provides.
         let features: std::collections::HashSet<String> =
-            crate::settings::export_provided_features(&mut shell, settings.as_deref())
+            crate::settings::export_provided_features(&mut shell)
                 .await?
                 .split_whitespace()
                 .map(str::to_string)
@@ -2782,14 +2780,8 @@ async fn unmerge_package(u: UnmergePackage<'_>) -> Result<()> {
     // NEEDED.ELF.2 genuinely requires and that nothing else provides. See
     // `preserve_libs` module doc. Normal merges retain and update the
     // graph/registry across the batch; standalone removals share one pair.
-    let preserving = shell
-        .get_var("FEATURES")
-        .is_some_and(|f| f.split_whitespace().any(|t| t == "preserve-libs"));
-    let to_preserve = if preserving {
-        preserve_libs::find_libs_to_preserve(graph, old_pkg, &old_contents)
-    } else {
-        Vec::new()
-    };
+    let features = shell.get_var("FEATURES").unwrap_or_default();
+    let to_preserve = preserve_libs::libs_to_preserve(&features, graph, old_pkg, &old_contents);
     // Slot replace: files the incoming package already owns (or will leave
     // on disk via remove_old_unique_files) must not enter the preserved-libs
     // registry — they are not orphaned.
@@ -4528,6 +4520,9 @@ mod tests {
         async fn run(&self, ebuild: &Ebuild, phases: &[RunPhase]) -> Result<()> {
             let repo = self.repo();
             let mut shell = repo.shell().await.unwrap();
+            crate::settings::seed_build_shell(&mut shell, None)
+                .await
+                .unwrap();
             // A removal on this shell starts from here, as `run_group` does.
             shell.save_profile_session();
             let pf = format!("{}-{}", ebuild.name(), ebuild.version());
@@ -4556,6 +4551,9 @@ mod tests {
         ) -> Result<()> {
             let repo = self.repo();
             let mut shell = repo.shell().await.unwrap();
+            crate::settings::seed_build_shell(&mut shell, None)
+                .await
+                .unwrap();
             let pf = format!("{}-{}", ebuild.name(), ebuild.version());
             let work = self.path("work").join(root).join(pf);
             let root = self.path(root);

@@ -794,6 +794,20 @@ impl MergePreserveState {
     }
 }
 
+/// [`find_libs_to_preserve`] when `features` (a FEATURES value) enables `preserve-libs`, else none
+pub fn libs_to_preserve(
+    features: &str,
+    graph: &LinkGraph,
+    old_pkg: &InstalledPackage,
+    old_contents: &[ContentsEntry],
+) -> Vec<PreserveEntry> {
+    if crate::settings::has_feature(features, "preserve-libs") {
+        find_libs_to_preserve(graph, old_pkg, old_contents)
+    } else {
+        Vec::new()
+    }
+}
+
 /// Which of `old_contents`' own files must survive `old_pkg`'s removal,
 /// because something outside the batch `graph` was built for still needs
 /// them via `DT_NEEDED`, and no other installed copy of that soname is in
@@ -1223,6 +1237,9 @@ mod tests {
             preserved[0].consumers,
             vec![Utf8PathBuf::from("/usr/bin/consumer")]
         );
+        let gated = |features| libs_to_preserve(features, &graph, &libfoo, &old_contents).len();
+        assert_eq!(gated("sandbox preserve-libs"), 1);
+        assert_eq!(gated("sandbox"), 0);
     }
 
     #[test]

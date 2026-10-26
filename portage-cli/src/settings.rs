@@ -16,8 +16,9 @@ use crate::cli::Cli;
 /// Portage's defaults for a host install; a prefix has none of its own yet
 const MAKE_GLOBALS: &str = "/usr/share/portage/config/make.globals";
 
-/// The globals layer without a make.globals: what em does by default that a switch can turn off
-const EM_GLOBALS: &str = "FEATURES=\"preserve-libs\"\n";
+/// Stands in for an absent make.globals' FEATURES: the ones em always acted on, so make.conf can
+/// still switch them off
+const EM_FEATURES: &str = "binpkg-multi-instance preserve-libs";
 
 /// The profile stack of `config_root`, its user profiles included; `None` without a `make.profile`
 pub(crate) fn profile_stack(
@@ -120,6 +121,7 @@ async fn evaluate(key: &Key, repo: &Repository) -> Result<Option<Settings>> {
     let confs: Vec<ConfSource> = confs.iter().map(|p| ConfSource::File(p)).collect();
     let env_d = key.eroot.join("etc/profile.env");
     let globals = Utf8Path::new(MAKE_GLOBALS);
+    let em_globals = format!("FEATURES=\"{EM_FEATURES}\"\n");
     let env = Environment::process();
     let mut shell = repo.shell().await.context("creating shell")?;
     let settings = Settings::evaluate(
@@ -132,7 +134,7 @@ async fn evaluate(key: &Key, repo: &Repository) -> Result<Option<Settings>> {
             globals: Some(if key.host_globals && globals.is_file() {
                 ConfSource::File(globals.as_std_path())
             } else {
-                ConfSource::Str(EM_GLOBALS)
+                ConfSource::Str(&em_globals)
             }),
             confs: &confs,
             env: &env,
@@ -163,43 +165,15 @@ const SEEDED: &[&str] = &[
     "UNINSTALL_IGNORE",
 ];
 
-/// FEATURES em implements that make.globals may enable: the build shell's FEATURES lists what
-/// em provides, so only these are carried over from the settings
-const PROVIDED_FEATURES: &[&str] = &["config-protect-if-modified", "unmerge-orphans"];
-
-/// Give a build shell the [`SEEDED`] values and the enabled [`PROVIDED_FEATURES`]
-pub(crate) async fn seed_build_shell(shell: &mut EbuildShell, settings: &Settings) -> Result<()> {
-    let mut script: String = SEEDED
-        .iter()
-        .filter_map(|&name| {
-            let value = settings.get(name)?;
-            Some(format!("export {name}={}\n", shell_quote(value)))
-        })
-        .collect();
-    let current = shell.get_var("FEATURES").unwrap_or_default();
-    let mut features = current.clone();
-    let enabled = settings.get("FEATURES").unwrap_or_default();
-    for &f in PROVIDED_FEATURES {
-        let has = |list: &str| list.split_whitespace().any(|w| w == f);
-        if has(enabled) && !has(&features) {
-            features = format!("{features} {f}").trim_start().to_owned();
-        }
-    }
-    if features != current {
-        script += &format!("export FEATURES={}\n", shell_quote(&features));
-    }
-    shell
-        .run_string(&script)
-        .await
-        .context("seeding the build configuration")
-}
-
-/// `FEATURES` switches em acts on when the configuration sets them
+/// `FEATURES` em acts on when the configuration sets them; the rest never reach a build, so an
+/// ebuild testing for a sandbox em lacks does not assume it
 const HONOURED_FEATURES: &[&str] = &[
     "binpkg-ignore-signature",
+    "binpkg-multi-instance",
     "binpkg-request-signature",
     "binpkg-signing",
     "buildpkg",
+    "config-protect-if-modified",
     "digest",
     "keeptemp",
     "keepwork",
@@ -208,44 +182,62 @@ const HONOURED_FEATURES: &[&str] = &[
     "noinfo",
     "noman",
     "nostrip",
+    "preserve-libs",
     "test",
+    "unmerge-orphans",
 ];
 
-/// The `FEATURES` a build sees: what em provides, not every token configured
-///
-/// The honoured switches `configured` (the shell's value, `package.env` included) sets,
-/// `preserve-libs` when on, the always-on `binpkg-multi-instance`, and `userpriv` when the build
-/// does not run as root.
-fn provided_features(configured: &str, preserve_libs: bool, as_root: bool) -> String {
+/// The `FEATURES` a build sees: the honoured switches `configured` sets, and `userpriv` when the
+/// build does not run as root
+pub(crate) fn build_features(configured: &str, as_root: bool) -> String {
     let mut out: Vec<&str> = configured
         .split_whitespace()
         .filter(|f| HONOURED_FEATURES.contains(f))
         .collect();
-    out.extend(preserve_libs.then_some("preserve-libs"));
-    out.push("binpkg-multi-instance");
     out.extend((!as_root).then_some("userpriv"));
     out.sort_unstable();
     out.dedup();
     out.join(" ")
 }
 
-/// Whether `settings` keeps `preserve-libs` on: as Portage stacks it, so `-preserve-libs` turns it
-/// off; on without settings
-fn preserves_libs(settings: Option<&Settings>) -> bool {
-    settings.is_none_or(|s| {
-        s.get("FEATURES")
-            .is_some_and(|v| v.split_whitespace().any(|f| f == "preserve-libs"))
-    })
+/// Whether the FEATURES value `features` lists `name`
+pub(crate) fn has_feature(features: &str, name: &str) -> bool {
+    features.split_whitespace().any(|f| f == name)
 }
 
-/// Replace the shell's `FEATURES` with [`provided_features`], and return it
-pub(crate) async fn export_provided_features(
+/// Give a build shell the [`SEEDED`] values and the stacked `FEATURES` (make.globals included)
+/// for `package.env` to stack onto; without settings (no profile), em's own default features
+pub(crate) async fn seed_build_shell(
     shell: &mut EbuildShell,
     settings: Option<&Settings>,
-) -> Result<String> {
+) -> Result<()> {
+    let mut script: String = SEEDED
+        .iter()
+        .filter_map(|&name| {
+            let value = settings?.get(name)?;
+            Some(format!("export {name}={}\n", shell_quote(value)))
+        })
+        .collect();
+    if settings.is_none() {
+        let current = shell.get_var("FEATURES").unwrap_or_default();
+        let mut words: Vec<&str> = current.split_whitespace().collect();
+        words.extend(
+            EM_FEATURES
+                .split_whitespace()
+                .filter(|f| !has_feature(&current, f)),
+        );
+        script += &format!("export FEATURES={}\n", shell_quote(&words.join(" ")));
+    }
+    shell
+        .run_string(&script)
+        .await
+        .context("seeding the build configuration")
+}
+
+/// Replace the shell's `FEATURES` with [`build_features`], and return it
+pub(crate) async fn export_provided_features(shell: &mut EbuildShell) -> Result<String> {
     let configured = shell.get_var("FEATURES").unwrap_or_default();
-    let as_root = rustix::process::getuid().is_root();
-    let features = provided_features(&configured, preserves_libs(settings), as_root);
+    let features = build_features(&configured, rustix::process::getuid().is_root());
     shell
         .run_string(&format!("export FEATURES={}\n", shell_quote(&features)))
         .await
@@ -329,17 +321,45 @@ fn repo_locations(repos: &portage_repo::ReposConf) -> (Option<String>, String) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn without_make_globals_make_conf_switches_off_the_always_on_features() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Utf8Path::from_path(dir.path()).unwrap();
+        let repo_dir = base.join("repo");
+        std::fs::create_dir_all(repo_dir.join("metadata")).unwrap();
+        std::fs::write(repo_dir.join("metadata/layout.conf"), "").unwrap();
+        std::fs::create_dir_all(repo_dir.join("profiles/test")).unwrap();
+        let repo = Repository::builder()
+            .in_memory_cache()
+            .open(repo_dir.as_std_path())
+            .unwrap();
+        let features = async |make_conf: &str| {
+            let root = base.join(format!("root{}", make_conf.len()));
+            let etc = root.join("etc/portage");
+            std::fs::create_dir_all(&etc).unwrap();
+            std::os::unix::fs::symlink(repo_dir.join("profiles/test"), etc.join("make.profile"))
+                .unwrap();
+            std::fs::write(etc.join("make.conf"), make_conf).unwrap();
+            let key = Key::new(Some(&root), None, &root, Some(&root));
+            let settings = evaluate(&key, &repo).await.unwrap().unwrap();
+            settings.get("FEATURES").unwrap_or_default().to_owned()
+        };
+        assert_eq!(features("").await, "binpkg-multi-instance preserve-libs");
+        assert_eq!(
+            features("FEATURES=\"-preserve-libs\"\n").await,
+            "binpkg-multi-instance"
+        );
+    }
+
     #[test]
     fn a_build_sees_only_the_features_em_provides() {
-        let configured = "ccache sandbox network-sandbox test keepwork distcc";
+        let stacked = "ccache sandbox network-sandbox test keepwork distcc preserve-libs \
+                       binpkg-multi-instance unmerge-orphans";
         assert_eq!(
-            provided_features(configured, true, false),
-            "binpkg-multi-instance keepwork preserve-libs test userpriv"
+            build_features(stacked, false),
+            "binpkg-multi-instance keepwork preserve-libs test unmerge-orphans userpriv"
         );
-        assert_eq!(
-            provided_features("test", false, true),
-            "binpkg-multi-instance test"
-        );
+        assert_eq!(build_features("test", true), "test");
     }
 
     #[test]

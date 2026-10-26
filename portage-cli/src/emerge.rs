@@ -1431,9 +1431,15 @@ pub(crate) async fn run_unmerge_batch(
         // the whole batch — see `preserve_libs::build_link_graph`'s doc.
         let registry = preserve_libs::PreservedLibsRegistry::load(&root);
         let graph = preserve_libs::build_link_graph(vdb, exclude, &registry, &root);
+        let settings = crate::settings::load(cli).await?;
+        let features = settings
+            .as_deref()
+            .and_then(|s| s.get("FEATURES"))
+            .unwrap_or_default();
         for pkg in packages {
             if let Ok(old_contents) = pkg.contents() {
-                let preserved = preserve_libs::find_libs_to_preserve(&graph, pkg, &old_contents);
+                let preserved =
+                    preserve_libs::libs_to_preserve(features, &graph, pkg, &old_contents);
                 preserve_libs::report_preserved(pkg.cpv(), &preserved, vdb);
             }
         }
@@ -1491,10 +1497,8 @@ async fn execute_unmerge_batch(
         );
     }
     let settings = crate::settings::load(cli).await?;
-    if let Some(settings) = &settings {
-        crate::settings::seed_build_shell(&mut shell, settings).await?;
-    }
-    crate::settings::export_provided_features(&mut shell, settings.as_deref()).await?;
+    crate::settings::seed_build_shell(&mut shell, settings.as_deref()).await?;
+    crate::settings::export_provided_features(&mut shell).await?;
     // Each removal restores this, so one package's functions do not run for the next.
     shell.save_profile_session();
 

@@ -53,6 +53,12 @@ async fn run_inner(globals: &Cli, opts: &QuickpkgOpts) -> Result<()> {
         .map(|t| t.atom)
         .collect();
     let protect = ConfigProtectLists::load(globals).await;
+    let multi_instance = crate::settings::load(globals).await?.is_none_or(|s| {
+        crate::settings::has_feature(
+            s.get("FEATURES").unwrap_or_default(),
+            "binpkg-multi-instance",
+        )
+    });
 
     let mut successes: Vec<(String, u64)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
@@ -80,6 +86,7 @@ async fn run_inner(globals: &Cli, opts: &QuickpkgOpts) -> Result<()> {
                 &protect,
                 opts.include_config,
                 opts.include_unmodified_config,
+                multi_instance,
             ) {
                 Ok((out, size, excluded)) => {
                     println!(">>> Built package for {cpv}");
@@ -195,6 +202,7 @@ fn package_one(
     protect: &ConfigProtectLists,
     include_config: bool,
     include_unmodified_config: bool,
+    multi_instance: bool,
 ) -> Result<(Utf8PathBuf, u64, Vec<Utf8PathBuf>)> {
     warn_bindist(pkg);
 
@@ -219,19 +227,20 @@ fn package_one(
     let cat = pkg.category();
     let pf = pkg.pf().to_string();
     let pn = pkg.cpv().cpn.package;
-    let (build_id, out) = crate::binpkg::reserve_container(pkgdir, cat, pn.as_str(), &pf)?;
+    let (build_id, out) =
+        crate::binpkg::reserve_container(pkgdir, cat, pn.as_str(), &pf, multi_instance)?;
     let written = portage_binpkg::write_gpkg(
         &portage_binpkg::GpkgInput {
             image_dir: &image_dir,
             metadata_dir: pkg.path().as_std_path(),
             basename: &pf,
             signing: None,
-            build_id: Some(build_id),
+            build_id,
         },
         out.as_std_path(),
     )
     .with_context(|| format!("writing binary package {out}"));
-    if written.is_err() {
+    if written.is_err() && build_id.is_some() {
         let _ = std::fs::remove_file(out.as_std_path());
     }
     written?;
@@ -543,7 +552,7 @@ mod tests {
         };
 
         let (out, size, excluded) =
-            package_one(&pkg, &merge_root, &pkgdir_u, &protect, false, false).unwrap();
+            package_one(&pkg, &merge_root, &pkgdir_u, &protect, false, false, true).unwrap();
         assert!(out.as_str().ends_with(".gpkg.tar"));
         assert!(size > 0);
         assert!(excluded.is_empty());

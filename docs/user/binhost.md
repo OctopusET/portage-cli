@@ -55,6 +55,8 @@ em writes Portage's `binpkg-multi-instance` layout,
 `PKGDIR/<category>/<PN>/<PF>-<BUILD_ID>.gpkg.tar`, and records `BUILD_ID`
 inside the package as Portage does. The `<PN>` directory makes the build id
 unambiguous even for versions that are a bare integer (`acct-group/audio/audio-0-1`).
+With `FEATURES="-binpkg-multi-instance"` it writes `PKGDIR/<category>/<PF>.gpkg.tar`
+instead, replacing the previous build, with no `BUILD_ID`.
 
 Packages older em wrote flat, `PKGDIR/<category>/<PF>-<BUILD_ID>.gpkg.tar`,
 are still read and reused by em, and new builds number past them. Portage's

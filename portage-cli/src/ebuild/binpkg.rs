@@ -114,11 +114,9 @@ pub(crate) async fn build_binpkg_standalone(
         let _ = std::fs::remove_dir_all(image_dir.as_std_path());
     }
     let (out, build_id) = written?;
-    let record = vec![
-        ("BINPKGMD5", binpkg_md5(&out)?),
-        ("BUILD_ID", build_id.to_string()),
-        ("BUILD_TIME", build_time.to_string()),
-    ];
+    let mut record = vec![("BINPKGMD5", binpkg_md5(&out)?)];
+    record.extend(build_id.map(|id| ("BUILD_ID", id.to_string())));
+    record.push(("BUILD_TIME", build_time.to_string()));
     Ok((out, record))
 }
 
@@ -209,14 +207,14 @@ fn link_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
 /// Shared GPKG-writing core: pack `image_dir` (`${D}`) + `metadata_dir` (a
 /// VDB-shaped directory -- the real VDB entry for a normal `-b` merge via
 /// [`build_binpkg_standalone`]) into a GPKG under `PKGDIR`, returning its
-/// path and `BUILD_ID`.
+/// path and `BUILD_ID` (none without `FEATURES=binpkg-multi-instance`).
 fn write_binpkg(
     shell: &portage_repo::EbuildShell,
     ebuild: &Ebuild,
     image_dir: &Utf8Path,
     root: &Utf8Path,
     metadata_dir: &Utf8Path,
-) -> Result<(Utf8PathBuf, u32)> {
+) -> Result<(Utf8PathBuf, Option<u32>)> {
     let cat = ebuild.category();
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     // `ED` is `image/${EPREFIX}` under `--prefix`/`--local`. Packages that
@@ -253,7 +251,6 @@ fn write_binpkg(
     // rewrite the index without this container.
     let _lock = crate::binpkg::lock_pkgdir(&pkgdir)?;
     let pn = ebuild.cpv().cpn.package;
-    let (build_id, out) = crate::binpkg::reserve_container(&pkgdir, cat, pn.as_str(), &pf)?;
 
     // FEATURES=binpkg-signing: sign the Manifest (clearsign) + a detached
     // .sig per metadata/image member, matching real portage's own gpkg
@@ -265,6 +262,9 @@ fn write_binpkg(
         .split_whitespace()
         .map(str::to_string)
         .collect();
+    let multi_instance = features.contains("binpkg-multi-instance");
+    let (build_id, out) =
+        crate::binpkg::reserve_container(&pkgdir, cat, pn.as_str(), &pf, multi_instance)?;
     let signing_key = if features.contains("binpkg-signing") {
         Some(resolve_binpkg_signing_key(shell, root)?)
     } else {
@@ -276,12 +276,12 @@ fn write_binpkg(
             metadata_dir: metadata_dir.as_std_path(),
             basename: &pf,
             signing: signing_key.as_ref(),
-            build_id: Some(build_id),
+            build_id,
         },
         out.as_std_path(),
     )
     .with_context(|| format!("writing binary package {out}"));
-    if written.is_err() {
+    if written.is_err() && build_id.is_some() {
         let _ = std::fs::remove_file(out.as_std_path());
     }
     written?;

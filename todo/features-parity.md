@@ -24,8 +24,11 @@ run. Matching Portage's set is this note's work, one feature at a time.
   `unmerge-logs`, `unmerge-orphans`, `userfetch`, `userpriv`, `usersandbox`, `usersync`.
 
 - **Carried from the settings into the build shell** (`settings::PROVIDED_FEATURES`, 2026-10-26):
-  `config-protect-if-modified`, `unmerge-orphans`. The VDB `FEATURES` therefore differs from
-  emerge's, which records the whole make.globals set.
+  `binpkg-multi-instance`, `config-protect-if-modified`, `preserve-libs`, `unmerge-orphans`.
+  The VDB `FEATURES` therefore differs from emerge's, which records the whole make.globals set.
+- **Work 3 so far:** `-preserve-libs` and `-binpkg-multi-instance` switch those off; without a
+  make.globals em supplies both as its default. `distlocks` stays always on: the same lock keeps
+  em's own parallel fetch tasks off one distfile.
 
 ## Work
 
