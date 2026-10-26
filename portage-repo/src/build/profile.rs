@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_env_file_composes_features_and_overrides_flags() {
+    async fn package_env_file_stacks_features_and_overrides_flags() {
         let dir = tempfile::tempdir().unwrap();
         let repo = make_test_repo(&dir);
         let profile = make_profile(&dir, "test", &[]);
@@ -1001,14 +1001,11 @@ mod tests {
         let mut shell = repo.shell().await.unwrap();
         configure_shell(&mut shell, &stack, &[]).await.unwrap();
 
-        // A package.env file sourced on top: FEATURES composes, CFLAGS replaces.
+        // A package.env file sourced on top: FEATURES stacks even without `${FEATURES}`,
+        // CFLAGS replaces.
         let env_file = dir.path().join("ccache");
-        std::fs::write(
-            &env_file,
-            "FEATURES=\"${FEATURES} ccache\"\nCFLAGS=\"-O3\"\n",
-        )
-        .unwrap();
-        shell.source_env_file(&env_file).await.unwrap();
+        std::fs::write(&env_file, "FEATURES=\"ccache\"\nCFLAGS=\"-O3\"\n").unwrap();
+        shell.source_package_env_file(&env_file).await.unwrap();
 
         let features_var = shell.get_var("FEATURES").unwrap_or_default();
         let features: HashSet<&str> = features_var.split_whitespace().collect();

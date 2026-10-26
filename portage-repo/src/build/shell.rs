@@ -2386,16 +2386,10 @@ impl EbuildShell {
         Ok(())
     }
 
-    /// Source a per-package environment file (`/etc/portage/package.env` points
-    /// at files under `/etc/portage/env/`).
+    /// Source a bash fragment of variable assignments as is, such as a saved environment
     ///
-    /// The file is a bash fragment of variable assignments (with `${VAR}`
-    /// expansion, so `FEATURES="${FEATURES} ccache"` composes on top of the
-    /// already-configured environment) sourced on top of `make.conf` for the
-    /// package being built. Same evaluation as [`source_make_defaults`], named
-    /// for clarity at the call site.
-    ///
-    /// [`source_make_defaults`]: Self::source_make_defaults
+    /// Every assignment replaces the current value; see [`Self::source_package_env_file`]
+    /// for the incremental `package.env` form.
     pub async fn source_env_file(&mut self, path: &Path) -> Result<()> {
         self.invalidate_baseline();
         let params = self.shell.default_exec_params();
@@ -2403,6 +2397,15 @@ impl EbuildShell {
             .source_script(path, std::iter::empty::<&str>(), &params)
             .await
             .map_err(|e| Error::Shell(format!("sourcing env file {}: {e}", path.display())))?;
+        Ok(())
+    }
+
+    /// Source a `package.env` file on top of the configured environment
+    ///
+    /// Incremental variables such as `FEATURES` stack onto their current value, so
+    /// `FEATURES="test"` adds `test`; any other assignment replaces the value.
+    pub async fn source_package_env_file(&mut self, path: &Path) -> Result<()> {
+        super::profile::source_incremental(self, super::profile::ConfSource::File(path)).await?;
         Ok(())
     }
 

@@ -1384,7 +1384,7 @@ impl PackageSetup {
             for env_file in portage_repo::env_files_for(&portage_dirs, ebuild.cpv(), slot.as_ref())
             {
                 shell
-                    .source_env_file(&env_file)
+                    .source_package_env_file(&env_file)
                     .await
                     .with_context(|| format!("sourcing package.env file {}", env_file.display()))?;
             }
