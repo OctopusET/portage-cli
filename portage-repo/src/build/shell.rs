@@ -2269,14 +2269,14 @@ impl EbuildShell {
         // split-usr` (live 2026-08-07, 27 packages under --prefix --target).
         self.die_flag.take();
 
+        self.source_bashrc_hooks(func_name).await?;
+
         if func_name == "src_test" && self.tests_restricted() {
             self.run_string("einfo 'Skipping make test/check due to ebuild restriction.'")
                 .await
                 .ok();
             return Ok(());
         }
-
-        self.source_bashrc_hooks(func_name).await?;
 
         self.call_phase_function(func_name).await
     }
