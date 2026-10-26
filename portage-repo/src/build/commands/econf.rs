@@ -62,28 +62,32 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
         let extra_econf = get("EXTRA_ECONF");
         // `nonfatal econf` (PORTAGE_NONFATAL) suppresses the self-die.
         let nonfatal = get("PORTAGE_NONFATAL") == "1";
-        // get_libdir: LIBDIR_${ABI} from the profile, CONF_LIBDIR fallback,
-        // else plain "lib" (PMS econf passes --libdir=${EPREFIX}/usr/$(get_libdir)).
+        // Only a profile LIBDIR_${ABI} adds --libdir; otherwise configure keeps its own default.
         let libdir = {
             let abi = get("ABI");
-            let by_abi = if abi.is_empty() {
+            if abi.is_empty() {
                 String::new()
             } else {
                 get(&format!("LIBDIR_{abi}"))
-            };
-            if !by_abi.is_empty() {
-                by_abi
-            } else {
-                let conf = get("CONF_LIBDIR");
-                if conf.is_empty() {
-                    "lib".to_string()
-                } else {
-                    conf
-                }
             }
         };
 
         let user_args = self.args.clone();
+        // --libdir follows the ebuild's own --exec-prefix/--prefix; CONF_PREFIX tells einstall.
+        let libdir_arg = (!libdir.is_empty()
+            && !user_args.iter().any(|a| a.starts_with("--libdir=")))
+        .then(|| {
+            let flag = |name: &str| user_args.iter().find_map(|a| a.strip_prefix(name));
+            let prefix = flag("--exec-prefix=")
+                .or_else(|| flag("--prefix="))
+                .map_or_else(|| format!("{eprefix}/usr"), str::to_owned);
+            let prefix = format!("/{}", prefix.trim_start_matches('/'));
+            let mut v =
+                brush_core::ShellVariable::new(brush_core::ShellValue::String(prefix.clone()));
+            v.export();
+            let _ = shell.set_env_global("CONF_PREFIX", v);
+            squash_slashes(&format!("--libdir={prefix}/{libdir}"))
+        });
         let cwd = shell.working_dir().to_path_buf();
 
         let exit = tokio::task::spawn_blocking(move || {
@@ -127,7 +131,6 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
             conf_args.push(format!("--datadir={eprefix}/usr/share"));
             conf_args.push(format!("--sysconfdir={eprefix}/etc"));
             conf_args.push(format!("--localstatedir={eprefix}/var/lib"));
-            conf_args.push(format!("--libdir={eprefix}/usr/{libdir}"));
 
             if eapi >= 8 && help.contains("--datarootdir") {
                 conf_args.push(format!("--datarootdir={eprefix}/usr/share"));
@@ -138,6 +141,14 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
             }
             if eapi >= 5 && contains_flag(&help, "--disable-silent-rules") {
                 conf_args.push("--disable-silent-rules".to_string());
+            }
+            // Portage requires both --enable-shared and --enable-static before adding
+            // --disable-static, to avoid touching packages that don't support static builds.
+            if eapi >= 8
+                && contains_flag(&help, "--enable-shared")
+                && contains_flag(&help, "--enable-static")
+            {
+                conf_args.push("--disable-static".to_string());
             }
             if eapi >= 6 {
                 if help.contains("--docdir") {
@@ -150,13 +161,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
             if eapi >= 7 && contains_flag(&help, "--with-sysroot") {
                 conf_args.push(format!("--with-sysroot={esysroot}"));
             }
-            // Portage requires both --enable-shared and --enable-static before adding
-            // --disable-static, to avoid touching packages that don't support static builds.
-            if eapi >= 8
-                && contains_flag(&help, "--enable-shared")
-                && contains_flag(&help, "--enable-static")
-            {
-                conf_args.push("--disable-static".to_string());
+            if let Some(arg) = &libdir_arg {
+                conf_args.push(arg.clone());
             }
 
             conf_args.extend(user_args);
@@ -193,6 +199,16 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
 
         Ok(brush_core::ExecutionResult::new(exit))
     }
+}
+
+fn squash_slashes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if !(c == '/' && out.ends_with('/')) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Whether `flag` appears in `text` at a word boundary

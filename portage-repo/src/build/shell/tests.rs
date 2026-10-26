@@ -2537,3 +2537,57 @@ async fn a_restored_phase_keeps_s_and_fills_it_when_unset() {
         Some(expected.to_str().unwrap())
     );
 }
+
+// econf adds --libdir only for a profile LIBDIR_${ABI}, under the ebuild's own prefix, after the
+// probed flags, and exports CONF_PREFIX for einstall.
+#[tokio::test]
+async fn econf_libdir_follows_the_ebuild_prefix() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters = \n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "test-repo\n").unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let configure = src.join("configure");
+    std::fs::write(
+        &configure,
+        "#!/bin/sh\n[ \"$1\" = --help ] && { echo '  --with-sysroot=DIR'; exit 0; }\n\
+         printf '%s\\n' \"$@\" > args\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &configure,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell
+        .run_string(&format!(
+            "EAPI=8; ABI=amd64; LIBDIR_amd64=lib64; cd {}; econf --exec-prefix=/opt/x",
+            src.display()
+        ))
+        .await
+        .unwrap();
+    let args = std::fs::read_to_string(src.join("args")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    let libdir = args
+        .iter()
+        .position(|a| *a == "--libdir=/opt/x/lib64")
+        .unwrap();
+    let sysroot = args
+        .iter()
+        .position(|a| a.starts_with("--with-sysroot="))
+        .unwrap();
+    let user = args
+        .iter()
+        .position(|a| *a == "--exec-prefix=/opt/x")
+        .unwrap();
+    assert!(sysroot < libdir && libdir < user, "{args:?}");
+    assert_eq!(shell.get_var("CONF_PREFIX").as_deref(), Some("/opt/x"));
+}
