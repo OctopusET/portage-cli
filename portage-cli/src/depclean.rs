@@ -565,6 +565,28 @@ mod tests {
     }
 
     #[test]
+    fn bare_prune_is_blocked_by_a_missing_dep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "dev-libs", "lib-1", "", "");
+        write_fake_package(&vdb_root, "dev-libs", "lib-2", "", "");
+        write_fake_package(&vdb_root, "app-misc", "app-1", "dev-libs/missing", "");
+        let installed: Vec<InstalledPackage> =
+            open_vdb(tmp.path()).packages().into_iter().collect();
+        let old: Vec<InstalledPackage> = installed
+            .iter()
+            .filter(|p| p.cpv().to_string() == "dev-libs/lib-1")
+            .cloned()
+            .collect();
+        let cleanlist = prune_candidates(&installed, &old, &[], &[], false);
+        assert_eq!(cleanlist.len(), 1);
+        let unresolved = blocking_unresolved(false, &installed, &cleanlist, false);
+        assert!(bail_on_unresolved(&unresolved, "prune").is_err());
+        let unresolved = blocking_unresolved(true, &installed, &cleanlist, false);
+        assert!(bail_on_unresolved(&unresolved, "prune").is_ok());
+    }
+
+    #[test]
     fn idepend_keeps_its_target() {
         let tmp = tempfile::tempdir().unwrap();
         let vdb_root = tmp.path().join("var/db/pkg");

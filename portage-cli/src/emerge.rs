@@ -1193,23 +1193,32 @@ async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
         let merge_flags = cli.merge_flags();
         let exclude = parse_atoms_strict(&merge_flags.exclude)?;
         let roots = cli.roots();
-        let seed = crate::depclean::targeted_seed(roots.config(), roots.merge_root())?;
-        let removable: std::collections::HashSet<portage_atom::Cpv> =
-            crate::depclean::prune_candidates(
-                &installed,
-                &matched,
-                &seed,
-                &exclude,
-                merge_flags.depclean_bdeps(),
-            )
-            .iter()
-            .map(|p| p.cpv().clone())
-            .collect();
+        let root = roots.merge_root();
+        let seed = crate::depclean::targeted_seed(roots.config(), root)?;
+        let cleanlist = crate::depclean::prune_candidates(
+            &installed,
+            &matched,
+            &seed,
+            &exclude,
+            merge_flags.depclean_bdeps(),
+        );
+        let unresolved = crate::depclean::blocking_unresolved(
+            !atoms.is_empty(),
+            &installed,
+            &cleanlist,
+            root == "/",
+        );
+        crate::depclean::bail_on_unresolved(&unresolved, "prune")?;
+        let removable: std::collections::HashSet<&portage_atom::Cpv> =
+            cleanlist.iter().map(|p| p.cpv()).collect();
         matched.retain(|p| removable.contains(p.cpv()));
     }
 
     if matched.is_empty() {
         println!(">>> No packages selected for removal by prune");
+        if !nodeps {
+            println!(">>> To ignore dependencies, use --nodeps");
+        }
         return Ok(());
     }
 
