@@ -29,7 +29,7 @@ pub struct BinpkgEntry {
     pub use_set: HashSet<String>,
     /// The package's `IUSE`, prefix-stripped (`+flag`/`-flag` → `flag`)
     pub iuse: HashSet<String>,
-    /// Build `CHOST` from the entry (or empty if the index omitted it)
+    /// Build `CHOST` from the entry, else the index header's (empty if neither has one)
     ///
     /// Reuse rejects a mismatch against the live desired CHOST so an aarch64
     /// PKGDIR entry is never taken for a riscv64 plan (and vice versa).
@@ -350,11 +350,19 @@ pub fn short_build_env_key(key: &str) -> String {
 /// Shared by the local and remote consumers (the only difference is how
 /// `path` is resolved: a local `PKGDIR` join vs a remote `base_uri` join).
 pub fn parse_packages_entries(text: &str) -> BTreeMap<String, Vec<BinpkgEntry>> {
+    let header = parse_index_header(text);
+    // Portage's writer drops an entry's CHOST when it equals the header's.
+    let header_chost = header.get("CHOST").map(String::as_str).unwrap_or("");
     let mut entries: BTreeMap<String, Vec<BinpkgEntry>> = BTreeMap::new();
     for fields in parse_index_blocks(text) {
         let Some(&cpv) = fields.get("CPV") else {
             continue;
         };
+        let path = fields.get("PATH").copied().unwrap_or("");
+        if !path.ends_with(".gpkg.tar") {
+            tracing::debug!("{cpv}: skipping index entry with non-GPKG PATH {path:?}");
+            continue;
+        }
         let cflags = fields.get("CFLAGS").copied().unwrap_or("").to_string();
         let cxxflags = fields.get("CXXFLAGS").copied().unwrap_or("").to_string();
         let ldflags = fields.get("LDFLAGS").copied().unwrap_or("").to_string();
@@ -366,10 +374,15 @@ pub fn parse_packages_entries(text: &str) -> BTreeMap<String, Vec<BinpkgEntry>> 
             .unwrap_or(0);
 
         let entry = BinpkgEntry {
-            path: fields.get("PATH").copied().unwrap_or("").to_string(),
+            path: path.to_string(),
             use_set: split_use(fields.get("USE").copied().unwrap_or("")),
             iuse: split_iuse(fields.get("IUSE").copied().unwrap_or("")),
-            chost: fields.get("CHOST").copied().unwrap_or("").to_string(),
+            chost: fields
+                .get("CHOST")
+                .copied()
+                .filter(|c| !c.is_empty())
+                .unwrap_or(header_chost)
+                .to_string(),
             cflags,
             cxxflags,
             ldflags,
@@ -1273,25 +1286,52 @@ USE: nls
     }
 
     #[test]
-    fn glued_header_field_does_not_leak_into_first_entry() {
-        // The header carries a CHOST-shaped line; the entry itself has none.
-        // Before the shared header/body boundary, this would have merged
-        // into the first entry's fields (BTreeMap built from every line in
-        // the glued block) and made an unrelated binpkg falsely CHOST-gated.
+    fn glued_header_chost_is_a_default_not_part_of_the_entry() {
+        // The header is glued onto the first entry; its CHOST is only a
+        // default, so an entry carrying its own CHOST keeps it.
         let text = "\
 VERSION: 0
-CHOST: this-is-a-header-value-not-an-entrys
+CHOST: aarch64-unknown-linux-gnu
 CPV: app-test/foo-1.0
 IUSE: nls
 PATH: app-test/foo-1.0-1.gpkg.tar
 USE: nls
+
+CPV: app-test/bar-1.0
+CHOST: riscv64-unknown-linux-gnu
+PATH: app-test/bar-1.0-1.gpkg.tar
 ";
         let idx = BinpkgIndex::parse(text, PathBuf::from("/pkgdir"));
-        let e = idx.get("app-test/foo-1.0").unwrap();
-        assert_eq!(e.len(), 1);
+        assert_eq!(idx.len(), 2);
         assert_eq!(
-            e[0].chost, "",
-            "the header's CHOST must not leak into the entry"
+            idx.get("app-test/foo-1.0").unwrap()[0].chost,
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            idx.get("app-test/bar-1.0").unwrap()[0].chost,
+            "riscv64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn a_non_gpkg_entry_is_never_selected() {
+        let text = "\
+VERSION: 0
+
+CPV: app-test/mixed-1.0
+BUILD_ID: 2
+PATH: app-test/mixed/mixed-1.0-2.xpak
+
+CPV: app-test/mixed-1.0
+BUILD_ID: 1
+PATH: app-test/mixed/mixed-1.0-1.gpkg.tar
+";
+        let idx = RemoteBinpkgIndex::new(text, "https://binhost.example");
+        assert_eq!(
+            idx.find_reusable("app-test/mixed-1.0", &[], "", "")
+                .unwrap()
+                .0,
+            "https://binhost.example/app-test/mixed/mixed-1.0-1.gpkg.tar"
         );
     }
 
