@@ -2216,8 +2216,15 @@ async fn run_fetch(
 
     let gentoo_mirrors = gentoo_mirrors_list(shell);
     let mirror_repos: Vec<&Repository> = mirror_repos.iter().collect();
-    let resolver =
-        DistfileResolver::from_repos(&mirror_repos, gentoo_mirrors).context("loading mirrors")?;
+    let config_root = shell
+        .get_var("PORTAGE_CONFIGROOT")
+        .unwrap_or_else(|| "/".into());
+    let custom_mirrors = portage_distfiles::read_custom_mirrors(
+        &Path::new(&config_root).join("etc/portage/mirrors"),
+    );
+    let resolver = DistfileResolver::from_repos(&mirror_repos, gentoo_mirrors)
+        .context("loading mirrors")?
+        .with_custom_mirrors(custom_mirrors);
     let restrict_gate = RestrictGate::from_restrict_with_use(
         &RestrictExpr::parse(&shell.get_var("RESTRICT").unwrap_or_default()).unwrap_or_default(),
         &use_flags,

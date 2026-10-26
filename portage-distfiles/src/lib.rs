@@ -19,4 +19,4 @@ pub use fetch::{
     is_partial_download_name, partial_download_is_live,
 };
 pub use mirrors::{Endpoint, Mirror, MirrorList, default_mirror_list};
-pub use resolver::{Distfile, DistfileResolver, ResolveOpts, RestrictGate};
+pub use resolver::{Distfile, DistfileResolver, ResolveOpts, RestrictGate, read_custom_mirrors};

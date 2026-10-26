@@ -32,6 +32,62 @@ fn gentoo_distfile_urls(mirror: &str, filename: &str) -> Vec<String> {
     hash_layout_urls(&root, filename)
 }
 
+/// Candidate URLs for a distfile on a mirror root; an absolute path is a filesystem mirror,
+/// which holds the files directly, with no `distfiles/` level
+fn mirror_root_urls(mirror: &str, filename: &str) -> Vec<String> {
+    if mirror.starts_with('/') {
+        hash_layout_urls(&format!("file://{mirror}"), filename)
+    } else {
+        gentoo_distfile_urls(mirror, filename)
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, urls: impl IntoIterator<Item = String>) {
+    for url in urls {
+        if !list.contains(&url) {
+            list.push(url);
+        }
+    }
+}
+
+/// Parse `/etc/portage/mirrors` (a file, or a directory of them): `name url...` per line
+///
+/// A later line for a name replaces an earlier one. A missing or unreadable path yields no mirrors.
+pub fn read_custom_mirrors(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let mut files = vec![path.to_path_buf()];
+    if path.is_dir() {
+        files = std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| !n.starts_with('.') && !n.ends_with('~'))
+            })
+            .collect();
+        files.sort();
+    }
+    let mut mirrors: Vec<(String, Vec<String>)> = Vec::new();
+    for text in files.iter().filter_map(|f| std::fs::read_to_string(f).ok()) {
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("");
+            let mut fields = line.split_whitespace();
+            let Some(name) = fields.next() else {
+                continue;
+            };
+            let urls: Vec<String> = fields.map(str::to_owned).collect();
+            if urls.is_empty() {
+                continue;
+            }
+            mirrors.retain(|(n, _)| n != name);
+            mirrors.push((name.to_owned(), urls));
+        }
+    }
+    mirrors
+}
+
 /// A fully resolved distfile: local filename + all candidate download URLs
 ///
 /// URLs are in priority order — try each in turn until one succeeds.
@@ -64,6 +120,8 @@ pub struct RestrictGate {
     /// `RESTRICT=mirror`, or implied by `RESTRICT=fetch` — drop every URI
     /// without a `mirror+` prefix.
     pub mirror: bool,
+    /// `RESTRICT=primaryuri`: try the ebuild's own URIs before `GENTOO_MIRRORS`
+    pub primaryuri: bool,
 }
 
 impl RestrictGate {
@@ -77,7 +135,12 @@ impl RestrictGate {
     pub fn from_restrict(entries: &[RestrictExpr]) -> Self {
         let fetch = RestrictExpr::has_unconditional(entries, "fetch");
         let mirror = fetch || RestrictExpr::has_unconditional(entries, "mirror");
-        Self { fetch, mirror }
+        let primaryuri = RestrictExpr::has_unconditional(entries, "primaryuri");
+        Self {
+            fetch,
+            mirror,
+            primaryuri,
+        }
     }
 
     /// Build the gate from a parsed `RESTRICT` expression under the package's
@@ -86,7 +149,11 @@ impl RestrictGate {
         let active = RestrictExpr::active_tokens(entries, &|f| use_flags.contains(f));
         let fetch = active.contains(&"fetch");
         let mirror = fetch || active.contains(&"mirror");
-        Self { fetch, mirror }
+        Self {
+            fetch,
+            mirror,
+            primaryuri: active.contains(&"primaryuri"),
+        }
     }
 
     /// `fetch+` or `mirror+` exempts this URI from `RESTRICT=fetch` (PMS 7.3.2)
@@ -127,6 +194,9 @@ pub struct DistfileResolver {
     thirdparty: HashMap<String, Vec<String>>,
     /// GENTOO_MIRRORS — appended as final fallback for every distfile
     gentoo_mirrors: Vec<String>,
+    /// `/etc/portage/mirrors`: mirror name to base URLs, tried before `thirdparty`'s;
+    /// `local` lists mirror roots tried for every distfile
+    custom: HashMap<String, Vec<String>>,
 }
 
 impl DistfileResolver {
@@ -135,7 +205,14 @@ impl DistfileResolver {
         Self {
             thirdparty: thirdparty.into_iter().collect(),
             gentoo_mirrors,
+            custom: HashMap::new(),
         }
+    }
+
+    /// Add the user's mirrors (see [`read_custom_mirrors`])
+    pub fn with_custom_mirrors(mut self, custom: Vec<(String, Vec<String>)>) -> Self {
+        self.custom = custom.into_iter().collect();
+        self
     }
 
     /// Build a resolver from the `thirdpartymirrors` of every configured
@@ -258,11 +335,7 @@ impl DistfileResolver {
             for filename in &order {
                 if let Some(list) = by_filename.get_mut(filename) {
                     for mirror in &self.gentoo_mirrors {
-                        for candidate in gentoo_distfile_urls(mirror, filename) {
-                            if !list.contains(&candidate) {
-                                list.push(candidate);
-                            }
-                        }
+                        push_unique(list, mirror_root_urls(mirror, filename));
                     }
                 }
             }
@@ -287,21 +360,35 @@ impl DistfileResolver {
     /// Must never produce two `Distfile`s sharing a filename: concurrent
     /// fetchers key on the filename alone, and two "different" `Distfile`s
     /// for the same file race writing the same `DISTDIR` path.
+    ///
+    /// Filesystem mirrors come first, then `local` custom mirrors and `GENTOO_MIRRORS`, then
+    /// the ebuild's own URIs; `RESTRICT=primaryuri` puts those URIs before the network mirrors.
     fn build_distfiles(
         &self,
         raw: Vec<(String, String, Option<String>)>,
         gate: RestrictGate,
     ) -> Vec<Distfile> {
+        struct Sources {
+            restriction: Option<String>,
+            fs: Vec<String>,
+            mirrors: Vec<String>,
+            upstream: Vec<String>,
+        }
+        let (fs_mirrors, net_mirrors): (Vec<&String>, Vec<&String>) = self
+            .custom
+            .get("local")
+            .into_iter()
+            .flatten()
+            .partition(|m| m.starts_with('/'));
+        let (fs_gentoo, public): (Vec<&String>, Vec<&String>) =
+            self.gentoo_mirrors.iter().partition(|m| m.starts_with('/'));
+
         let mut order: Vec<String> = Vec::new();
-        let mut by_filename: HashMap<String, Distfile> = HashMap::new();
+        let mut by_filename: HashMap<String, Sources> = HashMap::new();
 
         for (url, filename, restriction) in raw {
-            // Portage tries GENTOO_MIRRORS *before* the upstream SRC_URI URLs
-            // (make.conf(5): "These locations are used to download files before
-            // the ones listed in the ebuild scripts"). Skip them when the
-            // package is `RESTRICT=mirror` and this URI is not `mirror+`,
-            // and for `mirror://gentoo/` (expanded via thirdpartymirrors —
-            // prepending GENTOO_MIRRORS again would double them).
+            // Skip GENTOO_MIRRORS when the package is `RESTRICT=mirror` and this URI is not
+            // `mirror+`, and for `mirror://gentoo/`, whose expansion already holds them.
             let package_blocks_mirrors = (gate.mirror || gate.fetch)
                 && !RestrictGate::uri_exempts_mirror(restriction.as_deref());
             let use_gentoo_mirrors =
@@ -309,58 +396,71 @@ impl DistfileResolver {
             let fetch_blocked =
                 gate.fetch && !RestrictGate::uri_exempts_fetch(restriction.as_deref());
 
-            let df = by_filename.entry(filename.clone()).or_insert_with(|| {
+            let src = by_filename.entry(filename.clone()).or_insert_with(|| {
                 order.push(filename.clone());
-                Distfile {
-                    filename: filename.clone(),
-                    urls: Vec::new(),
+                Sources {
                     restriction: restriction.clone(),
+                    fs: Vec::new(),
+                    mirrors: Vec::new(),
+                    upstream: Vec::new(),
                 }
             });
-            // First exemption seen for this filename wins — `fetch+`/`mirror+`
-            // is a per-URI marker; once one contributing URI is exempt there is
-            // at least one legitimately fetchable source under RESTRICT.
-            if df.restriction.is_none() {
-                df.restriction = restriction;
+            // First exemption seen for this filename wins: once one contributing URI is
+            // `fetch+`/`mirror+`, there is a legitimately fetchable source under RESTRICT.
+            if src.restriction.is_none() {
+                src.restriction = restriction;
             }
-            // Under RESTRICT=fetch, portage still fetches a `mirror://` URI from
-            // the mirrors it names, never from GENTOO_MIRRORS or a plain URI.
+            for mirror in fs_mirrors.iter().chain(&fs_gentoo) {
+                push_unique(&mut src.fs, mirror_root_urls(mirror, &filename));
+            }
+            for mirror in &net_mirrors {
+                push_unique(&mut src.mirrors, mirror_root_urls(mirror, &filename));
+            }
+            // Under RESTRICT=fetch, portage still fetches from the user's own mirrors and a
+            // `mirror://` URI's named mirrors, never from GENTOO_MIRRORS or a plain URI.
             if fetch_blocked {
                 if url.starts_with("mirror://") {
-                    for candidate in self.expand_url(&url, &filename, false) {
-                        df.restriction.get_or_insert_with(|| "fetch".to_owned());
-                        if !df.urls.contains(&candidate) {
-                            df.urls.push(candidate);
-                        }
-                    }
+                    push_unique(&mut src.upstream, self.expand_url(&url, &filename, false));
+                }
+                if !(src.fs.is_empty() && src.mirrors.is_empty() && src.upstream.is_empty()) {
+                    src.restriction.get_or_insert_with(|| "fetch".to_owned());
                 }
                 continue;
             }
             if use_gentoo_mirrors {
-                for mirror in &self.gentoo_mirrors {
-                    for candidate in gentoo_distfile_urls(mirror, &filename) {
-                        if !df.urls.contains(&candidate) {
-                            df.urls.push(candidate);
-                        }
-                    }
+                for mirror in &public {
+                    push_unique(&mut src.mirrors, mirror_root_urls(mirror, &filename));
                 }
             }
-            for candidate in self.expand_url(&url, &filename, !package_blocks_mirrors) {
-                if !df.urls.contains(&candidate) {
-                    df.urls.push(candidate);
-                }
-            }
+            push_unique(
+                &mut src.upstream,
+                self.expand_url(&url, &filename, !package_blocks_mirrors),
+            );
         }
 
         order
             .into_iter()
-            .filter_map(|filename| by_filename.remove(&filename))
+            .filter_map(|filename| {
+                let src = by_filename.remove(&filename)?;
+                let (first, second) = if gate.primaryuri {
+                    (src.upstream, src.mirrors)
+                } else {
+                    (src.mirrors, src.upstream)
+                };
+                let mut urls = src.fs;
+                push_unique(&mut urls, first.into_iter().chain(second));
+                Some(Distfile {
+                    filename,
+                    urls,
+                    restriction: src.restriction,
+                })
+            })
             .collect()
     }
 
     /// Expand a single URL to one or more concrete download URLs
     ///
-    /// `mirror://name/path` is expanded via `profiles/thirdpartymirrors`
+    /// `mirror://name/path` is expanded via the user's custom mirrors, then `profiles/thirdpartymirrors`
     /// (matching real emirrordist's `Config.mirrors`), except `gentoo`: its
     /// thirdpartymirrors bases and any `GENTOO_MIRRORS` entries all serve the
     /// GLEP 75 filename-hash layout, so they get [`hash_layout_urls`] instead
@@ -371,33 +471,32 @@ impl DistfileResolver {
             let (mirror_name, path) = rest.split_once('/').unwrap_or((rest, filename));
             if mirror_name == "gentoo" {
                 let fname = path.rsplit('/').next().unwrap_or(path);
-                let mut urls = Vec::new();
+                let mut urls: Vec<String> = self
+                    .custom
+                    .get("gentoo")
+                    .into_iter()
+                    .flatten()
+                    .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
+                    .collect();
                 for root in self.thirdparty.get("gentoo").into_iter().flatten() {
-                    for candidate in hash_layout_urls(root, fname) {
-                        if !urls.contains(&candidate) {
-                            urls.push(candidate);
-                        }
-                    }
+                    push_unique(&mut urls, hash_layout_urls(root, fname));
                 }
                 for mirror in self.gentoo_mirrors.iter().filter(|_| public_mirrors) {
-                    for candidate in gentoo_distfile_urls(mirror, fname) {
-                        if !urls.contains(&candidate) {
-                            urls.push(candidate);
-                        }
-                    }
+                    push_unique(&mut urls, mirror_root_urls(mirror, fname));
                 }
                 return urls;
             }
-            // Official map — plain flat path-append for every non-gentoo
-            // thirdpartymirrors entry. emirrordist's FetchTask does the same.
-            if let Some(bases) = self.thirdparty.get(mirror_name) {
-                return bases
-                    .iter()
-                    .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
-                    .collect();
+            // Flat path-append for every non-gentoo mirror; emirrordist's FetchTask does the same.
+            let urls: Vec<String> = [&self.custom, &self.thirdparty]
+                .into_iter()
+                .filter_map(|map| map.get(mirror_name))
+                .flatten()
+                .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
+                .collect();
+            if urls.is_empty() {
+                tracing::warn!("No known mirror by the name: {mirror_name}");
             }
-            tracing::warn!("No known mirror by the name: {mirror_name}");
-            vec![]
+            urls
         } else {
             vec![url.to_owned()]
         }
@@ -525,6 +624,96 @@ mod tests {
     }
 
     #[test]
+    fn custom_mirrors_order_local_first_and_named_before_thirdparty() {
+        let r = resolver(&["https://mirror.gentoo.org", "/srv/gentoo"]).with_custom_mirrors(vec![
+            (
+                "local".to_owned(),
+                vec!["https://lan.example".to_owned(), "/srv/local".to_owned()],
+            ),
+            ("kde".to_owned(), vec!["https://kde.lan/".to_owned()]),
+        ]);
+        let entries = SrcUriEntry::parse("mirror://kde/stable/foo.tar.xz").unwrap();
+        let dfs = r.resolve(&entries, &HashSet::new());
+        let mut expected = mirror_root_urls("/srv/local", "foo.tar.xz");
+        expected.extend(mirror_root_urls("/srv/gentoo", "foo.tar.xz"));
+        expected.extend(gentoo_distfile_urls("https://lan.example", "foo.tar.xz"));
+        expected.extend(gentoo_distfile_urls(
+            "https://mirror.gentoo.org",
+            "foo.tar.xz",
+        ));
+        expected.push("https://kde.lan/stable/foo.tar.xz".to_owned());
+        expected.push("https://mirrors.kde.org/stable/foo.tar.xz".to_owned());
+        assert_eq!(dfs[0].urls, expected);
+        assert!(expected[0].starts_with("file:///srv/local/"));
+        assert!(expected[3].starts_with("file:///srv/gentoo/"));
+    }
+
+    #[test]
+    fn local_mirrors_survive_restrict_fetch() {
+        let r = resolver(&["https://mirror.gentoo.org"]).with_custom_mirrors(vec![(
+            "local".to_owned(),
+            vec!["https://lan.example".to_owned()],
+        )]);
+        let entries = SrcUriEntry::parse("https://example.com/secret.tar.gz").unwrap();
+        let gate = RestrictGate {
+            fetch: true,
+            mirror: true,
+            primaryuri: false,
+        };
+        let dfs = r.resolve_with(&entries, &HashSet::new(), gate);
+        assert_eq!(
+            dfs[0].urls,
+            gentoo_distfile_urls("https://lan.example", "secret.tar.gz")
+        );
+        assert!(RestrictGate::uri_exempts_fetch(
+            dfs[0].restriction.as_deref()
+        ));
+    }
+
+    #[test]
+    fn restrict_primaryuri_tries_upstream_before_gentoo_mirrors() {
+        let r = resolver(&["https://mirror.gentoo.org"]);
+        let entries = SrcUriEntry::parse("https://example.com/foo-1.0.tar.gz").unwrap();
+        let gate = RestrictGate {
+            primaryuri: true,
+            ..RestrictGate::default()
+        };
+        let dfs = r.resolve_with(&entries, &HashSet::new(), gate);
+        let mut expected = vec!["https://example.com/foo-1.0.tar.gz".to_owned()];
+        expected.extend(gentoo_distfile_urls(
+            "https://mirror.gentoo.org",
+            "foo-1.0.tar.gz",
+        ));
+        assert_eq!(dfs[0].urls, expected);
+    }
+
+    #[test]
+    fn restrict_gate_reads_primaryuri() {
+        let entries = RestrictExpr::parse("primaryuri").unwrap();
+        assert!(RestrictGate::from_restrict(&entries).primaryuri);
+        assert!(RestrictGate::from_restrict_with_use(&entries, &HashSet::new()).primaryuri);
+    }
+
+    #[test]
+    fn read_custom_mirrors_lets_a_later_line_replace_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mirrors");
+        std::fs::write(
+            &path,
+            "# comment\nlocal /srv/a\ngnu https://g.example\nlocal /srv/b # x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_custom_mirrors(&path),
+            [
+                ("gnu".to_owned(), vec!["https://g.example".to_owned()]),
+                ("local".to_owned(), vec!["/srv/b".to_owned()]),
+            ]
+        );
+        assert!(read_custom_mirrors(&dir.path().join("absent")).is_empty());
+    }
+
+    #[test]
     fn package_restrict_mirror_suppresses_gentoo_fallback() {
         let r = resolver(&["https://mirror.gentoo.org"]);
         let entries = vec![SrcUriEntry::Renamed {
@@ -535,6 +724,7 @@ mod tests {
         let gate = RestrictGate {
             fetch: false,
             mirror: true,
+            primaryuri: false,
         };
         let dfs = r.resolve_with(&entries, &HashSet::new(), gate);
         assert_eq!(
@@ -555,6 +745,7 @@ mod tests {
         let gate = RestrictGate {
             fetch: false,
             mirror: true,
+            primaryuri: false,
         };
         let dfs = r.resolve_with(&entries, &HashSet::new(), gate);
         assert!(
@@ -769,6 +960,7 @@ mod tests {
             restrict: RestrictGate {
                 fetch: true,
                 mirror: true,
+                primaryuri: false,
             },
             ..Default::default()
         };
@@ -789,6 +981,7 @@ mod tests {
             restrict: RestrictGate {
                 fetch: true,
                 mirror: true,
+                primaryuri: false,
             },
             ..Default::default()
         };
@@ -809,6 +1002,7 @@ mod tests {
             restrict: RestrictGate {
                 fetch: false,
                 mirror: true,
+                primaryuri: false,
             },
             ..Default::default()
         };

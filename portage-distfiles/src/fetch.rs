@@ -300,6 +300,7 @@ impl Fetcher {
         let fallback_attempts = self.config.fallback_command.iter().flat_map(|cmd| {
             df.urls
                 .iter()
+                .filter(|url| !url.starts_with("file://"))
                 .map(move |url| (Ok((FetchStrategy::Command(cmd.clone()), resume)), url))
         });
         let mut last_err = None;
@@ -314,6 +315,9 @@ impl Fetcher {
             };
             match result {
                 Ok(()) => return Ok(FetchStatus::Downloaded),
+                Err(Error::Io { source, .. })
+                    if url.starts_with("file://")
+                        && source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     eprintln!("fetch: {url}: {e}");
                     let verify = matches!(e, Error::Verify { .. });
@@ -395,6 +399,9 @@ impl Fetcher {
     fn strategy_for(&self, url: &str) -> Result<(FetchStrategy, Option<&str>)> {
         let scheme = url.split_once("://").map_or("", |(s, _)| s);
         let key = scheme.to_ascii_uppercase();
+        if key == "FILE" {
+            return Ok((FetchStrategy::Builtin, None));
+        }
         if let Some((fetch, resume)) = self.config.scheme_commands.get(&key) {
             return Ok((FetchStrategy::Command(fetch.clone()), resume.as_deref()));
         }
@@ -424,6 +431,14 @@ impl Fetcher {
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
         let temp = download_path(dest);
+        if let Some(path) = url.strip_prefix("file://") {
+            std::fs::copy(path, temp.as_std_path()).map_err(|e| Error::Io {
+                path: path.into(),
+                source: e,
+            })?;
+            verify_or_discard(manifest_entry, &temp)?;
+            return rename_into_place(&temp, dest);
+        }
         match strategy {
             FetchStrategy::Builtin => self.fetch_builtin(url, &temp, manifest_entry).await?,
             FetchStrategy::Command(template) => {
@@ -1242,6 +1257,37 @@ mod tests {
         assert!(!lock_file.exists(), "the lock file is removed on release");
     }
 
+    #[tokio::test]
+    async fn a_filesystem_mirror_is_copied_from_and_a_missing_one_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = Utf8Path::from_path(tmp.path()).unwrap();
+        let (distdir, mirror) = (base.join("dist"), base.join("mirror"));
+        std::fs::create_dir_all(&distdir).unwrap();
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join("foo.tar.gz"), b"payload").unwrap();
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![dist_entry("foo.tar.gz", b"payload")],
+        });
+        let df = Distfile {
+            filename: "foo.tar.gz".to_string(),
+            urls: vec![
+                format!("file://{mirror}/00/foo.tar.gz"),
+                format!("file://{mirror}/foo.tar.gz"),
+            ],
+            restriction: None,
+        };
+        let status = Fetcher::new(distdir.clone(), FetchConfig::default())
+            .fetch_distfile_digests(&df, &digests)
+            .await
+            .unwrap();
+        assert_eq!(status, FetchStatus::Downloaded);
+        assert_eq!(
+            std::fs::read(distdir.join("foo.tar.gz")).unwrap(),
+            b"payload"
+        );
+        assert!(mirror.join("foo.tar.gz").exists());
+    }
+
     /// Serve `body` over HTTP, cutting the first response off halfway; returns the URL and connection count
     fn flaky_server(
         body: &'static [u8],
@@ -1362,6 +1408,7 @@ mod tests {
         let fetcher = Fetcher::new(distdir, FetchConfig::default()).with_restrict(RestrictGate {
             fetch: true,
             mirror: true,
+            primaryuri: false,
         });
         let df = Distfile {
             filename: "secret.tar.gz".to_string(),
@@ -1382,6 +1429,7 @@ mod tests {
         let fetcher = Fetcher::new(distdir, FetchConfig::default()).with_restrict(RestrictGate {
             fetch: true,
             mirror: true,
+            primaryuri: false,
         });
         let df = Distfile {
             filename: "secret.tar.gz".to_string(),
@@ -1446,6 +1494,7 @@ mod tests {
         let fetcher = Fetcher::new(distdir, FetchConfig::default()).with_restrict(RestrictGate {
             fetch: true,
             mirror: true,
+            primaryuri: false,
         });
         let df = Distfile {
             filename: filename.to_string(),
