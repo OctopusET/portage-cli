@@ -225,7 +225,7 @@ fn resolve_ambiguous(
 }
 
 /// Whether `cpn` has an installed entry in `vdb`
-fn is_installed(vdb: &Vdb, cpn: &portage_atom::Cpn) -> bool {
+pub(crate) fn is_installed(vdb: &Vdb, cpn: &portage_atom::Cpn) -> bool {
     vdb.category(cpn.category.as_ref()).is_some_and(|cat| {
         cat.packages()
             .into_iter()

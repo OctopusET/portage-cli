@@ -942,7 +942,19 @@ async fn emerge_atoms_inner(
     // Stop mirroring tracing diagnostics onto this (now-ending) session.
     crate::activity::clear_session();
 
-    merge_result?;
+    if let Err(e) = merge_result {
+        // Portage selects each target as it merges, so the ones that merged stay
+        // in world when another fails under --keep-going.
+        if let Ok(vdb) = portage_vdb::Vdb::open(roots.merge_root().join("var/db/pkg")) {
+            let merged: Vec<portage_atom::Dep> = world_atoms
+                .iter()
+                .filter(|atom| query::is_installed(&vdb, &atom.cpn))
+                .cloned()
+                .collect();
+            maint::world::add_atoms(Some(roots.merge_root()), &merged);
+        }
+        return Err(e);
+    }
 
     if update_world {
         maint::resume::clear(roots.merge_root());
