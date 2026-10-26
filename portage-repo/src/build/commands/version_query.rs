@@ -334,6 +334,19 @@ mod tests {
         assert!(!super::is_cross_atom("not a valid atom"));
     }
 
+    // PMS 8.3.4: `[!foo?]` with the parent's foo off means `[-foo]`.
+    #[test]
+    fn inverse_conditional_requires_the_flag_disabled_when_parent_lacks_it() {
+        let iuse = set(&["foo"]);
+        let d = deps("!foo?");
+        let off = parent_set(&[]);
+        let on = parent_set(&["foo"]);
+        assert!(use_deps_satisfied(&d, &set(&[]), &iuse, &off));
+        assert!(!use_deps_satisfied(&d, &set(&["foo"]), &iuse, &off));
+        assert!(use_deps_satisfied(&d, &set(&[]), &iuse, &on));
+        assert!(use_deps_satisfied(&d, &set(&["foo"]), &iuse, &on));
+    }
+
     #[test]
     fn headers_only_default_disabled_matches_installed_state() {
         let iuse = set(&["headers-only", "multilib", "ssp"]);
