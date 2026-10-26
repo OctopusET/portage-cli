@@ -87,19 +87,54 @@ pub struct MergeSpec {
 }
 
 impl Vdb {
-    /// Read and atomically increment the global VDB COUNTER
+    /// The global counter file: portage's `${EROOT}/var/cache/edb/counter` for a VDB at
+    /// `${EROOT}/var/db/pkg`, else `COUNTER` inside the VDB root
+    pub fn counter_path(&self) -> Utf8PathBuf {
+        match self.root().as_str().strip_suffix("var/db/pkg") {
+            Some(eroot) if eroot.ends_with('/') => {
+                Utf8PathBuf::from(format!("{eroot}var/cache/edb/counter"))
+            }
+            _ => self.root().join("COUNTER"),
+        }
+    }
+
+    /// Bump and record the global counter; returns the new value
     ///
-    /// Lives at `{vdb_root}/COUNTER`.  Returns the *new* value.
-    /// If the file is absent the counter starts at 1.
+    /// Starts above every installed entry's COUNTER and the legacy `{vdb_root}/COUNTER`, so a
+    /// lost or stale counter file never hands out a value already in use.
     pub fn next_counter(&self) -> Result<u64> {
-        let path = self.root().join("COUNTER");
-        let current: u64 = match std::fs::read_to_string(&path) {
-            Ok(s) => s.trim().parse().unwrap_or(0),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(source) => return Err(Error::Io { path, source }),
+        let read = |path: &Utf8Path| -> Result<u64> {
+            match std::fs::read_to_string(path) {
+                Ok(s) => Ok(s.trim().parse().unwrap_or(0)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                Err(source) => Err(Error::Io {
+                    path: path.to_owned(),
+                    source,
+                }),
+            }
         };
+        let path = self.counter_path();
+        let mut current = read(&path)?.max(read(&self.root().join("COUNTER"))?);
+        let entries =
+            |dir: &std::path::Path| std::fs::read_dir(dir).into_iter().flatten().flatten();
+        for cat in entries(self.root().as_std_path()) {
+            for pkg in entries(&cat.path()) {
+                if let Ok(s) = std::fs::read_to_string(pkg.path().join("COUNTER")) {
+                    current = current.max(s.trim().parse().unwrap_or(0));
+                }
+            }
+        }
         let next = current + 1;
-        std::fs::write(&path, format!("{next}\n")).map_err(|source| Error::Io { path, source })?;
+        let io = |source| Error::Io {
+            path: path.clone(),
+            source,
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let tmp = Utf8PathBuf::from(format!("{path}.{}", std::process::id()));
+        std::fs::write(&tmp, format!("{next}")).map_err(io)?;
+        std::fs::rename(&tmp, &path).map_err(io)?;
         Ok(next)
     }
 
@@ -703,6 +738,20 @@ mod tests {
         let cpv = Cpv::parse("dev-lang/python-3.11.9").unwrap();
         let cpn = cpv.cpn;
         assert!(vdb.find_slot_occupant(&cpn, "3.11").unwrap().is_none());
+    }
+
+    #[test]
+    fn counter_lives_in_edb_and_starts_above_installed_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let eroot: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let root = eroot.join("var/db/pkg");
+        std::fs::create_dir_all(root.join("app-misc/foo-1")).unwrap();
+        std::fs::write(root.join("app-misc/foo-1/COUNTER"), "41\n").unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        assert_eq!(vdb.next_counter().unwrap(), 42);
+        let file = std::fs::read_to_string(eroot.join("var/cache/edb/counter")).unwrap();
+        assert_eq!(file, "42");
     }
 
     #[test]
