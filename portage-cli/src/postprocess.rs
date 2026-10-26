@@ -102,7 +102,7 @@ fn walk(image_dir: &Utf8Path) -> Result<Vec<(Utf8PathBuf, Utf8PathBuf)>> {
 }
 
 /// Normalize `.`/`..` in an absolute installed path (no filesystem access)
-fn normalize(path: &Utf8Path) -> Utf8PathBuf {
+pub(crate) fn normalize(path: &Utf8Path) -> Utf8PathBuf {
     let mut parts: Vec<&str> = Vec::new();
     for c in path.components() {
         match c.as_str() {
