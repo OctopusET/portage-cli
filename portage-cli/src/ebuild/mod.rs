@@ -2161,9 +2161,6 @@ async fn run_fetch(
             .run_phase(ebuild, "nofetch", work_root.as_std_path(), Path::new("/"))
             .await
             .context("pkg_nofetch failed")?;
-    }
-
-    if any_restricted || any_failed {
         bail!("one or more distfiles could not be fetched");
     }
     Ok(())
