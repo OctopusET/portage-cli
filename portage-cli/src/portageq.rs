@@ -49,11 +49,16 @@ fn installed_packages(eroot: &str) -> Vec<InstalledPackage> {
 }
 
 /// `atom` as a query: a blocker or a conditional USE dependency, which need a package to be
-/// relative to, is invalid here as in portageq
-fn parse_atom(atom: &str) -> std::result::Result<Dep, u8> {
+/// relative to, is invalid here as in portageq, unless `env_use` (the environment's `USE`) is
+/// given to evaluate the conditionals against
+fn parse_atom(atom: &str, env_use: Option<&str>) -> std::result::Result<Dep, u8> {
     use portage_atom::UseDepKind;
     Dep::parse(atom)
         .ok()
+        .map(|dep| match env_use {
+            Some(use_flags) => evaluate_use_conditionals(dep, use_flags),
+            None => dep,
+        })
         .filter(|dep| {
             dep.blocker.is_none()
                 && dep
@@ -66,6 +71,32 @@ fn parse_atom(atom: &str) -> std::result::Result<Dep, u8> {
             eprintln!("ERROR: Invalid atom: '{atom}'");
             INVALID_ATOM
         })
+}
+
+/// `dep` with its conditional USE dependencies resolved against the flags of `use_flags`, as
+/// PMS defines them for a parent with that USE
+fn evaluate_use_conditionals(mut dep: Dep, use_flags: &str) -> Dep {
+    use portage_atom::UseDepKind::*;
+    let on: std::collections::HashSet<&str> = use_flags.split_whitespace().collect();
+    if let Some(use_deps) = dep.use_deps.as_mut() {
+        use_deps.retain_mut(|ud| {
+            let set = on.contains(ud.flag.as_str());
+            let kind = match (ud.kind, set) {
+                (Conditional, true) | (Equal, true) | (EqualInverse, false) => Enabled,
+                (ConditionalInverse, false) | (Equal, false) | (EqualInverse, true) => Disabled,
+                (Conditional, false) | (ConditionalInverse, true) => return false,
+                (kind, _) => kind,
+            };
+            ud.kind = kind;
+            true
+        });
+    }
+    dep
+}
+
+/// `atom` as a has_version/best_version query, evaluated against the environment's `USE`
+fn parse_query_atom(atom: &str) -> std::result::Result<Dep, u8> {
+    parse_atom(atom, std::env::var("USE").ok().as_deref())
 }
 
 /// Whether installed `pkg` satisfies `dep`: version, slot, `::repo` and USE dependencies
@@ -99,7 +130,7 @@ pub(crate) fn has_version(eroot: &str, atom: &str) -> Result<u8> {
     if let Err(code) = validate_eroot(eroot) {
         return Ok(code);
     }
-    let dep = match parse_atom(atom) {
+    let dep = match parse_query_atom(atom) {
         Ok(d) => d,
         Err(code) => return Ok(code),
     };
@@ -115,7 +146,7 @@ pub(crate) fn best_version(eroot: &str, atom: &str) -> Result<u8> {
     if let Err(code) = validate_eroot(eroot) {
         return Ok(code);
     }
-    let dep = match parse_atom(atom) {
+    let dep = match parse_query_atom(atom) {
         Ok(d) => d,
         Err(code) => return Ok(code),
     };
@@ -143,7 +174,7 @@ pub(crate) fn run_match(eroot: &str, atom: &str) -> Result<u8> {
     let mut cpvs: Vec<Cpv> = if atom.is_empty() {
         pkgs.iter().map(|p| p.cpv().clone()).collect()
     } else {
-        let dep = match parse_atom(atom) {
+        let dep = match parse_atom(atom, None) {
             Ok(d) => d,
             Err(code) => return Ok(code),
         };
@@ -373,8 +404,33 @@ mod tests {
         assert_eq!(has("app-misc/foo[baz(+)]"), 0);
         assert_eq!(has("app-misc/foo::gentoo"), 0);
         assert_eq!(has("app-misc/foo::other"), 1);
-        assert_eq!(has("app-misc/foo[foo?]"), 2);
         assert_eq!(has("!app-misc/foo"), 2);
+    }
+
+    #[test]
+    fn conditional_use_deps_need_the_environment_use() {
+        let dep = |atom: &str, env_use| parse_atom(atom, env_use).map(|d| d.to_string());
+        assert_eq!(dep("app-misc/foo[foo?]", None), Err(2));
+        assert_eq!(
+            dep("app-misc/foo[foo?]", Some("foo")).as_deref(),
+            Ok("app-misc/foo[foo]")
+        );
+        assert_eq!(
+            dep("app-misc/foo[foo?,bar]", Some("")).as_deref(),
+            Ok("app-misc/foo[bar]")
+        );
+        assert_eq!(
+            dep("app-misc/foo[!foo?]", Some("")).as_deref(),
+            Ok("app-misc/foo[-foo]")
+        );
+        assert_eq!(
+            dep("app-misc/foo[foo=]", Some("")).as_deref(),
+            Ok("app-misc/foo[-foo]")
+        );
+        assert_eq!(
+            dep("app-misc/foo[!foo=]", Some("foo")).as_deref(),
+            Ok("app-misc/foo[-foo]")
+        );
     }
 
     #[test]
