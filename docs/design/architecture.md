@@ -704,6 +704,9 @@ CONTENTS, so its later unmerge keeps them. Under `--nodeps` blockers are ignored
 happens.
 A file collision aborts the merge only under `FEATURES=collision-protect` or `protect-owned`; where
 em reads no make.globals (a prefix, a host without Portage, no profile) it assumes `protect-owned`.
+`FEATURES=splitdebug` saves each stripped ELF's debug file and its `.build-id` links, but em has
+no `installsources`, does not salt build IDs with `debugedit`, and splits each hard link of an
+object on its own where estrip writes one debug file per inode.
 
 **`@profile` / `profile-set` (package-set semantics).** Real portage's `@profile`
 set (`ProfilePackageSet`) reads only the *non-`*`* `packages` entries, and only

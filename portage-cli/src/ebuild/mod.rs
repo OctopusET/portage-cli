@@ -2187,10 +2187,7 @@ fn post_process_config(
     };
     let split_debug = (features.contains("splitdebug") && !restricted("splitdebug")).then(|| {
         postprocess::SplitDebug {
-            dir: Utf8PathBuf::from(format!(
-                "/usr/lib/debug{}",
-                get("EPREFIX").unwrap_or_default()
-            )),
+            eprefix: get("EPREFIX").unwrap_or_default(),
             compress: features.contains("compressdebug"),
         }
     });

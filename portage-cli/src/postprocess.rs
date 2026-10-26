@@ -47,8 +47,8 @@ pub struct PostProcess {
 
 /// FEATURES=splitdebug: keep each stripped ELF's debug info in a separate file
 pub struct SplitDebug {
-    /// `/usr/lib/debug${EPREFIX}`; a debug file lands at `<dir><installed path>.debug`
-    pub dir: Utf8PathBuf,
+    /// `EPREFIX`; a debug file lands at `/usr/lib/debug${EPREFIX}<installed path>.debug`
+    pub eprefix: String,
     /// FEATURES=compressdebug
     pub compress: bool,
 }
@@ -362,7 +362,8 @@ pub fn binutil(set: Option<String>, derived: String, bare: &str, path: Option<&s
     if found { name } else { bare.to_string() }
 }
 
-/// Copy `on_disk`'s debug info to the splitdebug tree and link the object to it
+/// Copy `on_disk`'s debug info to the splitdebug tree, link the object to it and index both
+/// under `.build-id`
 fn save_debug(
     image_dir: &Utf8Path,
     installed: &Utf8Path,
@@ -372,8 +373,10 @@ fn save_debug(
     cfg: &PostProcess,
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let rel = format!("{}{installed}.debug", split.dir);
-    let debug = image_dir.join(rel.trim_start_matches('/'));
+    let under_debug = format!("{}{installed}.debug", split.eprefix);
+    let debug = image_dir
+        .join("usr/lib/debug")
+        .join(under_debug.trim_start_matches('/'));
     if let Some(dir) = debug.parent() {
         std::fs::create_dir_all(dir.as_std_path()).with_context(|| format!("creating {dir}"))?;
     }
@@ -394,6 +397,16 @@ fn save_debug(
         let _ =
             std::fs::set_permissions(debug.as_std_path(), std::fs::Permissions::from_mode(mode));
     }
+    if let Some(id) = build_id(on_disk) {
+        let (head, tail) = id.split_at(2);
+        let dir = image_dir.join("usr/lib/debug/.build-id").join(head);
+        std::fs::create_dir_all(dir.as_std_path()).with_context(|| format!("creating {dir}"))?;
+        try_symlink(
+            &format!("../..{under_debug}"),
+            &dir.join(format!("{tail}.debug")),
+        )?;
+        try_symlink(&format!("../../../../..{installed}"), &dir.join(tail))?;
+    }
     run(
         tool(&cfg.objcopy_cmd, cfg)
             .arg(format!("--add-gnu-debuglink={debug}"))
@@ -401,6 +414,24 @@ fn save_debug(
         installed,
     );
     Ok(())
+}
+
+/// The GNU build ID as `readelf -n` prints it, in hex
+fn build_id(path: &Utf8Path) -> Option<String> {
+    use object::Object;
+    let data = std::fs::read(path.as_std_path()).ok()?;
+    let id = object::File::parse(&*data).ok()?.build_id().ok()??;
+    (id.len() > 1).then(|| id.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Leaves an existing link alone, so the first of several hard links keeps the build ID
+fn try_symlink(target: &str, link: &Utf8Path) -> Result<()> {
+    match std::os::unix::fs::symlink(target, link.as_std_path()) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            Err(e).with_context(|| format!("linking {link}"))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn is_ar_archive(path: &Utf8Path) -> bool {
@@ -611,7 +642,7 @@ mod tests {
         let (mut cfg, log) = fake_tools(&root);
         cfg.strip_flags = vec![];
         cfg.split_debug = Some(SplitDebug {
-            dir: Utf8PathBuf::from("/usr/lib/debug"),
+            eprefix: String::new(),
             compress: true,
         });
         let image = root.join("image");
@@ -629,6 +660,69 @@ mod tests {
                 "strip usr/bin/tool",
             ]
         );
+    }
+
+    /// ELF64 shared object with a GNU build-ID note and an empty section name table
+    fn elf_with_build_id(id: &[u8]) -> Vec<u8> {
+        let mut note = Vec::new();
+        for v in [4u32, id.len() as u32, 3] {
+            note.extend_from_slice(&v.to_le_bytes());
+        }
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(id);
+        note.resize(note.len().next_multiple_of(4), 0);
+
+        let mut b = tiny_elf();
+        b[4] = 2;
+        b[6] = 1;
+        b[18] = 62;
+        b[20] = 1;
+        b[40..48].copy_from_slice(&(64 + note.len() as u64 + 8).to_le_bytes());
+        b[52] = 64;
+        b[54] = 56;
+        b[58] = 64;
+        b[60] = 3;
+        b[62] = 2;
+        b.extend_from_slice(&note);
+        b.extend_from_slice(&[0; 8]);
+        b.extend_from_slice(&[0; 64]);
+        for (sh_type, offset, size, align) in [
+            (7u32, 64, note.len() as u64, 4u64),
+            (3, 64 + note.len() as u64, 1, 1),
+        ] {
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(&sh_type.to_le_bytes());
+            for v in [0u64, 0, offset, size, 0, align, 0] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn splitdebug_indexes_the_debug_file_by_build_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let (mut cfg, _) = fake_tools(&root);
+        cfg.split_debug = Some(SplitDebug {
+            eprefix: "/ep".into(),
+            compress: false,
+        });
+        let image = root.join("image");
+        write(
+            &image.join("usr/bin/tool"),
+            &elf_with_build_id(&[0xab, 0xcd, 0x01]),
+        );
+
+        post_process_image(&image, &cfg).unwrap();
+        let ids = image.join("usr/lib/debug/.build-id/ab");
+        let link = |name: &str| std::fs::read_link(ids.join(name).as_std_path()).unwrap();
+        assert_eq!(
+            link("cd01.debug"),
+            Utf8Path::new("../../ep/usr/bin/tool.debug")
+        );
+        assert_eq!(link("cd01"), Utf8Path::new("../../../../../usr/bin/tool"));
+        assert!(ids.join("cd01.debug").is_file());
     }
 
     #[test]
