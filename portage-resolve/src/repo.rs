@@ -1603,6 +1603,20 @@ impl PackageRepository for Adapter<'_> {
                         let iuse_defaults =
                             crate::effective_use::enabled_iuse_defaults_from_metadata(meta);
                         let deps = package_deps_from_metadata(meta);
+                        // Portage masks such a version as invalid instead of reading the field as empty.
+                        if [
+                            &meta.depend,
+                            &meta.rdepend,
+                            &meta.bdepend,
+                            &meta.pdepend,
+                            &meta.idepend,
+                        ]
+                        .iter()
+                        .any(|f| f.parse_failed())
+                        {
+                            tracing::debug!("{cpv}: invalid: {}", meta.parse_failure_summary());
+                            return None;
+                        }
                         // Translate the parsed metadata grammar into the solver's
                         // interned-flag fact vocabulary (the crate stays free of
                         // portage-metadata). Dormant until Level-C consumes it.
@@ -4297,6 +4311,50 @@ mod tests {
             UseFlagState::Disabled,
             "package.use.mask must beat the user's enable of cet"
         );
+    }
+
+    #[test]
+    fn a_version_with_a_malformed_dep_field_is_not_a_candidate() {
+        let data = repo_with_many(&[
+            (
+                "app-misc/thing-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+            ),
+            (
+                "app-misc/thing-2.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nRDEPEND=|| (\n",
+            ),
+        ]);
+        let arch = Arch::intern("amd64");
+        let stable = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let adapter = Adapter {
+            data: &data,
+            accept_keywords: &stable,
+            package_mask: &PolicyMaskList::EMPTY,
+            package_unmask: &PolicyMaskList::EMPTY,
+            installed_cpvs: &std::collections::HashSet::new(),
+            rebuilding_cpvs: &std::collections::HashSet::new(),
+            accept_licenses: &AcceptOverlay::new(accept_all_licenses(), Vec::new()),
+            accept_properties: &AcceptProperties::new(accept_all_licenses(), Vec::new()),
+            accept_restrict: &AcceptRestrict::new(accept_all_licenses(), Vec::new()),
+            defaults: empty_layer(),
+            conf: empty_layer(),
+            env_use: empty_layer(),
+            package_use: &[],
+            profile_package_use: &[],
+            force_mask: &ForceMask::default(),
+            facts: None,
+            autosolve_use: false,
+            autounmask_widen: false,
+        };
+        use portage_atom_pubgrub::PackageRepository as _;
+        let cpn = Cpn::try_new("app-misc/thing").expect("cpn parses");
+        let versions: Vec<_> = adapter
+            .versions_for(&cpn)
+            .iter()
+            .map(|(c, _)| c.version.to_string())
+            .collect();
+        assert_eq!(versions, ["1.0"]);
     }
 
     // Widened candidate supply: unaccepted versions stay visible tagged

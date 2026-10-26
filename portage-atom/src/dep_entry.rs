@@ -94,9 +94,8 @@ impl From<Vec<DepEntry>> for DepList {
 /// candidate the solve never looks at.
 ///
 /// A malformed field parses to an empty list rather than propagating an
-/// error: unlike eager parsing (where a bad field failed the whole
-/// `CacheEntry::parse` and made the package invisible), the package stays
-/// visible with just that one field treated as empty.
+/// error, so the rest of the entry stays readable; a caller that needs the
+/// dependencies checks [`Lazy::parse_failed`].
 pub type LazyDepList = Lazy<DepList>;
 
 impl LazyDepList {
