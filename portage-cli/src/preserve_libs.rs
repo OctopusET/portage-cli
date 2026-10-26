@@ -319,22 +319,22 @@ impl PreservedLibsRegistry {
             }
         }
         // Preserved libraries by path, and the subset `needed` reaches.
-        let mut sonamed: HashMap<&str, (String, String, Vec<String>)> = HashMap::new();
+        let mut sonamed: HashMap<&str, ((String, String), Vec<String>)> = HashMap::new();
         for path_s in self.data.values().flat_map(|e| &e.paths) {
             let abs = root.join(path_s.trim_start_matches('/'));
             if let Some(info) = elfscan::scan_file(abs.as_std_path())
                 && let Some(soname) = info.soname
             {
-                sonamed.insert(path_s, (info.category, soname, info.needed));
+                sonamed.insert(path_s, ((info.category, soname), info.needed));
             }
         }
         let mut reached: HashSet<&str> = HashSet::new();
         loop {
             let before = reached.len();
-            for (path, (category, soname, deps)) in &sonamed {
-                if !reached.contains(path) && needed.contains(&(category.clone(), soname.clone())) {
+            for (path, (key, deps)) in &sonamed {
+                if !reached.contains(path) && needed.contains(key) {
                     reached.insert(path);
-                    needed.extend(deps.iter().map(|n| (category.clone(), n.clone())));
+                    needed.extend(deps.iter().map(|n| (key.0.clone(), n.clone())));
                 }
             }
             if reached.len() == before {
@@ -415,7 +415,7 @@ impl PreservedLibsRegistry {
 /// The `@preserved-rebuild` special set: every installed package whose own
 /// `NEEDED.ELF.2` still requires a soname that no live package provides
 /// anymore, but that `registry` is only keeping on disk because of that
-/// requirement @ real portage's `PreservedLibraryConsumerSet`. Simplified
+/// requirement (real portage's `PreservedLibraryConsumerSet`). Simplified
 /// to match by (multilib category, soname) alone, no RPATH/RUNPATH directory
 /// disambiguation.
 ///
@@ -650,7 +650,8 @@ impl LinkGraph {
     }
 }
 
-/// `dir` as it resolves inside `root`, or lexically normalized when it does not exist there
+/// `dir` with symlinks resolved under `root`, or lexically normalized when it does not exist there or
+/// resolves outside `root` (an absolute symlink)
 fn canonical_dir(root: &Utf8Path, dir: &Utf8Path) -> Utf8PathBuf {
     root.join(dir.as_str().trim_start_matches('/'))
         .canonicalize_utf8()
@@ -1089,15 +1090,18 @@ mod tests {
     #[test]
     fn reclaim_keeps_what_a_kept_preserved_lib_needs() {
         // libc and the loader it needs, as mapped into this test binary.
+        let glibc = cfg!(all(target_os = "linux", target_env = "gnu"));
         let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
         let mapped: Vec<&str> = maps
             .lines()
             .filter_map(|l| l.split_whitespace().nth(5))
             .collect();
         let Some(libc) = mapped.iter().find(|p| p.ends_with("/libc.so.6")) else {
+            assert!(!glibc, "libc or its loader not found in this glibc process");
             return;
         };
         let Some(info) = elfscan::scan_file(std::path::Path::new(libc)) else {
+            assert!(!glibc, "libc or its loader not found in this glibc process");
             return;
         };
         let Some(loader) = info.needed.iter().find_map(|n| {
@@ -1105,6 +1109,7 @@ mod tests {
                 .iter()
                 .find(|p| Utf8Path::new(p).file_name() == Some(n.as_str()))
         }) else {
+            assert!(!glibc, "libc or its loader not found in this glibc process");
             return;
         };
 
