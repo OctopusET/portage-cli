@@ -353,17 +353,20 @@ fn removal_obstacles_once(
 ///
 /// Fed to the solver so `check_blockers` can report a blocker a retained
 /// installed owner points at the plan — the owner is never in the solve graph,
-/// so its blockers are otherwise invisible.
+/// so its blockers are otherwise invisible. Only `RDEPEND`/`PDEPEND`/`IDEPEND`
+/// count: an installed package is not built again, so its build-time blockers are moot.
 pub fn installed_blocker_atoms(entry: &VdbEntry) -> Vec<Dep> {
-    // Most installed packages declare no blockers; a cheap structural pre-scan
-    // skips the evaluate_use + clone for them, keeping this whole-VDB walk cheap.
-    if !has_blocker_atom(&entry.deps) {
-        return Vec::new();
-    }
-    let active: HashSet<Interned<DefaultInterner>> = entry.active_use.iter().copied().collect();
-    let evaluated = DepEntry::evaluate_use(&entry.deps, &active);
+    let c = &entry.classes;
     let mut out = Vec::new();
-    collect_blocker_atoms(&evaluated, &mut out);
+    for class in [&c.rdepend, &c.pdepend, &c.idepend] {
+        // Most installed packages declare no blockers; a cheap structural pre-scan
+        // skips the evaluate_use + clone for them, keeping this whole-VDB walk cheap.
+        if !has_blocker_atom(class) {
+            continue;
+        }
+        let active: HashSet<Interned<DefaultInterner>> = entry.active_use.iter().copied().collect();
+        collect_blocker_atoms(&DepEntry::evaluate_use(class, &active), &mut out);
+    }
     out
 }
 
@@ -1425,5 +1428,23 @@ mod tests {
                 "sys-apps/systemd-260.2".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn installed_blocker_atoms_reads_only_runtime_classes() {
+        let atoms = |s: &str| DepEntry::parse(s).expect("test dep string parses");
+        let mut owner = entry("app-misc/a", "0", "1.0", &[]);
+        owner.classes = portage_atom_pubgrub::PackageDeps::new(
+            atoms("!dev-libs/d"),
+            atoms("!dev-libs/r"),
+            atoms("!dev-libs/b"),
+            atoms("!dev-libs/p"),
+            atoms("!dev-libs/i"),
+        );
+        let got: Vec<String> = installed_blocker_atoms(&owner)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(got, ["!dev-libs/r", "!dev-libs/p", "!dev-libs/i"]);
     }
 }

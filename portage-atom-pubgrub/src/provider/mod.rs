@@ -52,6 +52,8 @@ pub(crate) struct VersionData {
     /// Index: 0=DEPEND, 1=RDEPEND, 2=BDEPEND, 3=PDEPEND, 4=IDEPEND
     pub(crate) by_class: Vec<Vec<convert::Req>>,
     pub(crate) blockers: Vec<Dep>,
+    /// The `RDEPEND`/`PDEPEND`/`IDEPEND` subset of `blockers`: all a kept installed version still declares
+    pub(crate) runtime_blockers: Vec<Dep>,
     pub(crate) use_deps: Vec<convert::UseDepConstraint>,
     pub(crate) iuse: Vec<Interned<DefaultInterner>>,
     pub(crate) iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault>,
@@ -130,6 +132,7 @@ impl VersionData {
             merged,
             by_class,
             blockers: Vec::new(),
+            runtime_blockers: Vec::new(),
             use_deps: Vec::new(),
             iuse: Vec::new(),
             iuse_defaults: HashMap::new(),
@@ -610,6 +613,7 @@ impl PortageDependencyProvider {
                 });
 
                 let mut all_blockers = Vec::new();
+                let mut runtime_blockers = Vec::new();
                 let mut all_use_deps = Vec::new();
                 let mut all_repo_constraints = Vec::new();
                 let mut all_virtual_choices = Vec::new();
@@ -617,7 +621,11 @@ impl PortageDependencyProvider {
                 let mut by_class: Vec<Vec<convert::Req>> = Vec::with_capacity(5);
                 let self_deps = self_dep_branches(&pkg, &cpv.version, &class_results);
 
-                for result in class_results {
+                for (class, result) in class_results.into_iter().enumerate() {
+                    // 0=DEPEND, 2=BDEPEND: build-time only.
+                    if class != 0 && class != 2 {
+                        runtime_blockers.extend(result.blockers.iter().cloned());
+                    }
                     all_blockers.extend(result.blockers);
                     all_use_deps.extend(result.use_deps);
                     all_repo_constraints.extend(result.repo_constraints);
@@ -641,6 +649,7 @@ impl PortageDependencyProvider {
 
                 let mut version_data = VersionData::from_by_class(by_class);
                 version_data.blockers = all_blockers;
+                version_data.runtime_blockers = runtime_blockers;
                 version_data.use_deps = all_use_deps;
                 version_data.iuse = meta.iuse;
                 version_data.iuse_defaults = meta.iuse_defaults;

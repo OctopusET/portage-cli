@@ -367,7 +367,16 @@ impl PortageDependencyProvider {
             let Some(vd) = self.package_data(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
-            for blocker in &vd.blockers {
+            // A kept installed version is not built again, so its DEPEND/BDEPEND blockers are moot.
+            let kept = self.installed.get(pkg).is_some_and(|(v, policy)| {
+                v == version && !matches!(policy, crate::provider::InstalledPolicy::Rebuild)
+            });
+            let blockers = if kept {
+                &vd.runtime_blockers
+            } else {
+                &vd.blockers
+            };
+            for blocker in blockers {
                 let victims = self.blocker_victims(blocker, pkg, version, solution, &retained);
                 if !victims.is_empty() {
                     hits.push(BlockerHit {
@@ -1128,6 +1137,43 @@ mod tests {
             PortagePackage::unslotted(Cpn::parse("sys-apps/systemd").unwrap())
         );
         assert!(!hits[0].victims[0].retained_installed);
+    }
+
+    // A kept installed owner's DEPEND blocker is moot (portage reads only its runtime deps);
+    // the same version rebuilt under `-e` still honours it.
+    #[test]
+    fn check_blockers_ignores_build_blockers_of_a_kept_installed_owner() {
+        let hits_for = |policy: crate::provider::InstalledPolicy| {
+            let mut repo = InMemoryRepository::new();
+            repo.add_version(
+                portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+                None,
+                None,
+                PackageDeps {
+                    depend: (vec![DepEntry::Atom(Dep::parse("!dev-libs/b").unwrap())]).into(),
+                    ..empty_deps()
+                },
+            );
+            let mut provider = PortageDependencyProvider::new(repo);
+            for (cpn, ver) in [("app-misc/a", "1.0"), ("dev-libs/b", "1.0")] {
+                provider.add_installed(crate::provider::InstalledPackage {
+                    package: PortagePackage::unslotted(Cpn::parse(cpn).unwrap()),
+                    version: Version::parse(ver).unwrap(),
+                    policy,
+                    active_use: vec![],
+                    iuse: vec![],
+                });
+            }
+            let solution = provider
+                .resolve_targets(vec![(
+                    PortagePackage::unslotted(Cpn::parse("app-misc/a").unwrap()),
+                    PortageVersionSet::any(),
+                )])
+                .unwrap();
+            provider.check_blockers_detailed(&solution).len()
+        };
+        assert_eq!(hits_for(crate::provider::InstalledPolicy::Favor), 0);
+        assert_eq!(hits_for(crate::provider::InstalledPolicy::Rebuild), 1);
     }
 
     // The `app-alternatives/gpg` shape: `reference?` (default-on) RDEPEND pulls
