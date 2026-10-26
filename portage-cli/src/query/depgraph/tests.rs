@@ -830,3 +830,39 @@ fn deep_descends_into_a_kept_package_through_its_vdb_deps_once_its_ebuild_is_gon
         ["app-misc/baz-1", "app-misc/foo-1"]
     );
 }
+
+#[test]
+fn deep_descends_into_a_kept_package_with_the_use_it_was_built_with() {
+    let pkgs = vec![
+        Pkg {
+            cpv: "app-misc/app-1",
+            keywords: "amd64",
+            depend: "",
+            rdepend: "net-misc/curl",
+            iuse: "",
+            slot: "0",
+        },
+        Pkg {
+            cpv: "net-misc/curl-1",
+            keywords: "amd64",
+            depend: "",
+            rdepend: "http2? ( net-libs/nghttp2 )",
+            iuse: "+http2",
+            slot: "0",
+        },
+        Pkg {
+            cpv: "net-libs/nghttp2-1",
+            keywords: "amd64",
+            depend: "",
+            rdepend: "",
+            iuse: "",
+            slot: "0",
+        },
+    ];
+    let fix = fixture(&pkgs, &[]);
+    plant_installed(&fix.root, "net-misc/curl-1", "0", "", "http2");
+    let atoms = [TargetAtom::explicit("app-misc/app")];
+    let mut deep = Solve::new(&atoms);
+    deep.deep = true;
+    assert_eq!(names(&solve(&fix, deep)), ["app-misc/app-1"]);
+}
