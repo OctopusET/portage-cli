@@ -1261,6 +1261,7 @@ mod tests {
                 metadata_dir: &meta,
                 basename: "foo-1.0",
                 signing: Some(&signing),
+                build_id: None,
             },
             &container,
         )

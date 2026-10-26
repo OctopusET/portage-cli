@@ -5032,6 +5032,7 @@ mod tests {
                 metadata_dir: meta.as_std_path(),
                 basename: "probe-1",
                 signing: None,
+                build_id: None,
             },
             package.as_std_path(),
         )
