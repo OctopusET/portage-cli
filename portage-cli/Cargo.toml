@@ -105,7 +105,6 @@ serde = { workspace = true }
 flume = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
-shlex = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hakoniwa = { workspace = true, optional = true }
