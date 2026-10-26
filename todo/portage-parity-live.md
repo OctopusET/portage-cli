@@ -64,3 +64,18 @@ needed under the default profile).
   VDB field cache, safe to omit: em replaces entry dirs by rename); `/var/lib/portage/config`
   (config-protect-if-modified md5s); binpkg extraction drops owners (`tar --no-same-owner`).
 - SIZE: portage measures `${D}` before compression, em after; left as is.
+
+## Follow-ups left by the fix batches
+
+Each needs a cascading signature change (confirm the shape first) or is a known gap:
+
+- `::repo` in package.accept_keywords/license/properties/accept_restrict is ignored: needs the
+  candidate's repo through `KeywordAccept`/`AcceptOverlay` (~10 production call sites).
+- Binpkg USE reuse ignores IUSE changes in the current ebuild: same kind of signature change.
+- Config memory (`/var/lib/portage/config`): not locked against a concurrent emerge; stale
+  entries are not dropped on unmerge (portage does, `vartree.py`).
+- INSTALL_MASK for nodoc/noman/noinfo is `/usr/share/...`; portage uses `${EPREFIX}/usr/share/...`.
+- repos.conf `[DEFAULT]` `sync-*` keys are not inherited; portage's shipped repos.conf sets
+  `sync-rsync-verify-metamanifest` there for `[gentoo]`.
+- binrepos.conf `verify-signature = false` cannot be told from unset.
+- `em -C <ambiguous name>`: em refuses when several regular packages match; portage picks one.
