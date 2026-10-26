@@ -331,13 +331,12 @@ impl PortageDependencyProvider {
             && inst == version
             && !matches!(policy, InstalledPolicy::Rebuild)
         {
+            let reinstalled = !self.selective && self.root_targets.contains_key(package);
             // `package.provided` has no VDB record to trust past its existence, so no deps.
-            if matches!(policy, InstalledPolicy::Provided)
-                || (!self.expand_kept
-                    && (self.selective || !self.root_targets.contains_key(package)))
-            {
+            if matches!(policy, InstalledPolicy::Provided) || (!self.expand_kept && !reinstalled) {
                 return Dependencies::Available(DependencyConstraints::default());
             }
+            let vd = self.kept_installed_deps(package, version).unwrap_or(vd);
             if self.cross_active && package.merge_root() == MergeRoot::Target {
                 // Already installed and kept (not rebuilt): mirror the native
                 // equivalent below (`runtime`), which likewise omits BDEPEND

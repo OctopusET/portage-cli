@@ -7,7 +7,7 @@ use pubgrub::{Dependencies, SelectedDependencies};
 
 use crate::convert;
 use crate::package::{MergeRoot, PortagePackage};
-use crate::repository::PackageRepository;
+use crate::repository::{PackageDeps, PackageRepository};
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
 
@@ -172,6 +172,21 @@ pub struct InstalledPackage {
     pub iuse: Vec<Interned<DefaultInterner>>,
 }
 
+/// The dependencies an installed version lists while `--deep` keeps it at that version
+///
+/// Portage evaluates a kept package's deps under the USE it was built with, from its ebuild when
+/// the repository still has that version and from the VDB otherwise.
+pub struct InstalledDeps {
+    /// The installed package identity
+    pub package: PortagePackage,
+    /// The installed version
+    pub version: Version,
+    /// Unreduced dependency trees by class
+    pub deps: PackageDeps,
+    /// USE flags active when the version was built
+    pub active_use: Vec<Interned<DefaultInterner>>,
+}
+
 /// A dependency that was dropped because no versions were available
 ///
 /// Dropped deps are always alternatives inside an `||` dep group — a
@@ -248,6 +263,8 @@ pub struct PortageDependencyProvider {
     /// [`check_blockers`](Self::check_blockers) can report ones a retained
     /// installed owner points at the plan — the owner is never in the solve
     pub(crate) installed_blockers: HashMap<PortagePackage, Vec<Dep>>,
+    /// What a kept installed version lists in place of its repository entry (see [`InstalledDeps`])
+    pub(crate) installed_deps: HashMap<PortagePackage, (Version, VersionData)>,
     /// Packages present on the **build host** (BROOT), used only to satisfy
     /// `BDEPEND` edges — a BDEPEND the host already provides is dropped in
     /// [`get_dependencies`](crate::DependencyProvider::get_dependencies), so
@@ -465,7 +482,7 @@ impl PortageDependencyProvider {
     pub fn new<R: PackageRepository>(repo: R) -> Self {
         let seeds = repo.all_packages();
         let slot_map = build_slot_map(&repo);
-        Self::new_with_seeds(repo, seeds, false, &slot_map)
+        Self::new_with_seeds(repo, seeds, false, &slot_map, Vec::new())
     }
 
     /// Like [`new`](Self::new), but converts only the packages *reachable*
@@ -476,7 +493,7 @@ impl PortageDependencyProvider {
     /// stays sound. Converts a few hundred packages instead of the whole tree.
     pub fn new_for_targets<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
         let slot_map = build_slot_map(&repo);
-        Self::new_with_seeds(repo, seeds, false, &slot_map)
+        Self::new_with_seeds(repo, seeds, false, &slot_map, Vec::new())
     }
 
     /// Like [`new_for_targets`](Self::new_for_targets), but with explicit
@@ -487,7 +504,7 @@ impl PortageDependencyProvider {
         with_bdeps: bool,
     ) -> Self {
         let slot_map = build_slot_map(&repo);
-        Self::new_with_seeds(repo, seeds, with_bdeps, &slot_map)
+        Self::new_with_seeds(repo, seeds, with_bdeps, &slot_map, Vec::new())
     }
 
     /// Like [`new_for_targets_with_bdeps`](Self::new_for_targets_with_bdeps),
@@ -500,13 +517,16 @@ impl PortageDependencyProvider {
     /// every rebuild is the single largest redundant cost (a real Gentoo
     /// tree has ~20k CPNs / ~32k cached versions to re-filter). Building the
     /// slot map once and reusing it here removes that cost after the first.
+    ///
+    /// `installed` is converted alongside the seeds' closure; a seed must cover each one's CPN.
     pub fn new_for_targets_with_bdeps_and_slot_map<R: PackageRepository>(
         repo: R,
         seeds: Vec<Cpn>,
         with_bdeps: bool,
         slot_map: &convert::SlotMap,
+        installed: Vec<InstalledDeps>,
     ) -> Self {
-        Self::new_with_seeds(repo, seeds, with_bdeps, slot_map)
+        Self::new_with_seeds(repo, seeds, with_bdeps, slot_map, installed)
     }
 
     fn new_with_seeds<R: PackageRepository>(
@@ -514,7 +534,16 @@ impl PortageDependencyProvider {
         seeds: Vec<Cpn>,
         with_bdeps: bool,
         slot_map: &convert::SlotMap,
+        installed: Vec<InstalledDeps>,
     ) -> Self {
+        let mut installed_by_cpn: HashMap<Cpn, Vec<InstalledDeps>> = HashMap::new();
+        for inst in installed {
+            installed_by_cpn
+                .entry(*inst.package.cpn())
+                .or_default()
+                .push(inst);
+        }
+        let mut installed_deps: HashMap<PortagePackage, (Version, VersionData)> = HashMap::new();
         let mut packages = HashMap::new();
         let mut use_decision_prefer: HashMap<PortagePackage, Version> = HashMap::new();
         let mut use_decision_meta: HashMap<PortagePackage, (Cpn, Interned<DefaultInterner>)> =
@@ -607,30 +636,7 @@ impl PortageDependencyProvider {
                     all_virtual_choices.extend(enc.virtual_choices);
                 }
 
-                // Queue every real package this version references (direct
-                // requirements and virtual-choice branches) for ingestion.
-                for class in &by_class {
-                    for (target, _, _) in class {
-                        if !target.is_virtual() {
-                            let c = *target.cpn();
-                            if seen.insert(c) {
-                                queue.push_back(c);
-                            }
-                        }
-                    }
-                }
-                for vc in &all_virtual_choices {
-                    for (_, deps) in &vc.versions {
-                        for (target, _, _) in deps {
-                            if !target.is_virtual() {
-                                let c = *target.cpn();
-                                if seen.insert(c) {
-                                    queue.push_back(c);
-                                }
-                            }
-                        }
-                    }
-                }
+                queue_references(&by_class, &all_virtual_choices, &mut seen, &mut queue);
 
                 let mut version_data = VersionData::from_by_class(by_class);
                 version_data.blockers = all_blockers;
@@ -658,6 +664,45 @@ impl PortageDependencyProvider {
                         vd.self_deps = targets;
                     }
                 }
+            }
+
+            for inst in installed_by_cpn.remove(&cpn).unwrap_or_default() {
+                let mut use_cfg = UseConfig::new();
+                for flag in &inst.active_use {
+                    use_cfg.enable(*flag);
+                }
+                let ebuild = packages
+                    .get(&inst.package)
+                    .and_then(|d| d.versions.get(&inst.version));
+                // The repository entry already lists these deps when its USE matches the build's.
+                if ebuild.is_some_and(|vd| {
+                    vd.iuse.iter().all(|f| {
+                        matches!(vd.desired.get(*f), UseFlagState::Enabled)
+                            == inst.active_use.contains(f)
+                    })
+                }) {
+                    continue;
+                }
+                let classes: [&[portage_atom::DepEntry]; 5] = [
+                    &inst.deps.depend,
+                    &inst.deps.rdepend,
+                    &inst.deps.bdepend,
+                    &inst.deps.pdepend,
+                    &inst.deps.idepend,
+                ];
+                let mut by_class = Vec::with_capacity(5);
+                let mut choices = Vec::new();
+                for entries in classes {
+                    let result =
+                        convert::convert_deps_groups(entries, &cpn_str, &use_cfg, slot_map, false);
+                    choices.extend(result.virtual_choices);
+                    by_class.push(result.requirements);
+                }
+                queue_references(&by_class, &choices, &mut seen, &mut queue);
+                register_virtual_choices(&mut packages, choices);
+                let mut vd = VersionData::from_by_class(by_class);
+                vd.desired = use_cfg;
+                installed_deps.insert(inst.package, (inst.version, vd));
             }
         }
 
@@ -760,6 +805,18 @@ impl PortageDependencyProvider {
                 }
             }
         }
+        for (_, vd) in installed_deps.values_mut() {
+            for class in &mut vd.by_class {
+                class.retain(|(pkg, _, _)| known.contains(pkg));
+            }
+            vd.merged = Dependencies::Available(
+                vd.by_class
+                    .iter()
+                    .flatten()
+                    .map(|(p, vs, _)| (p.clone(), vs.clone()))
+                    .collect(),
+            );
+        }
         // A branch through a nested `||` whose every branch broke is broken too.
         loop {
             let dead: HashSet<PortagePackage> = broken_branches
@@ -822,6 +879,7 @@ impl PortageDependencyProvider {
             installed_cpns: HashSet::new(),
             installed_use: HashMap::new(),
             installed_blockers: HashMap::new(),
+            installed_deps,
             installed_iuse: HashMap::new(),
             host_installed: HashMap::new(),
             sysroot_installed: HashMap::new(),
@@ -1012,6 +1070,31 @@ impl PortageDependencyProvider {
     /// Selective resolution: a root target kept at its installed version is not reinstalled
     pub fn set_selective(&mut self, active: bool) {
         self.selective = active;
+    }
+
+    /// What a kept installed version lists in place of its repository entry, if anything
+    pub(crate) fn kept_installed_deps(
+        &self,
+        package: &PortagePackage,
+        version: &Version,
+    ) -> Option<&VersionData> {
+        let kept = self.installed.get(package).is_some_and(|(v, policy)| {
+            v == version && matches!(policy, InstalledPolicy::Favor | InstalledPolicy::Lock)
+        });
+        let reinstalled = !self.selective && self.root_targets.contains_key(package);
+        if !kept || reinstalled {
+            return None;
+        }
+        self.installed_deps
+            .get(package)
+            .filter(|(v, _)| v == version)
+            .map(|(_, vd)| vd)
+    }
+
+    /// Whether `package` at `version` is kept installed and lists the deps it was built with
+    /// rather than its repository entry's (see [`InstalledDeps`])
+    pub fn lists_installed_deps(&self, package: &PortagePackage, version: &Version) -> bool {
+        self.kept_installed_deps(package, version).is_some()
     }
 
     /// Policy registered for an installed package, if any (`-N`/`-U` mark USE
@@ -1507,6 +1590,23 @@ fn self_dep_branches(
         }
     }
     out
+}
+
+/// Queue every real package `by_class` and `choices` reference for ingestion
+fn queue_references(
+    by_class: &[Vec<convert::Req>],
+    choices: &[convert::VirtualChoice],
+    seen: &mut HashSet<Cpn>,
+    queue: &mut std::collections::VecDeque<Cpn>,
+) {
+    let branches = choices
+        .iter()
+        .flat_map(|vc| vc.versions.iter().map(|(_, deps)| deps));
+    for (target, _, _) in by_class.iter().chain(branches).flatten() {
+        if !target.is_virtual() && seen.insert(*target.cpn()) {
+            queue.push_back(*target.cpn());
+        }
+    }
 }
 
 fn register_virtual_choices(

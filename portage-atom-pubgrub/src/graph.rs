@@ -124,6 +124,7 @@ impl PortageDependencyProvider {
             let Some(vd) = data.versions.get(version) else {
                 continue;
             };
+            let vd = self.kept_installed_deps(pkg, version).unwrap_or(vd);
 
             // Mirror `compute_dependencies`'s own "kept, not being rebuilt"
             // skip: a package the solver never expanded shouldn't manufacture

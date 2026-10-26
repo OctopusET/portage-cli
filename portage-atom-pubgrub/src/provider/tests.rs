@@ -4360,3 +4360,93 @@ fn kept_selective_root_target_is_expanded_only_under_deep() {
     assert!(solve(true, true));
     assert!(solve(false, false));
 }
+
+// `--deep` descends into a kept installed package with the USE it was built with, and with its
+// VDB deps once its ebuild left the tree.
+#[test]
+fn kept_installed_package_is_expanded_with_its_build_use_and_vdb_deps() {
+    let solve = |installed_deps: bool| {
+        let bar = Interned::intern("bar");
+        let mut repo = InMemoryRepository::new();
+        for cpv in ["dep/b-1", "dep/c-1", "app-misc/old-1"] {
+            repo.add_version(
+                portage_atom::Cpv::parse(cpv).unwrap(),
+                None,
+                None,
+                empty_deps(),
+            );
+        }
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("app-misc/foo-1").unwrap(),
+            None,
+            None,
+            vec![bar],
+            PackageDeps {
+                rdepend: (DepEntry::parse("bar? ( dep/b )").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/app-1").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (DepEntry::parse("app-misc/foo app-misc/old").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let foo = PortagePackage::unslotted(Cpn::parse("app-misc/foo").unwrap());
+        let old = PortagePackage::unslotted(Cpn::parse("app-misc/old").unwrap());
+        let mut kept = Vec::new();
+        if installed_deps {
+            kept.push(InstalledDeps {
+                package: foo.clone(),
+                version: Version::parse("1").unwrap(),
+                deps: PackageDeps {
+                    rdepend: (DepEntry::parse("bar? ( dep/b )").unwrap()).into(),
+                    ..empty_deps()
+                },
+                active_use: vec![bar],
+            });
+            kept.push(InstalledDeps {
+                package: old.clone(),
+                version: Version::parse("0").unwrap(),
+                deps: PackageDeps {
+                    rdepend: (DepEntry::parse("dep/c").unwrap()).into(),
+                    ..empty_deps()
+                },
+                active_use: vec![],
+            });
+        }
+        let slot_map = build_slot_map(&repo);
+        let app = PortagePackage::unslotted(Cpn::parse("app-misc/app").unwrap());
+        let seeds = vec![*app.cpn(), *foo.cpn(), *old.cpn()];
+        let mut provider = PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map(
+            repo.clone(),
+            seeds,
+            false,
+            &slot_map,
+            kept,
+        );
+        provider.set_expand_kept(true);
+        for (package, version) in [(foo, "1"), (old, "0")] {
+            provider.add_installed(InstalledPackage {
+                package,
+                version: Version::parse(version).unwrap(),
+                policy: InstalledPolicy::Favor,
+                active_use: vec![],
+                iuse: vec![],
+            });
+        }
+        let solution = provider
+            .resolve_targets(vec![(app, PortageVersionSet::any())])
+            .unwrap();
+        ["dep/b", "dep/c"].map(|cpn| {
+            solution
+                .get(&PortagePackage::unslotted(Cpn::parse(cpn).unwrap()))
+                .is_some()
+        })
+    };
+    assert_eq!(solve(true), [true, true]);
+    assert_eq!(solve(false), [false, false]);
+}

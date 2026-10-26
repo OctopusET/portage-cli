@@ -7,9 +7,9 @@ use std::time::Instant;
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
-    CededFlag, DepEdge, InstalledPackage as SolverInstalledPackage, InstalledPolicy, MergeRoot,
-    PortageDependencyProvider, PortagePackage, PortageVersionSet, SlotMap, UseFlagRequirement,
-    UseOverride,
+    CededFlag, DepClass, DepEdge, InstalledDeps, InstalledPackage as SolverInstalledPackage,
+    InstalledPolicy, MergeRoot, PortageDependencyProvider, PortagePackage, PortageVersionSet,
+    SlotMap, UseFlagRequirement, UseOverride,
 };
 use portage_resolve::{
     bdepend_trim, conflicts, depend_trim, effective_use, installed, repo, root_aware, root_closure,
@@ -236,12 +236,37 @@ pub(super) fn solve_round(
         // can be registered as installed below — unconditional, unlike the
         // target_installed seeding above: emptytree only affects VDB selection.
         seeds.extend(provided.iter().map(|cpv| cpv.cpn));
+        // Only `--deep` descends into a kept installed package.
+        let kept_deps: Vec<InstalledDeps> = if deep && !nodeps && !empty {
+            target_installed
+                .iter()
+                .map(|e| {
+                    let package = match e.slot.filter(|s| !s.is_empty()) {
+                        Some(s) => PortagePackage::slotted(e.cpn, s),
+                        None => PortagePackage::unslotted(e.cpn),
+                    };
+                    let deps = match repo::find_cache(data, &package, &e.version) {
+                        Some(cache) => repo::package_deps_from_metadata(&cache.metadata),
+                        None => e.classes.clone(),
+                    };
+                    InstalledDeps {
+                        package,
+                        version: e.version.clone(),
+                        deps,
+                        active_use: e.active_use.clone(),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let provider_start = Instant::now();
         let mut provider = PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map(
             adapter,
             seeds,
             solve_with_bdeps,
             slot_map_ref,
+            kept_deps,
         );
         tracing::debug!(
             elapsed_ms = provider_start.elapsed().as_secs_f64() * 1000.0,
@@ -652,12 +677,21 @@ pub(super) fn solve_round(
     );
     let mut order = filtered_order;
 
+    let kept_required: HashSet<Cpn> = graph_result
+        .edges
+        .iter()
+        .filter(|e| {
+            e.class != DepClass::Bdepend && provider.lists_installed_deps(&e.from.0, &e.from.1)
+        })
+        .map(|e| *e.to.0.cpn())
+        .collect();
     let trim_ctx = bdepend_trim::TrimCtx {
         broot_snapshot,
         data,
         policy: final_policy,
         root_cpns,
         reinstall_cpns: &reinstall_cpns,
+        kept_required: &kept_required,
     };
     if host_config_stage {
         // The trim drops DEPEND already satisfied on the *build* sysroot

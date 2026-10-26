@@ -59,8 +59,8 @@ pub use graph::{DepClass, DepEdge, GraphStats, InstallOrderResult};
 pub use package::{MergeRoot, PortagePackage};
 pub use portage_atom::interner::{DefaultInterner, Interned};
 pub use provider::{
-    CededFlag, DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider,
-    UseFlagRequirement, build_slot_map,
+    CededFlag, DroppedDep, InstalledDeps, InstalledPackage, InstalledPolicy,
+    PortageDependencyProvider, UseFlagRequirement, build_slot_map,
 };
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,

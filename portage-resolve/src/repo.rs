@@ -1461,7 +1461,7 @@ impl<'a> Adapter<'a> {
 /// `portage-metadata` (see the `required_use` translation below), and
 /// `portage-cli` owns neither type, so an orphan-rule-legal trait impl
 /// isn't available here — a plain function is the direct route.
-fn package_deps_from_metadata(meta: &portage_metadata::EbuildMetadata) -> PackageDeps {
+pub fn package_deps_from_metadata(meta: &portage_metadata::EbuildMetadata) -> PackageDeps {
     PackageDeps::new(
         meta.depend.list().clone(),
         meta.rdepend.list().clone(),
@@ -1857,7 +1857,10 @@ fn version_accepted_for(
     cache: &CacheEntry,
     repo: Interned<DefaultInterner>,
 ) -> bool {
-    if policy.installed.is_some_and(|installed| installed.contains(cpv)) {
+    if policy
+        .installed
+        .is_some_and(|installed| installed.contains(cpv))
+    {
         let meta = &cache.metadata;
         return !is_masked(
             policy.package_mask,

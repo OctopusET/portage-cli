@@ -55,6 +55,7 @@ struct Fixture {
     order: Vec<(PortagePackage, Version)>,
     root_cpns: HashSet<Cpn>,
     reinstall_cpns: HashSet<Cpn>,
+    kept_required: HashSet<Cpn>,
     accept_keywords: AcceptKeywords,
     accept_licenses: AcceptOverlay,
     force_mask: ForceMask,
@@ -115,6 +116,7 @@ impl Fixture {
             order,
             root_cpns: HashSet::new(),
             reinstall_cpns: HashSet::new(),
+            kept_required: HashSet::new(),
             accept_keywords,
             accept_licenses,
             force_mask: ForceMask::default(),
@@ -143,6 +145,7 @@ impl Fixture {
             },
             root_cpns: &self.root_cpns,
             reinstall_cpns: &self.reinstall_cpns,
+            kept_required: &self.kept_required,
         }
     }
 

@@ -138,6 +138,7 @@ mod tests {
             iuse: Vec::new(),
             eapi: portage_metadata::Eapi::Eight,
             deps: DepEntry::parse(deps).unwrap(),
+            classes: Default::default(),
         }
     }
 

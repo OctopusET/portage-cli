@@ -41,6 +41,8 @@ pub struct VdbEntry {
     pub eapi: Eapi,
     /// RDEPEND + DEPEND as stored in the VDB (pre-USE evaluation)
     pub deps: Vec<DepEntry>,
+    /// Every dependency class as stored in the VDB
+    pub classes: portage_atom_pubgrub::PackageDeps,
 }
 
 /// One captured VDB root and its installed-package handles.
@@ -333,12 +335,22 @@ fn load_one_with_cache(
                 .iter()
                 .map(Interned::from)
                 .collect();
-            let mut deps: Vec<DepEntry> = Vec::new();
-            for field in [pkg.rdepend(), pkg.depend()] {
-                if let Ok(Some(entries)) = field {
-                    deps.extend(entries);
-                }
-            }
+            let class = |field: portage_vdb::Result<Option<Vec<DepEntry>>>| {
+                field.ok().flatten().unwrap_or_default()
+            };
+            let classes = portage_atom_pubgrub::PackageDeps::new(
+                class(pkg.depend()),
+                class(pkg.rdepend()),
+                class(pkg.bdepend()),
+                class(pkg.pdepend()),
+                class(pkg.idepend()),
+            );
+            let deps: Vec<DepEntry> = classes
+                .rdepend
+                .iter()
+                .chain(classes.depend.iter())
+                .cloned()
+                .collect();
             let eapi = pkg.eapi().unwrap_or(Eapi::Zero);
             VdbEntry {
                 cpn: *pkg.cpn(),
@@ -350,6 +362,7 @@ fn load_one_with_cache(
                 iuse,
                 eapi,
                 deps,
+                classes,
             }
         })
         .collect()

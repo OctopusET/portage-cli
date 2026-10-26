@@ -259,6 +259,7 @@ mod tests {
             },
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,
+            kept_required: &HashSet::new(),
         };
         let target = camino::Utf8Path::new("/tmp/stage");
         let out = trim_sysroot_satisfied_depend(order.clone(), Some(target), target, &ctx);

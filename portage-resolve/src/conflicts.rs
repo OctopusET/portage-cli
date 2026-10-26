@@ -682,6 +682,7 @@ mod tests {
                 .iter()
                 .map(|d| DepEntry::Atom(Dep::parse(d).expect("test atom parses")))
                 .collect(),
+            classes: Default::default(),
         }
     }
 
@@ -870,6 +871,7 @@ mod tests {
             eapi: portage_metadata::Eapi::Eight,
             deps: DepEntry::parse("|| ( net-dns/openresolv sys-apps/systemd )")
                 .expect("test dep string parses"),
+            classes: Default::default(),
         };
         let installed = vec![entry("net-dns/openresolv", "0", "3.17.4", &[]), resolvconf];
         let plan = vec![proposed("sys-apps/systemd", "0", "260.2")];

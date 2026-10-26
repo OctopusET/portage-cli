@@ -654,6 +654,12 @@ Gentoo profile these still coincide exactly — no shipped profile declares
 `profile-set` profile format (or a site-local `/etc/portage/profile` with
 plain `packages` lines) — documented here as a known low-severity divergence.
 
+**Dynamic deps of kept installed packages.** Under `--deep` a kept installed
+package lists its deps under the USE it was built with: its ebuild's when the
+repository still has that version, the VDB's otherwise (emerge's default
+`--dynamic-deps=y`). Unlike emerge, the VDB's bound `:=` sub-slots are not
+merged into the ebuild's deps.
+
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
 condensation + lexicographic Kahn) and the `:slot` suffix on autounmask

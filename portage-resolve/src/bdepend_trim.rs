@@ -27,6 +27,9 @@ pub struct TrimCtx<'a> {
     pub root_cpns: &'a HashSet<Cpn>,
     /// CPNs the solver kept for a same-version USE rebuild — never trimmed
     pub reinstall_cpns: &'a HashSet<Cpn>,
+    /// CPNs kept installed packages require through the deps they were built with, which their
+    /// repository metadata may not list; never trimmed
+    pub kept_required: &'a HashSet<Cpn>,
 }
 
 /// Drop entries only needed for already-satisfied `BDEPEND` edges
@@ -53,7 +56,8 @@ pub fn trim_within_run_bdepend(
     }
 
     let mut evaluated = effective_use::EvaluatedDepsCache::new(ctx.data, ctx.policy, false);
-    let runtime_required = runtime_required_cpns(full_solution_order, &mut evaluated);
+    let mut runtime_required = runtime_required_cpns(full_solution_order, &mut evaluated);
+    runtime_required.extend(ctx.kept_required);
     let evaluated_order = evaluated.snapshot(&order);
     let consumers = bdepend_consumers(&evaluated_order);
     // The VDB is stable for this filtering pass; the prefix view below shares
@@ -310,6 +314,7 @@ mod tests {
             policy: test_policy(&ak, &al, &fm),
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,
+            kept_required: &HashSet::new(),
         };
 
         let kept = trim_within_run_bdepend(order.clone(), &full_solution_order, true, &ctx);
@@ -353,6 +358,7 @@ mod tests {
             policy: test_policy(&ak, &al, &fm),
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,
+            kept_required: &HashSet::new(),
         };
         let out = trim_within_run_bdepend(order.clone(), &order, false, &ctx);
         assert_eq!(out.len(), order.len());

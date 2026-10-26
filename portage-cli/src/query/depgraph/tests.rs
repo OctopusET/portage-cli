@@ -805,3 +805,28 @@ fn deep_without_update_keeps_the_installed_slot_of_an_any_slot_dep() {
         ["app-misc/lib-2", "app-misc/foo-1"]
     );
 }
+
+#[test]
+fn deep_descends_into_a_kept_package_through_its_vdb_deps_once_its_ebuild_is_gone() {
+    let mut pkgs = pair();
+    pkgs[0].depend = "";
+    pkgs[0].rdepend = "app-misc/bar";
+    pkgs.push(Pkg {
+        cpv: "app-misc/baz-1",
+        keywords: "amd64",
+        depend: "",
+        rdepend: "",
+        iuse: "",
+        slot: "0",
+    });
+    let fix = fixture(&pkgs, &[]);
+    plant_vdb_rdepend(&fix.root, "app-misc/bar-0", Some("app-misc/baz"));
+    let atoms = [TargetAtom::explicit("app-misc/foo")];
+    assert_eq!(names(&solve(&fix, Solve::new(&atoms))), ["app-misc/foo-1"]);
+    let mut deep = Solve::new(&atoms);
+    deep.deep = true;
+    assert_eq!(
+        names(&solve(&fix, deep)),
+        ["app-misc/baz-1", "app-misc/foo-1"]
+    );
+}
