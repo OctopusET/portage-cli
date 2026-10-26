@@ -53,7 +53,8 @@ pub(crate) async fn build_binpkg_standalone(
     shell.apply_iuse_effective();
     let mut env = shell.collect_env();
     let env_dump = capture_environment(shell, work_root).await;
-    let image_dir = packaging_image(shell, work_root, ed_image_dir(shell, work_root))?;
+    let ed = ed_image_dir(shell, work_root);
+    let image_dir = packaging_image(shell, work_root, ed.clone())?;
     let cp = ConfigProtect::from_shell(shell);
 
     // CONTENTS records installed paths (`/usr/bin/foo`) whatever the
@@ -108,7 +109,11 @@ pub(crate) async fn build_binpkg_standalone(
     std::fs::write(key_file.as_std_path(), format!("{key}\n"))
         .with_context(|| format!("writing {key_file}"))?;
 
-    let (out, build_id) = write_binpkg(shell, ebuild, &image_dir, root, installed.path())?;
+    let written = write_binpkg(shell, ebuild, &image_dir, root, installed.path());
+    if image_dir != ed {
+        let _ = std::fs::remove_dir_all(image_dir.as_std_path());
+    }
+    let (out, build_id) = written?;
     let record = vec![
         ("BINPKGMD5", binpkg_md5(&out)?),
         ("BUILD_ID", build_id.to_string()),
