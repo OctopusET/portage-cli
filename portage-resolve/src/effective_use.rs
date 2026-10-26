@@ -149,7 +149,9 @@ pub(crate) fn effective_use_metadata(
     } else {
         (
             iuse_set_from_metadata(meta, &policy.force_mask.iuse_injection),
-            policy.accept_keywords.is_stable(&meta.keywords, cpv, slot),
+            policy
+                .accept_keywords
+                .is_stable(&meta.keywords, cpv, slot, None),
         )
     };
     fold_effective_use(policy, cpv, slot, &iuse_defaults, &iuse, stable)

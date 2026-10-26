@@ -3,7 +3,7 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use portage_atom::interner::Interned;
-use portage_atom::{Cpn, Cpv, Dep};
+use portage_atom::{ConfigAtom, Cpn, Cpv};
 use portage_atom_pubgrub::UseLayer;
 use portage_metadata::CacheEntry;
 use portage_repo::AcceptSet;
@@ -47,7 +47,7 @@ impl Fixture {
         let mut mask_entries = Vec::with_capacity(size + 1);
         let mut unmask_entries = Vec::with_capacity(size + 1);
         for i in 0..size {
-            let noise = Dep::parse(&format!("noise/pkg{i}")).unwrap();
+            let noise = ConfigAtom::parse(&format!("noise/pkg{i}")).unwrap();
             keyword_overrides.push((noise.clone(), vec![AcceptToken::parse("~amd64").unwrap()]));
             license_overrides.push((
                 noise.clone(),
@@ -63,7 +63,7 @@ impl Fixture {
             ));
             mask_entries.push(noise.clone());
         }
-        let target = Dep::parse("bench/pkg").unwrap();
+        let target = ConfigAtom::parse("bench/pkg").unwrap();
         keyword_overrides.push((target.clone(), vec![AcceptToken::parse("~amd64").unwrap()]));
         license_overrides.push((
             target.clone(),

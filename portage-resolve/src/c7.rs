@@ -18,7 +18,7 @@
 #![cfg(test)]
 
 use gentoo_core::Arch;
-use portage_atom::{Cpv, Dep};
+use portage_atom::{ConfigAtom, Cpv, Dep};
 use portage_atom_pubgrub::{
     PortageDependencyProvider, PortageVersionSet, UseFlagRequirement, UseOverride,
 };
@@ -92,7 +92,7 @@ impl Outcome {
 fn solve_with(
     data: &RepoData,
     targets: &[&str],
-    pu: &[(Dep, Vec<UseOverride>)],
+    pu: &[(ConfigAtom, Vec<UseOverride>)],
 ) -> Option<Outcome> {
     let arch = Arch::intern("amd64");
     let accept = AcceptKeywords::from_global(&arch, &["amd64"]);
@@ -164,7 +164,7 @@ fn solve(data: &RepoData, targets: &[&str]) -> Outcome {
 
 /// Run the C7 co-solve fixpoint (as `depgraph` does under `--autosolve-use`):
 /// returns the augmented `package_use` and the final outcome
-fn cosolve(data: &RepoData, targets: &[&str]) -> (Vec<(Dep, Vec<UseOverride>)>, Outcome) {
+fn cosolve(data: &RepoData, targets: &[&str]) -> (Vec<(ConfigAtom, Vec<UseOverride>)>, Outcome) {
     let (pu, _applied, solved) = crate::package_use::cosolve_use_deps(
         Vec::new(),
         data,
@@ -177,7 +177,7 @@ fn cosolve(data: &RepoData, targets: &[&str]) -> (Vec<(Dep, Vec<UseOverride>)>, 
 }
 
 /// Whether `pu` forces `token` (e.g. `bar` / `-bar`) on `cpn`
-fn pu_forces(pu: &[(Dep, Vec<UseOverride>)], cpn: &str, token: &str) -> bool {
+fn pu_forces(pu: &[(ConfigAtom, Vec<UseOverride>)], cpn: &str, token: &str) -> bool {
     let want = UseOverride::parse(token);
     pu.iter()
         .any(|(d, flags)| d.to_string() == cpn && flags.contains(&want))

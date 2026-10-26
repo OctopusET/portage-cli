@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Dep, Version};
+use portage_atom::{ConfigAtom, Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
     MergeRoot, PortagePackage, PortageVersionSet, SlotMap, UseOverride, build_slot_map,
 };
@@ -81,7 +81,7 @@ pub(super) struct Prepared<'a> {
     pub(super) sysroot_installed: Vec<(PortagePackage, Version)>,
     pub(super) base_installed_cpvs: std::collections::HashSet<Cpv>,
     pub(super) root_pkgs: Vec<PortagePackage>,
-    pub(super) pristine_package_use: Vec<(Dep, Vec<UseOverride>)>,
+    pub(super) pristine_package_use: Vec<(ConfigAtom, Vec<UseOverride>)>,
     pub(super) rebuilding_installed_cpvs: std::collections::HashSet<Cpv>,
     pub(super) changed_rebuild_cpvs: std::collections::HashSet<Cpv>,
 }

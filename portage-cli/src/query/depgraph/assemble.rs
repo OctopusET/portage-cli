@@ -482,7 +482,9 @@ pub(super) fn assemble(
                     .contains(&"interactive")
             });
             let (depend, bdepend, mut flags) = if let Some(cache) = cache {
-                let stable = accept_keywords.is_stable(&cache.metadata.keywords, &cpv, pkg.slot());
+                let repo = Some(repo::repo_name_of(&data, &cpv));
+                let stable =
+                    accept_keywords.is_stable(&cache.metadata.keywords, &cpv, pkg.slot(), repo);
                 let effective =
                     effective_use::effective_use(&final_policy, pkg, ver, cache, stable, &ceded);
                 (

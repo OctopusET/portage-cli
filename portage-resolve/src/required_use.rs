@@ -39,9 +39,12 @@ pub fn find_violations(
         };
 
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-        let stable = policy
-            .accept_keywords
-            .is_stable(&cache.metadata.keywords, &cpv, pkg.slot());
+        let stable = policy.accept_keywords.is_stable(
+            &cache.metadata.keywords,
+            &cpv,
+            pkg.slot(),
+            Some(crate::repo::repo_name_of(data, &cpv)),
+        );
         let effective = effective_use(policy, pkg, ver, cache, stable, ceded);
 
         // `effective` already has this package's IUSE defaults folded in, so

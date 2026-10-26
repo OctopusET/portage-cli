@@ -181,7 +181,10 @@ fn solve(fix: &Fix, opts: Solve<'_>) -> super::DepgraphOutcome {
 fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcome> {
     let arch = Arch::intern("amd64");
     let world: &[Dep] = &[];
-    let extra: &[(Dep, Vec<portage_atom_pubgrub::UseOverride>)] = &[];
+    let extra: &[(
+        portage_atom::ConfigAtom,
+        Vec<portage_atom_pubgrub::UseOverride>,
+    )] = &[];
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -555,7 +558,10 @@ fn a_missing_explicit_atom_is_fatal() {
     let atoms = [TargetAtom::explicit("app-misc/missing")];
     let arch = Arch::intern("amd64");
     let world: &[Dep] = &[];
-    let extra: &[(Dep, Vec<portage_atom_pubgrub::UseOverride>)] = &[];
+    let extra: &[(
+        portage_atom::ConfigAtom,
+        Vec<portage_atom_pubgrub::UseOverride>,
+    )] = &[];
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

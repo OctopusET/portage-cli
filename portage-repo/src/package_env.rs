@@ -14,15 +14,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use portage_atom::{Cpv, Dep};
+use portage_atom::{ConfigAtom, Cpv, order_by_specificity};
 
 /// Resolve the ordered list of env-file paths to source for `cpv` (in `slot`)
 ///
 /// `portage_dirs` are the `etc/portage` directories in precedence order (e.g.
 /// the host config, then a `--local` overlay's `etc/portage`); a later
 /// directory's entries are applied after — and therefore override — earlier
-/// ones. Within a directory, `package.env` file/line order is preserved so a
-/// later matching entry wins. Only existing `env/<name>` files are returned.
+/// ones. Within a directory, entries apply in [`load_package_env`] order, so the
+/// most specific matching atom wins. Only existing `env/<name>` files are returned.
 pub fn env_files_for(
     portage_dirs: &[PathBuf],
     cpv: &Cpv,
@@ -31,8 +31,8 @@ pub fn env_files_for(
     let mut out = Vec::new();
     for dir in portage_dirs {
         let env_dir = dir.join("env");
-        for (dep, names) in load_package_env(&dir.join("package.env")) {
-            if dep.matches_cpv(cpv, slot) {
+        for (atom, names) in load_package_env(&dir.join("package.env")) {
+            if atom.matches(cpv, slot, None) {
                 for name in names {
                     let p = env_dir.join(&name);
                     if p.is_file() {
@@ -46,7 +46,7 @@ pub fn env_files_for(
 }
 
 /// The `package.bashrc` hooks of the profile at `profile_dir` that match `cpv`,
-/// as paths under its `bashrc/` directory, in file order
+/// as paths under its `bashrc/` directory, in [`load_package_env`] order
 ///
 /// Not PMS: portage's `profile-bashrcs` profile format. Only existing files are returned.
 pub fn package_bashrc_files(
@@ -56,7 +56,7 @@ pub fn package_bashrc_files(
 ) -> Vec<PathBuf> {
     load_package_env(&profile_dir.join("package.bashrc"))
         .into_iter()
-        .filter(|(dep, _)| dep.matches_cpv(cpv, slot))
+        .filter(|(atom, _)| atom.matches(cpv, slot, None))
         .flat_map(|(_, names)| names)
         .map(|name| profile_dir.join("bashrc").join(name))
         .filter(|p| p.is_file())
@@ -99,13 +99,15 @@ pub fn env_hook_files(
 /// One entry per line: `atom file1 file2 …`; `#` comments and blank lines are
 /// skipped, as are lines with no env-file names or an unparseable atom (warned). A
 /// directory is walked recursively, sorted by name, as Portage reads user config.
+/// Entries are ordered by atom specificity ([`order_by_specificity`]); atoms may use
+/// Portage's wildcard syntax.
 ///
 /// Public (unlike the rest of this module's helpers) because
 /// `portage-resolve`'s `use_env` needs the raw atom-keyed entries directly —
 /// unlike [`env_files_for`], it has no single CPV to filter against yet at
 /// the point it runs (it builds one flat, atom-keyed override list up front,
 /// matched per candidate later, the same shape `package.use` already uses).
-pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
+pub fn load_package_env(path: &Path) -> Vec<(ConfigAtom, Vec<String>)> {
     use crate::repo::util::{ConfigFilesMode, list_config_files};
 
     let Ok(files) = list_config_files(path, ConfigFilesMode::Recursive) else {
@@ -126,15 +128,15 @@ pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
             let Some(atom_str) = parts.next() else {
                 continue;
             };
-            let dep = match Dep::parse(atom_str) {
-                Ok(dep) if dep.pinned_build().is_some() => {
+            let atom = match ConfigAtom::parse(atom_str) {
+                Ok(ConfigAtom::Dep(dep)) if dep.pinned_build().is_some() => {
                     warn_once(format!(
                         "{}: ignoring {atom_str}: a build id matches only a binary package",
                         file.display()
                     ));
                     continue;
                 }
-                Ok(dep) => dep,
+                Ok(atom) => atom,
                 Err(e) => {
                     warn_once(format!(
                         "{}: ignoring unsupported atom {atom_str}: {e}",
@@ -145,11 +147,11 @@ pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
             };
             let names: Vec<String> = parts.map(String::from).collect();
             if !names.is_empty() {
-                result.push((dep, names));
+                result.push((atom, names));
             }
         }
     }
-    result
+    order_by_specificity(result)
 }
 
 /// Warn once per process: this file is re-read for every package built.
@@ -222,6 +224,22 @@ mod tests {
 
         let bar = env_files_for(&dirs, &cpv("dev-libs/bar-1"), None);
         assert!(bar.is_empty(), "non-matching package gets nothing");
+    }
+
+    #[test]
+    fn most_specific_atom_applies_last_and_wildcards_match() {
+        let td = portage_dir(
+            "=dev-libs/foo-1  exact\n\
+             dev-libs/foo  bare\n\
+             dev-libs/*  cat\n",
+            &[("exact", ""), ("bare", ""), ("cat", "")],
+        );
+        let dirs = vec![td.path().to_path_buf()];
+        let names: Vec<_> = env_files_for(&dirs, &cpv("dev-libs/foo-1"), None)
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_owned())
+            .collect();
+        assert_eq!(names, ["cat", "bare", "exact"]);
     }
 
     #[test]

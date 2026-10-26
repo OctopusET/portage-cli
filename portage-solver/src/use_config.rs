@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpv, Dep, UseFlagLookup};
+use portage_atom::{ConfigAtom, Cpv, Dep, UseFlagLookup};
 
 use crate::IUseDefault;
 
@@ -354,8 +354,8 @@ impl UseLayer {
 pub struct ProfileUseNode {
     /// This node's translated `make.defaults` USE (empty if the file is absent).
     pub defaults: UseLayer,
-    /// This node's `package.use` lines.
-    pub package_use: Vec<(Dep, Vec<UseOverride>)>,
+    /// This node's `package.use` lines, ordered by atom specificity.
+    pub package_use: Vec<(ConfigAtom, Vec<UseOverride>)>,
     /// A matching line in [`Self::package_use`] contained `-*`.
     pub puse_clear_all: bool,
 }
@@ -403,7 +403,7 @@ pub fn resolve_effective_use(
     defaults: &UseLayer,
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
-    package_use: &[(Dep, Vec<UseOverride>)],
+    package_use: &[(ConfigAtom, Vec<UseOverride>)],
     env_use: &UseLayer,
     profile_package_use: &[ProfileUseNode],
     conf: &UseLayer,
@@ -469,7 +469,21 @@ pub fn resolve_effective_use(
 fn node_matches(node: &ProfileUseNode, cpv: &Cpv, slot: Option<Interned<DefaultInterner>>) -> bool {
     node.package_use
         .iter()
-        .any(|(dep, _)| dep.cpn == cpv.cpn && atom_matches_cpv(dep, cpv, slot))
+        .any(|(atom, _)| config_atom_matches(atom, cpv, slot))
+}
+
+/// [`atom_matches_cpv`] for a config line; `package.use` `::repo` is not evaluated
+fn config_atom_matches(
+    atom: &ConfigAtom,
+    cpv: &Cpv,
+    slot: Option<Interned<DefaultInterner>>,
+) -> bool {
+    match atom {
+        ConfigAtom::Dep(dep) => atom_matches_cpv(dep, cpv, slot),
+        ConfigAtom::Extended(e) => {
+            e.matches(cpv, slot.map(portage_atom::Slot::from_name).as_ref(), None)
+        }
+    }
 }
 
 fn apply_iuse(
@@ -513,16 +527,13 @@ fn apply_profile_package_use(
 
 fn apply_overrides(
     overlay: &mut HashMap<Interned<DefaultInterner>, UseFlagState>,
-    entries: &[(Dep, Vec<UseOverride>)],
+    entries: &[(ConfigAtom, Vec<UseOverride>)],
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
     skip: impl Fn(Interned<DefaultInterner>) -> bool,
 ) {
-    for (dep, overrides) in entries {
-        if dep.cpn != cpv.cpn {
-            continue;
-        }
-        if !atom_matches_cpv(dep, cpv, slot) {
+    for (atom, overrides) in entries {
+        if !config_atom_matches(atom, cpv, slot) {
             continue;
         }
         for ov in overrides {
@@ -676,9 +687,9 @@ mod tests {
         pairs.iter().map(|(f, d)| (flag(f), *d)).collect()
     }
 
-    fn pkg_use(atom: &str, overrides: &[&str]) -> Vec<(Dep, Vec<UseOverride>)> {
+    fn pkg_use(atom: &str, overrides: &[&str]) -> Vec<(ConfigAtom, Vec<UseOverride>)> {
         vec![(
-            Dep::parse(atom).unwrap(),
+            ConfigAtom::parse(atom).unwrap(),
             overrides.iter().map(|o| UseOverride::parse(o)).collect(),
         )]
     }
@@ -746,6 +757,26 @@ mod tests {
         assert_eq!(cfg.get(flag("l10n_af")), UseFlagState::Disabled);
         assert_eq!(cfg.get(flag("l10n_en-GB")), UseFlagState::Enabled);
         assert_eq!(cfg.get(flag("seccomp")), UseFlagState::Enabled);
+    }
+
+    #[test]
+    fn wildcard_package_use_line_matches_by_category() {
+        let run = |atom: &str| {
+            resolve_effective_use(
+                &iuse_defaults(&[]),
+                &layer(""),
+                &cpv(),
+                None,
+                &pkg_use(atom, &["ssl"]),
+                &layer(""),
+                &[],
+                &none(),
+            )
+            .get(flag("ssl"))
+        };
+        assert_eq!(run("dev-libs/*"), UseFlagState::Enabled);
+        assert_eq!(run("*/openssl"), UseFlagState::Enabled);
+        assert_eq!(run("sys-libs/*"), UseFlagState::Disabled);
     }
 
     // Profile `package.use` sits in the `defaults` layer, below make.conf, so

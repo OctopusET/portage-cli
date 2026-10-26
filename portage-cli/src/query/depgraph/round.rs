@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use portage_atom::interner::Interned;
-use portage_atom::{Cpn, Cpv, Dep, Version};
+use portage_atom::{ConfigAtom, Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
     CededFlag, DepClass, DepEdge, InstalledDeps, InstalledIuse,
     InstalledPackage as SolverInstalledPackage, InstalledPolicy, MergeRoot,
@@ -48,7 +48,7 @@ pub(super) struct RoundCtx<'a> {
     pub(super) slot_map: &'a SlotMap,
     pub(super) widened_slot_map: &'a Option<SlotMap>,
     pub(super) target_policy: &'a repo::ResolvePolicy<'a>,
-    pub(super) package_use: &'a Vec<(Dep, Vec<UseOverride>)>,
+    pub(super) package_use: &'a Vec<(ConfigAtom, Vec<UseOverride>)>,
     pub(super) target_installed: &'a [installed::VdbEntry],
     pub(super) installed_blockers: &'a [Vec<Dep>],
     pub(super) sysroot_installed: &'a [(PortagePackage, Version)],
@@ -87,7 +87,7 @@ pub(super) struct RoundCtx<'a> {
 type SolveAttempt = anyhow::Result<(
     PortageDependencyProvider,
     pubgrub::SelectedDependencies<PortagePackage, Version>,
-    Vec<(Dep, Vec<UseOverride>)>,
+    Vec<(ConfigAtom, Vec<UseOverride>)>,
     Vec<UseFlagRequirement>,
 )>;
 
@@ -105,7 +105,7 @@ pub(super) struct RoundOutcome {
     // `--tree`/`--json` display) since these aren't real PMS dependency
     // relationships, only scheduler ordering.
     pub(super) closure_blockers: Vec<(PortagePackage, PortagePackage)>,
-    pub(super) package_use: Vec<(Dep, Vec<UseOverride>)>,
+    pub(super) package_use: Vec<(ConfigAtom, Vec<UseOverride>)>,
     pub(super) applied_reqs: Vec<UseFlagRequirement>,
     pub(super) ceded: Vec<CededFlag>,
     pub(super) autounmask_candidates: Vec<repo::AutounmaskCandidate>,
@@ -200,7 +200,7 @@ pub(super) fn solve_round(
     // keep) widened candidate supply. Strict-first keeps every
     // non-crossdev resolve byte-identical.
     let widened = std::cell::Cell::new(false);
-    let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<UseOverride>)]| {
+    let build_and_solve = |autosolve_use: bool, pkg_use: &[(ConfigAtom, Vec<UseOverride>)]| {
         let adapter = repo::Adapter {
             data,
             accept_keywords,
@@ -532,7 +532,7 @@ pub(super) fn solve_round(
     // `effective_use::apply_force_mask` / `Adapter::desired_use`, so env-level
     // `USE="-* …"` cannot wipe forced flags on the display/build path.
     let ceded = provider.solved_use_decisions();
-    let package_use: Vec<(Dep, Vec<UseOverride>)> = if ceded.is_empty() {
+    let package_use: Vec<(ConfigAtom, Vec<UseOverride>)> = if ceded.is_empty() {
         package_use
     } else {
         let mut by_cpn: HashMap<Cpn, Vec<&CededFlag>> = HashMap::new();
@@ -556,7 +556,7 @@ pub(super) fn solve_round(
                     enable: c.value,
                 })
                 .collect();
-            combined.push((dep, overrides));
+            combined.push((ConfigAtom::Dep(dep), overrides));
         }
         combined
     };

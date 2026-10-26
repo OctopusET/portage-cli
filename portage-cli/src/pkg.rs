@@ -462,6 +462,7 @@ async fn resolve_active_use(
         &entry.metadata.keywords,
         &cpv,
         Some(entry.metadata.slot.slot),
+        Some(repo.name()),
     );
     let pkg = PortagePackage::slotted(cpv.cpn, entry.metadata.slot.slot);
     let cfg = effective_use(&policy, &pkg, &cpv.version, &entry, stable, &[]);

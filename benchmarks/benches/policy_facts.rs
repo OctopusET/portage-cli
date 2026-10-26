@@ -3,7 +3,7 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use portage_atom::interner::Interned;
-use portage_atom::{Cpn, Cpv, Dep};
+use portage_atom::{ConfigAtom, Cpn, Cpv};
 use portage_atom_pubgrub::{PackageRepository, UseOverride};
 use portage_metadata::CacheEntry;
 use portage_repo::AcceptSet;
@@ -85,7 +85,7 @@ impl BenchRepo {
 
     fn consume(
         &self,
-        package_use: &[(Dep, Vec<UseOverride>)],
+        package_use: &[(ConfigAtom, Vec<UseOverride>)],
         facts: Option<PolicyFactsRef<'_>>,
     ) -> usize {
         self.consume_with_passes(package_use, facts, 1)
@@ -93,7 +93,7 @@ impl BenchRepo {
 
     fn consume_with_passes(
         &self,
-        package_use: &[(Dep, Vec<UseOverride>)],
+        package_use: &[(ConfigAtom, Vec<UseOverride>)],
         facts: Option<PolicyFactsRef<'_>>,
         passes: usize,
     ) -> usize {
@@ -135,9 +135,9 @@ impl BenchRepo {
     }
 }
 
-fn package_use(flag: &str) -> Vec<(Dep, Vec<UseOverride>)> {
+fn package_use(flag: &str) -> Vec<(ConfigAtom, Vec<UseOverride>)> {
     vec![(
-        Dep::parse("bench/pkg0").unwrap(),
+        ConfigAtom::parse("bench/pkg0").unwrap(),
         vec![UseOverride {
             flag: Interned::intern(flag),
             enable: true,

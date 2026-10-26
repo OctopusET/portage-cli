@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use gentoo_core::Arch;
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Dep, Version};
+use portage_atom::{ConfigAtom, Cpn, Cpv, Dep, ExtendedAtom, Version};
 use portage_atom_pubgrub::{
     DroppedDep, PackageDeps, PackageRepository, PackageVersions, RequiredUse, UseConfig,
     UseOverride,
@@ -287,9 +287,8 @@ impl KeywordAccept {
 ///    accept set for matching atoms; a bare atom expands to host `~arch`.
 ///
 /// Effective set for a version = fold (1) then all matching lines of (2) in
-/// file order (Portage also applies atom specificity ordering; we fold every
-/// match, which is correct when lines do not contradict each other for the
-/// same atom — the crossdev files on this project are one line per CP).
+/// order; each file arrives sorted by atom specificity
+/// ([`portage_atom::order_by_specificity`]), so the most specific line folds last.
 ///
 /// Host `arch` is **not** the accept universe: it is only used for
 /// bare-atom expansion and autounmask `~arch` suggestions. All arch names in
@@ -303,9 +302,8 @@ pub struct AcceptKeywords {
     ///
     /// A bare atom is pre-expanded to `~arch` (portage(5)). Empty ⇒ no per-package
     /// work in the hot path.
-    per_package: Vec<(Dep, Vec<AcceptToken>)>,
-    /// Original-order indexes into `per_package`, grouped by CPN.
-    per_package_by_cpn: HashMap<Cpn, Vec<usize>>,
+    per_package: Vec<(ConfigAtom, Vec<AcceptToken>)>,
+    index: AtomIndex,
 }
 
 impl AcceptKeywords {
@@ -320,7 +318,7 @@ impl AcceptKeywords {
     pub fn new(
         arch: &Arch,
         global: &[AcceptToken],
-        per_package: Vec<(Dep, Vec<AcceptToken>)>,
+        per_package: Vec<(ConfigAtom, Vec<AcceptToken>)>,
     ) -> Self {
         let arch_key = Interned::intern(arch.as_str());
         let mut global_accept = KeywordAccept::default();
@@ -341,15 +339,12 @@ impl AcceptKeywords {
                 (dep, toks)
             })
             .collect();
-        let mut per_package_by_cpn: HashMap<Cpn, Vec<usize>> = HashMap::new();
-        for (index, (dep, _)) in per_package.iter().enumerate() {
-            per_package_by_cpn.entry(dep.cpn).or_default().push(index);
-        }
+        let index = AtomIndex::new(per_package.iter().map(|(atom, _)| atom));
         Self {
             arch: arch_key,
             global: global_accept,
             per_package,
-            per_package_by_cpn,
+            index,
         }
     }
 
@@ -378,19 +373,16 @@ impl AcceptKeywords {
         &self,
         cpv: &Cpv,
         slot: Option<Interned<DefaultInterner>>,
+        repo: Option<Interned<DefaultInterner>>,
     ) -> Cow<'_, KeywordAccept> {
         if self.per_package.is_empty() {
             return Cow::Borrowed(&self.global);
         }
         let slot = slot.map(portage_atom::Slot::from_name);
-        let slot_str = slot.as_ref();
-        let Some(indices) = self.per_package_by_cpn.get(&cpv.cpn) else {
-            return Cow::Borrowed(&self.global);
-        };
         let mut acc: Option<KeywordAccept> = None;
-        for &index in indices {
-            let (dep, toks) = &self.per_package[index];
-            if dep.matches_cpv(cpv, slot_str) {
+        for index in self.index.candidates(&cpv.cpn) {
+            let (atom, toks) = &self.per_package[index];
+            if atom.matches(cpv, slot.as_ref(), repo) {
                 let set = acc.get_or_insert_with(|| self.global.clone());
                 for &t in toks {
                     set.add(t);
@@ -404,13 +396,16 @@ impl AcceptKeywords {
     }
 
     /// Whether `keywords` is accepted for this version
+    ///
+    /// `repo` is the version's repo; `None` (unknown) lets a `::repo` line match.
     pub fn accepts(
         &self,
         keywords: &[Keyword],
         cpv: &Cpv,
         slot: Option<Interned<DefaultInterner>>,
+        repo: Option<Interned<DefaultInterner>>,
     ) -> bool {
-        self.decision(cpv, slot).accepts(keywords)
+        self.decision(cpv, slot, repo).accepts(keywords)
     }
 
     /// Whether this version is merged on a *stable* keyword path
@@ -424,8 +419,9 @@ impl AcceptKeywords {
         keywords: &[Keyword],
         cpv: &Cpv,
         slot: Option<Interned<DefaultInterner>>,
+        repo: Option<Interned<DefaultInterner>>,
     ) -> bool {
-        self.decision(cpv, slot).is_stable_for(keywords)
+        self.decision(cpv, slot, repo).is_stable_for(keywords)
     }
 
     /// The keyword token an autounmask would need: the version is not accepted
@@ -437,8 +433,9 @@ impl AcceptKeywords {
         keywords: &[Keyword],
         cpv: &Cpv,
         slot: Option<Interned<DefaultInterner>>,
+        repo: Option<Interned<DefaultInterner>>,
     ) -> Option<String> {
-        if self.accepts(keywords, cpv, slot) {
+        if self.accepts(keywords, cpv, slot, repo) {
             return None;
         }
         if keywords
@@ -452,6 +449,38 @@ impl AcceptKeywords {
     }
 }
 
+/// Positions of per-package config lines: plain atoms by CPN, wildcards for every package
+#[derive(Debug, Default, Clone)]
+struct AtomIndex {
+    by_cpn: HashMap<Cpn, Vec<usize>>,
+    wildcard: Vec<usize>,
+}
+
+impl AtomIndex {
+    fn new<'a>(atoms: impl Iterator<Item = &'a ConfigAtom>) -> Self {
+        let mut index = Self::default();
+        for (i, atom) in atoms.enumerate() {
+            match atom.cpn() {
+                Some(cpn) => index.by_cpn.entry(*cpn).or_default().push(i),
+                None => index.wildcard.push(i),
+            }
+        }
+        index
+    }
+
+    /// The lines that may match `cpn`, in file order
+    fn candidates(&self, cpn: &Cpn) -> impl Iterator<Item = usize> + '_ {
+        let named = self.by_cpn.get(cpn).map_or(&[][..], Vec::as_slice);
+        let mut named = named.iter().copied().peekable();
+        let mut wild = self.wildcard.iter().copied().peekable();
+        std::iter::from_fn(move || match (named.peek(), wild.peek()) {
+            (Some(n), Some(w)) if w < n => wild.next(),
+            (Some(_), _) => named.next(),
+            (None, _) => wild.next(),
+        })
+    }
+}
+
 /// Global `ACCEPT_LICENSE` plus per-package `package.license`
 ///
 /// The global list applies to every package; per-package entries extend it
@@ -461,9 +490,8 @@ pub struct AcceptOverlay {
     global: portage_repo::AcceptSet,
     /// `(atom, overlay)` — each overlay is the per-line tokens parsed into an
     /// `AcceptSet`, merged onto the global decision for matching versions
-    per_package: Vec<(Dep, portage_repo::AcceptSet)>,
-    /// Original-order indexes into `per_package`, grouped by CPN.
-    per_package_by_cpn: HashMap<Cpn, Vec<usize>>,
+    per_package: Vec<(ConfigAtom, portage_repo::AcceptSet)>,
+    index: AtomIndex,
 }
 
 impl AcceptOverlay {
@@ -471,16 +499,13 @@ impl AcceptOverlay {
     /// `package.license` overlays
     pub fn new(
         global: portage_repo::AcceptSet,
-        per_package: Vec<(Dep, portage_repo::AcceptSet)>,
+        per_package: Vec<(ConfigAtom, portage_repo::AcceptSet)>,
     ) -> Self {
-        let mut per_package_by_cpn: HashMap<Cpn, Vec<usize>> = HashMap::new();
-        for (index, (dep, _)) in per_package.iter().enumerate() {
-            per_package_by_cpn.entry(dep.cpn).or_default().push(index);
-        }
+        let index = AtomIndex::new(per_package.iter().map(|(atom, _)| atom));
         Self {
             global,
             per_package,
-            per_package_by_cpn,
+            index,
         }
     }
 
@@ -491,19 +516,16 @@ impl AcceptOverlay {
         &self,
         cpv: &Cpv,
         slot: Option<Interned<DefaultInterner>>,
+        repo: Option<Interned<DefaultInterner>>,
     ) -> Cow<'_, portage_repo::AcceptSet> {
         if self.per_package.is_empty() {
             return Cow::Borrowed(&self.global);
         }
         let slot = slot.map(portage_atom::Slot::from_name);
-        let slot_str = slot.as_ref();
-        let Some(indices) = self.per_package_by_cpn.get(&cpv.cpn) else {
-            return Cow::Borrowed(&self.global);
-        };
         let mut merged: Option<portage_repo::AcceptSet> = None;
-        for &index in indices {
-            let (dep, overlay) = &self.per_package[index];
-            if dep.matches_cpv(cpv, slot_str) {
+        for index in self.index.candidates(&cpv.cpn) {
+            let (atom, overlay) = &self.per_package[index];
+            if atom.matches(cpv, slot.as_ref(), repo) {
                 merged
                     .get_or_insert_with(|| self.global.clone())
                     .merge(overlay);
@@ -579,13 +601,14 @@ fn license_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     policy: &ResolvePolicy,
+    repo: Interned<DefaultInterner>,
     effective: Option<&UseConfig>,
 ) -> bool {
     let Some(lic) = &meta.license else {
         return true;
     };
     let slot = Some(meta.slot.slot);
-    let accept = policy.accept_licenses.effective_for(cpv, slot);
+    let accept = policy.accept_licenses.effective_for(cpv, slot, Some(repo));
     if !license_has_conditional(lic) {
         return license_accepted(lic, &accept, &|_| false);
     }
@@ -617,13 +640,14 @@ fn restrict_family_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     policy: &ResolvePolicy,
+    repo: Interned<DefaultInterner>,
     effective: Option<&UseConfig>,
 ) -> bool {
     if entries.is_empty() {
         return true;
     }
     let slot = Some(meta.slot.slot);
-    let a = accept.effective_for(cpv, slot);
+    let a = accept.effective_for(cpv, slot, Some(repo));
     if !restrict_has_conditional(entries) {
         return a.accepts_restrict(entries, &|_| false);
     }
@@ -640,6 +664,7 @@ fn properties_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     policy: &ResolvePolicy,
+    repo: Interned<DefaultInterner>,
     effective: Option<&UseConfig>,
 ) -> bool {
     restrict_family_ok_for(
@@ -648,6 +673,7 @@ fn properties_ok_for(
         cpv,
         meta,
         policy,
+        repo,
         effective,
     )
 }
@@ -658,6 +684,7 @@ fn restrict_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     policy: &ResolvePolicy,
+    repo: Interned<DefaultInterner>,
     effective: Option<&UseConfig>,
 ) -> bool {
     restrict_family_ok_for(
@@ -666,6 +693,7 @@ fn restrict_ok_for(
         cpv,
         meta,
         policy,
+        repo,
         effective,
     )
 }
@@ -799,28 +827,35 @@ pub struct PolicyFactsRef<'a> {
     generation: u64,
 }
 
-/// Final package mask/unmask atoms indexed by CPN while retaining file order.
+/// Final package mask/unmask atoms: plain atoms indexed by CPN, wildcards tried on every package
 #[derive(Debug, Default, Clone)]
 pub struct PolicyMaskList {
-    by_cpn: Option<HashMap<Cpn, Vec<Dep>>>,
+    entries: Option<MaskEntries>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct MaskEntries {
+    by_cpn: HashMap<Cpn, Vec<Dep>>,
+    wildcard: Vec<ExtendedAtom>,
 }
 
 impl PolicyMaskList {
     /// An empty list that can be borrowed without allocation.
-    pub const EMPTY: Self = Self { by_cpn: None };
+    pub const EMPTY: Self = Self { entries: None };
 
     /// Build a list from the final, already-folded policy entries.
-    pub fn new(entries: Vec<Dep>) -> Self {
+    pub fn new(entries: Vec<ConfigAtom>) -> Self {
         if entries.is_empty() {
             return Self::EMPTY;
         }
-        let mut by_cpn: HashMap<Cpn, Vec<Dep>> = HashMap::new();
-        for dep in entries {
-            by_cpn.entry(dep.cpn).or_default().push(dep);
+        let mut out = MaskEntries::default();
+        for atom in entries {
+            match atom {
+                ConfigAtom::Dep(dep) => out.by_cpn.entry(dep.cpn).or_default().push(dep),
+                ConfigAtom::Extended(e) => out.wildcard.push(e),
+            }
         }
-        Self {
-            by_cpn: Some(by_cpn),
-        }
+        Self { entries: Some(out) }
     }
 
     fn is_masked(
@@ -829,15 +864,20 @@ impl PolicyMaskList {
         slot: &portage_atom::Slot,
         repo: Interned<DefaultInterner>,
     ) -> bool {
-        let Some(by_cpn) = &self.by_cpn else {
+        let Some(entries) = &self.entries else {
             return false;
         };
         let hit = |dep: &Dep| {
             mask_matches(dep, cpv) && mask_slot_matches(dep, slot) && mask_repo_matches(dep, repo)
         };
-        by_cpn
+        entries
+            .by_cpn
             .get(&cpv.cpn)
             .is_some_and(|entries| entries.iter().any(hit))
+            || entries
+                .wildcard
+                .iter()
+                .any(|e| e.matches(cpv, Some(slot), Some(repo)))
     }
 }
 
@@ -853,7 +893,7 @@ pub struct PolicyFactsCache {
 
 #[derive(Debug, Default)]
 struct PolicyFactsState {
-    current_package_use: Option<Vec<(Dep, Vec<UseOverride>)>>,
+    current_package_use: Option<Vec<(ConfigAtom, Vec<UseOverride>)>>,
     current_generation: u64,
     facts: HashMap<(u64, Cpv), PolicyVersionFacts>,
 }
@@ -872,7 +912,10 @@ impl PolicyFactsCache {
     }
 
     /// Return the generation for `package_use`, advancing it only on change.
-    pub fn generation_for(&self, package_use: &[(Dep, Vec<UseOverride>)]) -> PolicyFactsRef<'_> {
+    pub fn generation_for(
+        &self,
+        package_use: &[(ConfigAtom, Vec<UseOverride>)],
+    ) -> PolicyFactsRef<'_> {
         let mut state = self.lock();
         let generation = match &state.current_package_use {
             Some(current) if current.as_slice() == package_use => state.current_generation,
@@ -918,7 +961,7 @@ impl<'a> PolicyFactsRef<'a> {
         let stable =
             raw_policy
                 .accept_keywords
-                .is_stable(&meta.keywords, cpv, Some(meta.slot.slot));
+                .is_stable(&meta.keywords, cpv, Some(meta.slot.slot), None);
         let facts = PolicyVersionFacts {
             accepted: None,
             stable,
@@ -955,17 +998,18 @@ impl<'a> PolicyFactsRef<'a> {
             ..policy
         };
         let meta = &cache.metadata;
-        let base_accepted =
-            raw_policy
-                .accept_keywords
-                .accepts(&meta.keywords, cpv, Some(meta.slot.slot))
-                && !is_masked(
-                    raw_policy.package_mask,
-                    raw_policy.package_unmask,
-                    cpv,
-                    &meta.slot,
-                    repo,
-                );
+        let base_accepted = raw_policy.accept_keywords.accepts(
+            &meta.keywords,
+            cpv,
+            Some(meta.slot.slot),
+            Some(repo),
+        ) && !is_masked(
+            raw_policy.package_mask,
+            raw_policy.package_unmask,
+            cpv,
+            &meta.slot,
+            repo,
+        );
         let (accepted, effective) = if !base_accepted {
             (false, None)
         } else {
@@ -1038,6 +1082,7 @@ impl<'a> PolicyFactsRef<'a> {
                     &cache.metadata.keywords,
                     &cpv,
                     Some(cache.metadata.slot.slot),
+                    None,
                 );
                 (stable, None)
             }
@@ -1109,7 +1154,7 @@ pub struct ResolvePolicy<'a> {
     pub env_use: &'a portage_atom_pubgrub::UseLayer,
     /// Per-version `package.use`/`package.env`-style overrides from
     /// `/etc/portage` (the `pkg` layer, above `conf`/make.conf)
-    pub package_use: &'a [(Dep, Vec<UseOverride>)],
+    pub package_use: &'a [(ConfigAtom, Vec<UseOverride>)],
     /// Per-profile-node `package.use` (Portage `setcpv` interleave)
     pub profile_package_use: &'a [portage_atom_pubgrub::ProfileUseNode],
     /// Profile USE force/mask policy — see [`Adapter::force_mask`]
@@ -1123,7 +1168,7 @@ impl<'a> ResolvePolicy<'a> {
     pub fn with_package_use(
         self,
         cache: &'a PolicyFactsCache,
-        package_use: &'a [(Dep, Vec<UseOverride>)],
+        package_use: &'a [(ConfigAtom, Vec<UseOverride>)],
     ) -> Self {
         Self {
             package_use,
@@ -1162,7 +1207,7 @@ pub struct ResolvedPolicy {
     /// Process-environment USE layer
     pub env_use: portage_atom_pubgrub::UseLayer,
     /// Per-version `package.use`/`package.env`-style overrides
-    pub package_use: Vec<(Dep, Vec<UseOverride>)>,
+    pub package_use: Vec<(ConfigAtom, Vec<UseOverride>)>,
     /// Per-profile-node `package.use`
     pub profile_package_use: Vec<portage_atom_pubgrub::ProfileUseNode>,
     /// Profile USE force/mask policy
@@ -1279,7 +1324,7 @@ pub struct Adapter<'a> {
     pub env_use: &'a portage_atom_pubgrub::UseLayer,
     /// Per-version `package.use`/`package.env`-style overrides from
     /// `/etc/portage` (the `pkg` layer, above `conf`/make.conf)
-    pub package_use: &'a [(Dep, Vec<UseOverride>)],
+    pub package_use: &'a [(ConfigAtom, Vec<UseOverride>)],
     /// Per-profile-node `package.use` (see [`ResolvePolicy::profile_package_use`])
     pub profile_package_use: &'a [portage_atom_pubgrub::ProfileUseNode],
     /// Profile USE force/mask policy: applied to each version's effective USE and
@@ -1495,7 +1540,12 @@ impl PackageRepository for Adapter<'_> {
         let slot = Some(meta.slot.slot);
         let policy = self.policy();
         let stable = policy.facts.map_or_else(
-            || policy.accept_keywords.is_stable(&meta.keywords, cpv, slot),
+            || {
+                let repo = Some(repo_name_of(self.data, cpv));
+                policy
+                    .accept_keywords
+                    .is_stable(&meta.keywords, cpv, slot, repo)
+            },
             |facts| facts.is_stable(policy, cpv, cache),
         );
         let pkg = match slot {
@@ -1906,7 +1956,7 @@ fn version_accepted_uncached(
     let meta = &cache.metadata;
     policy
         .accept_keywords
-        .accepts(&meta.keywords, cpv, Some(meta.slot.slot))
+        .accepts(&meta.keywords, cpv, Some(meta.slot.slot), Some(repo))
         && !is_masked(
             policy.package_mask,
             policy.package_unmask,
@@ -1914,9 +1964,9 @@ fn version_accepted_uncached(
             &meta.slot,
             repo,
         )
-        && license_ok_for(cpv, meta, policy, effective)
-        && properties_ok_for(cpv, meta, policy, effective)
-        && restrict_ok_for(cpv, meta, policy, effective)
+        && license_ok_for(cpv, meta, policy, repo, effective)
+        && properties_ok_for(cpv, meta, policy, repo, effective)
+        && restrict_ok_for(cpv, meta, policy, repo, effective)
 }
 
 /// Whether a dependency field of `meta` failed to parse, which Portage masks as `invalid`
@@ -2070,12 +2120,14 @@ pub fn filter_reasons_for(
         }
         let meta = &cache.metadata;
         let slot = Some(meta.slot.slot);
+        let repo = repo_name_of(data, cpv);
 
         let mut reasons = Vec::new();
 
-        if let Some(kw) = policy
-            .accept_keywords
-            .keyword_needed(&meta.keywords, cpv, slot)
+        if let Some(kw) =
+            policy
+                .accept_keywords
+                .keyword_needed(&meta.keywords, cpv, slot, Some(repo))
         {
             reasons.push(FilterReason::Keyword(kw));
         }
@@ -2084,12 +2136,12 @@ pub fn filter_reasons_for(
             policy.package_unmask,
             cpv,
             &meta.slot,
-            repo_name_of(data, cpv),
+            repo,
         ) {
             reasons.push(FilterReason::Masked);
         }
         if let Some(lic) = &meta.license {
-            let accept = policy.accept_licenses.effective_for(cpv, slot);
+            let accept = policy.accept_licenses.effective_for(cpv, slot, Some(repo));
             // Evaluate `use? ( … )` branches against the version's effective
             // USE so a non-FREE license behind a disabled flag is not flagged.
             let needed = if license_has_conditional(lic) {
@@ -2103,7 +2155,9 @@ pub fn filter_reasons_for(
             }
         }
         if !meta.properties.is_empty() {
-            let accept = policy.accept_properties.effective_for(cpv, slot);
+            let accept = policy
+                .accept_properties
+                .effective_for(cpv, slot, Some(repo));
             let needed = if restrict_has_conditional(&meta.properties) {
                 let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
                 accept.restrict_needed(&meta.properties, &use_predicate(&cfg))
@@ -2115,7 +2169,7 @@ pub fn filter_reasons_for(
             }
         }
         if !meta.restrict.is_empty() {
-            let accept = policy.accept_restrict.effective_for(cpv, slot);
+            let accept = policy.accept_restrict.effective_for(cpv, slot, Some(repo));
             let needed = if restrict_has_conditional(&meta.restrict) {
                 let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
                 accept.restrict_needed(&meta.restrict, &use_predicate(&cfg))
@@ -2257,6 +2311,14 @@ mod tests {
         Dep::parse(s).unwrap()
     }
 
+    fn atom(s: &str) -> ConfigAtom {
+        ConfigAtom::parse(s).unwrap()
+    }
+
+    fn config_atoms(deps: &[Dep]) -> Vec<ConfigAtom> {
+        deps.iter().cloned().map(ConfigAtom::Dep).collect()
+    }
+
     #[test]
     fn cache_entry_index_handles_unsorted_cpn_scoped_versions() {
         let a = Cpn::parse("cat/a").unwrap();
@@ -2328,6 +2390,65 @@ mod tests {
     }
 
     #[test]
+    fn repo_qualified_lines_only_apply_to_that_repo() {
+        let arch = Arch::intern("amd64");
+        let tok = |s: &str| AcceptToken::parse(s).unwrap();
+        let testing = Keyword::parse_line("~amd64").unwrap();
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+        let overlay = Some(Interned::intern("overlay"));
+        let gentoo = Some(Interned::intern("gentoo"));
+        let ak = AcceptKeywords::new(
+            &arch,
+            &[tok("amd64")],
+            vec![(atom("dev-libs/foo::overlay"), vec![tok("~amd64")])],
+        );
+        assert!(ak.accepts(&testing, &foo, None, overlay));
+        assert!(!ak.accepts(&testing, &foo, None, gentoo));
+        let licenses = AcceptOverlay::new(
+            AcceptSet::from_tokens_plain(&["MIT".into()]),
+            vec![(
+                atom("dev-libs/foo::overlay"),
+                AcceptSet::from_tokens_plain(&["GPL-2".into()]),
+            )],
+        );
+        assert!(licenses.effective_for(&foo, None, overlay).accepts("GPL-2"));
+        assert!(!licenses.effective_for(&foo, None, gentoo).accepts("GPL-2"));
+    }
+
+    #[test]
+    fn wildcard_lines_fold_in_order_with_named_ones() {
+        let arch = Arch::intern("amd64");
+        let tok = |s: &str| AcceptToken::parse(s).unwrap();
+        let testing = Keyword::parse_line("~amd64").unwrap();
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+        let bar = Cpv::parse("sys-libs/bar-1").unwrap();
+        let ak = AcceptKeywords::new(
+            &arch,
+            &[tok("amd64")],
+            vec![
+                (atom("*/*"), vec![tok("~amd64")]),
+                (atom("dev-libs/foo"), vec![tok("-~amd64")]),
+            ],
+        );
+        assert!(!ak.accepts(&testing, &foo, None, None));
+        assert!(ak.accepts(&testing, &bar, None, None));
+
+        let gentoo = Interned::intern("gentoo");
+        let mask = PolicyMaskList::new(vec![atom("dev-libs/*::gentoo")]);
+        let slot = portage_atom::Slot::new("0");
+        let unmasked = PolicyMaskList::EMPTY;
+        assert!(is_masked(&mask, &unmasked, &foo, &slot, gentoo));
+        assert!(!is_masked(
+            &mask,
+            &unmasked,
+            &foo,
+            &slot,
+            Interned::intern("overlay")
+        ));
+        assert!(!is_masked(&mask, &unmasked, &bar, &slot, gentoo));
+    }
+
+    #[test]
     fn policy_keyword_index_preserves_matching_token_order() {
         let arch = Arch::intern("amd64");
         let cpv = Cpv::parse("dev-libs/foo-1").unwrap();
@@ -2338,34 +2459,34 @@ mod tests {
             &global,
             vec![
                 (
-                    dep("dev-libs/foo"),
+                    atom("dev-libs/foo"),
                     vec![AcceptToken::parse("~amd64").unwrap()],
                 ),
-                (dep("other/pkg"), vec![AcceptToken::parse("-*").unwrap()]),
+                (atom("other/pkg"), vec![AcceptToken::parse("-*").unwrap()]),
                 (
-                    dep("dev-libs/foo"),
+                    atom("dev-libs/foo"),
                     vec![AcceptToken::parse("-~amd64").unwrap()],
                 ),
             ],
         );
-        assert!(!ordered.accepts(&keywords, &cpv, None));
+        assert!(!ordered.accepts(&keywords, &cpv, None, None));
 
         let reversed = AcceptKeywords::new(
             &arch,
             &global,
             vec![
                 (
-                    dep("dev-libs/foo"),
+                    atom("dev-libs/foo"),
                     vec![AcceptToken::parse("-~amd64").unwrap()],
                 ),
-                (dep("other/pkg"), vec![AcceptToken::parse("-*").unwrap()]),
+                (atom("other/pkg"), vec![AcceptToken::parse("-*").unwrap()]),
                 (
-                    dep("dev-libs/foo"),
+                    atom("dev-libs/foo"),
                     vec![AcceptToken::parse("~amd64").unwrap()],
                 ),
             ],
         );
-        assert!(reversed.accepts(&keywords, &cpv, None));
+        assert!(reversed.accepts(&keywords, &cpv, None, None));
     }
 
     #[test]
@@ -2380,11 +2501,11 @@ mod tests {
 
         // Global stable-only config: ~arm64 is masked everywhere.
         let global = AcceptKeywords::from_global(&arch, &["arm64"]);
-        assert!(global.accepts(&stable, &foo, None));
-        assert!(!global.accepts(&testing, &foo, None));
+        assert!(global.accepts(&stable, &foo, None, None));
+        assert!(!global.accepts(&testing, &foo, None, None));
         // Autounmask would suggest ~arm64 for the testing-only package.
         assert_eq!(
-            global.keyword_needed(&testing, &foo, None).as_deref(),
+            global.keyword_needed(&testing, &foo, None, None).as_deref(),
             Some("~arm64")
         );
 
@@ -2392,44 +2513,45 @@ mod tests {
         let per = AcceptKeywords::new(
             &arch,
             &[tok("arm64")],
-            vec![(dep("dev-libs/foo"), vec![tok("~arm64")])],
+            vec![(atom("dev-libs/foo"), vec![tok("~arm64")])],
         );
-        assert!(per.accepts(&testing, &foo, None), "foo unmasked");
-        assert!(!per.accepts(&testing, &bar, None), "bar still masked");
+        assert!(per.accepts(&testing, &foo, None, None), "foo unmasked");
+        assert!(!per.accepts(&testing, &bar, None, None), "bar still masked");
         // No longer suggested for foo (it is already accepted).
-        assert_eq!(per.keyword_needed(&testing, &foo, None), None);
+        assert_eq!(per.keyword_needed(&testing, &foo, None, None), None);
 
         // A bare atom (`dev-libs/foo`) means "accept this arch's ~arm64".
-        let bare = AcceptKeywords::new(&arch, &[tok("arm64")], vec![(dep("dev-libs/foo"), vec![])]);
-        assert!(bare.accepts(&testing, &foo, None));
+        let bare =
+            AcceptKeywords::new(&arch, &[tok("arm64")], vec![(atom("dev-libs/foo"), vec![])]);
+        assert!(bare.accepts(&testing, &foo, None, None));
 
         // use.stable.* gates on whether the package is *only* accepted via a
         // stable keyword — Portage's `isStable`: accepted, and no longer
         // accepted once every stable keyword is downgraded to testing.
-        assert!(global.is_stable(&stable, &foo, None));
-        assert!(!per.is_stable(&testing, &foo, None));
+        assert!(global.is_stable(&stable, &foo, None, None));
+        assert!(!per.is_stable(&testing, &foo, None, None));
         // Host accepts both arm64 and ~arm64 (the common `ACCEPT_KEYWORDS=
         // "arch ~arch"` stack): the ~arm64 grant alone would already accept a
         // stable-keyworded package, so it is NOT "stable" for use.stable.*
         // purposes — matches Portage, not the naive "package has a granted
         // stable keyword" reading an earlier version of this test asserted.
         let both = AcceptKeywords::from_global(&arch, &["arm64", "~arm64"]);
-        assert!(!both.is_stable(&stable, &foo, None));
-        assert!(!both.is_stable(&testing, &foo, None));
+        assert!(!both.is_stable(&stable, &foo, None, None));
+        assert!(!both.is_stable(&testing, &foo, None, None));
 
         // Wildcards: Portage's downgrade recheck is never defeated by `**`
         // (accepts everything either way) or `~*` (downgraded-to-testing set
         // is still covered) — only a *specific* stable grant with no
         // matching testing/wildcard rescue makes a package "stable".
         let any = AcceptKeywords::from_global(&arch, &["**"]);
-        assert!(!any.is_stable(&stable, &foo, None));
+        assert!(!any.is_stable(&stable, &foo, None, None));
         // "arm64" alone accepts+downgrade-rescues nothing; adding "~*" makes
         // the downgraded (all-testing) recheck accepted too, so no longer stable.
         let any_testing = AcceptKeywords::from_global(&arch, &["arm64", "~*"]);
-        assert!(any_testing.accepts(&stable, &foo, None));
-        assert!(!any_testing.is_stable(&stable, &foo, None));
+        assert!(any_testing.accepts(&stable, &foo, None, None));
+        assert!(!any_testing.is_stable(&stable, &foo, None, None));
         let any_stable = AcceptKeywords::from_global(&arch, &["*"]);
-        assert!(any_stable.is_stable(&stable, &foo, None));
+        assert!(any_stable.is_stable(&stable, &foo, None, None));
     }
 
     // Crossdev's usual `package.accept_keywords` shape: grant the *target*
@@ -2453,12 +2575,12 @@ mod tests {
             &host,
             &[tok("arm64"), tok("~arm64")],
             vec![(
-                dep("cross-riscv64-unknown-linux-gnu/linux-headers"),
+                atom("cross-riscv64-unknown-linux-gnu/linux-headers"),
                 vec![tok("riscv"), tok("~riscv"), tok("-arm64"), tok("-~arm64")],
             )],
         );
         assert!(
-            ak.accepts(&keywords, &cpv, None),
+            ak.accepts(&keywords, &cpv, None, None),
             "must accept via ~riscv after host arm64/~arm64 are withdrawn"
         );
         // Without the foreign-arch grant, the same vetoes fully mask it.
@@ -2466,17 +2588,17 @@ mod tests {
             &host,
             &[tok("arm64"), tok("~arm64")],
             vec![(
-                dep("cross-riscv64-unknown-linux-gnu/linux-headers"),
+                atom("cross-riscv64-unknown-linux-gnu/linux-headers"),
                 vec![tok("-arm64"), tok("-~arm64")],
             )],
         );
         assert!(
-            !veto_only.accepts(&keywords, &cpv, None),
+            !veto_only.accepts(&keywords, &cpv, None, None),
             "host vetoes alone must mask when only ~arm64/~riscv remain"
         );
         // Unrelated package keeps the global ~arm64 accept.
         let other = Cpv::parse("sys-fs/btrfs-progs-7.1").unwrap();
-        assert!(ak.accepts(&kws("~arm64"), &other, None));
+        assert!(ak.accepts(&kws("~arm64"), &other, None, None));
     }
 
     // `is_stable`'s downgrade recheck must run over the *whole* accept set,
@@ -2496,23 +2618,23 @@ mod tests {
             &host,
             &[tok("arm64"), tok("~arm64")],
             vec![(
-                dep("cross-riscv64-unknown-linux-gnu/linux-headers"),
+                atom("cross-riscv64-unknown-linux-gnu/linux-headers"),
                 vec![tok("riscv"), tok("~riscv"), tok("-arm64"), tok("-~arm64")],
             )],
         );
-        assert!(both_grants.accepts(&keywords, &cpv, None));
-        assert!(!both_grants.is_stable(&keywords, &cpv, None));
+        assert!(both_grants.accepts(&keywords, &cpv, None, None));
+        assert!(!both_grants.is_stable(&keywords, &cpv, None, None));
 
         let stable_only_grant = AcceptKeywords::new(
             &host,
             &[tok("arm64"), tok("~arm64")],
             vec![(
-                dep("cross-riscv64-unknown-linux-gnu/linux-headers"),
+                atom("cross-riscv64-unknown-linux-gnu/linux-headers"),
                 vec![tok("riscv"), tok("-arm64"), tok("-~arm64")],
             )],
         );
-        assert!(stable_only_grant.accepts(&keywords, &cpv, None));
-        assert!(stable_only_grant.is_stable(&keywords, &cpv, None));
+        assert!(stable_only_grant.accepts(&keywords, &cpv, None, None));
+        assert!(stable_only_grant.is_stable(&keywords, &cpv, None, None));
     }
 
     #[test]
@@ -2529,16 +2651,16 @@ mod tests {
         // arch is no longer accepted.
         let star_star = AcceptKeywords::from_global(&arch, &["**"]);
         assert!(
-            star_star.accepts(&offarch, &foo, None),
+            star_star.accepts(&offarch, &foo, None, None),
             "** accepts any keyword"
         );
         let acc = AcceptKeywords::from_global(&arch, &["**", "-*", "~arm64"]);
         assert!(
-            acc.accepts(&testing, &foo, None),
+            acc.accepts(&testing, &foo, None, None),
             "~arm64 re-added after -*"
         );
         assert!(
-            !acc.accepts(&offarch, &foo, None),
+            !acc.accepts(&offarch, &foo, None, None),
             "** was cleared by -*, so a wrong-arch keyword is rejected again"
         );
         assert!(AcceptToken::parse("-*").is_some(), "-* parses, not dropped");
@@ -2548,14 +2670,14 @@ mod tests {
         let per = AcceptKeywords::new(
             &arch,
             &[tok("**")],
-            vec![(dep("dev-libs/foo"), vec![tok("-*")])],
+            vec![(atom("dev-libs/foo"), vec![tok("-*")])],
         );
         assert!(
-            !per.accepts(&offarch, &foo, None),
+            !per.accepts(&offarch, &foo, None, None),
             "foo: global ** cleared by the per-package -*"
         );
         assert!(
-            per.accepts(&offarch, &bar, None),
+            per.accepts(&offarch, &bar, None, None),
             "bar keeps the global ** accept"
         );
     }
@@ -2571,18 +2693,21 @@ mod tests {
         // `arch -arch`: the veto comes after the grant in the same stack (the
         // shape a downstream profile uses to withdraw an ancestor's `arch`).
         let vetoed = AcceptKeywords::from_global(&arch, &["riscv", "-riscv"]);
-        assert!(!vetoed.accepts(&stable, &foo, None), "the veto must win");
+        assert!(
+            !vetoed.accepts(&stable, &foo, None, None),
+            "the veto must win"
+        );
 
         // Order matters, same as `-*`: a grant *after* the veto still applies.
         let regranted = AcceptKeywords::from_global(&arch, &["riscv", "-riscv", "~riscv"]);
         assert!(
-            regranted.accepts(&testing, &foo, None),
+            regranted.accepts(&testing, &foo, None, None),
             "a later token re-grants after an earlier veto"
         );
 
         // `-riscv` must not affect a different arch.
         let other_arch = AcceptKeywords::from_global(&Arch::intern("amd64"), &["-riscv", "amd64"]);
-        assert!(other_arch.accepts(&kws("amd64"), &foo, None));
+        assert!(other_arch.accepts(&kws("amd64"), &foo, None, None));
 
         assert!(
             AcceptToken::parse("-riscv").is_some(),
@@ -2610,14 +2735,14 @@ mod tests {
         // discards the literal `riscv` token, not the separate `*` token.
         let star_then_veto = AcceptKeywords::from_global(&arch, &["*", "-riscv"]);
         assert!(
-            star_then_veto.accepts(&stable, &foo, None),
+            star_then_veto.accepts(&stable, &foo, None, None),
             "-arch must not retract a `*` grant for the same arch"
         );
 
         // `** -riscv`: same reasoning, `**` is untouched by `-riscv`.
         let any_then_veto = AcceptKeywords::from_global(&arch, &["**", "-riscv"]);
         assert!(
-            any_then_veto.accepts(&testing, &foo, None),
+            any_then_veto.accepts(&testing, &foo, None, None),
             "-arch must not retract a `**` grant for the same arch"
         );
 
@@ -2626,7 +2751,7 @@ mod tests {
         // re-granting everything except it — there is no narrower "retract
         // just this arch from the wildcard" token, matching upstream.
         let star_reset_without_riscv = AcceptKeywords::from_global(&arch, &["**", "-*", "amd64"]);
-        assert!(!star_reset_without_riscv.accepts(&stable, &foo, None));
+        assert!(!star_reset_without_riscv.accepts(&stable, &foo, None, None));
     }
 
     // Regression:
@@ -2652,23 +2777,23 @@ mod tests {
                 AcceptToken::parse("~x86").unwrap(),
             ],
             vec![(
-                dep("media-video/mplayer"),
+                atom("media-video/mplayer"),
                 vec![AcceptToken::parse("-~x86").unwrap()],
             )],
         );
         assert!(
-            ak.accepts(&stable, &foo, None),
+            ak.accepts(&stable, &foo, None, None),
             "stable mplayer must still be accepted"
         );
         assert!(
-            !ak.accepts(&testing, &foo, None),
+            !ak.accepts(&testing, &foo, None, None),
             "-~x86 must withdraw the testing grant for mplayer specifically"
         );
 
         // Confirm the system-wide default (no override) still accepts testing —
         // the veto must be scoped to mplayer, not global.
         let bar = Cpv::parse("dev-libs/bar-1").unwrap();
-        assert!(ak.accepts(&testing, &bar, None), "bar keeps testing");
+        assert!(ak.accepts(&testing, &bar, None, None), "bar keeps testing");
     }
 
     // `-~*` and `-**` are their own tokens, not swallowed by the generic
@@ -2684,17 +2809,17 @@ mod tests {
 
         let any_testing_then_negated = AcceptKeywords::from_global(&arch, &["~*", "-~*", "amd64"]);
         assert!(
-            !any_testing_then_negated.accepts(&offarch_testing, &foo, None),
+            !any_testing_then_negated.accepts(&offarch_testing, &foo, None, None),
             "-~* must withdraw the ~* grant"
         );
 
         let any_then_negated = AcceptKeywords::from_global(&arch, &["**", "-**", "amd64"]);
         assert!(
-            !any_then_negated.accepts(&offarch_stable, &foo, None),
+            !any_then_negated.accepts(&offarch_stable, &foo, None, None),
             "-** must withdraw the ** grant"
         );
         assert!(
-            any_then_negated.accepts(&kws("amd64"), &foo, None),
+            any_then_negated.accepts(&kws("amd64"), &foo, None, None),
             "the trailing bare amd64 grant still applies"
         );
 
@@ -2705,8 +2830,8 @@ mod tests {
     #[test]
     fn policy_overlay_index_preserves_matching_merge_order() {
         let cpv = Cpv::parse("dev-libs/foo-1").unwrap();
-        let target = dep("dev-libs/foo");
-        let unrelated = dep("other/pkg");
+        let target = atom("dev-libs/foo");
+        let unrelated = atom("other/pkg");
         let clear = AcceptSet::from_tokens_plain(&["-*".into()]);
         let allow = AcceptSet::from_tokens_plain(&["MIT".into()]);
         let ordered = AcceptOverlay::new(
@@ -2717,7 +2842,7 @@ mod tests {
                 (target.clone(), allow.clone()),
             ],
         );
-        assert!(ordered.effective_for(&cpv, None).accepts("MIT"));
+        assert!(ordered.effective_for(&cpv, None, None).accepts("MIT"));
 
         let reversed = AcceptOverlay::new(
             AcceptSet::from_tokens_plain(&["*".into()]),
@@ -2727,7 +2852,7 @@ mod tests {
                 (unrelated, AcceptSet::from_tokens_plain(&["-*".into()])),
             ],
         );
-        assert!(!reversed.effective_for(&cpv, None).accepts("MIT"));
+        assert!(!reversed.effective_for(&cpv, None, None).accepts("MIT"));
     }
 
     #[test]
@@ -2741,19 +2866,19 @@ mod tests {
         let licenses = AcceptOverlay::new(
             global.clone(),
             vec![(
-                dep("dev-libs/foo"),
+                atom("dev-libs/foo"),
                 AcceptSet::from_tokens(&["GPL-2".into()], &groups),
             )],
         );
-        assert!(licenses.effective_for(&foo, None).accepts("GPL-2"));
-        assert!(!licenses.effective_for(&bar, None).accepts("GPL-2"));
+        assert!(licenses.effective_for(&foo, None, None).accepts("GPL-2"));
+        assert!(!licenses.effective_for(&bar, None, None).accepts("GPL-2"));
         // The global MIT acceptance still applies everywhere.
-        assert!(licenses.effective_for(&bar, None).accepts("MIT"));
+        assert!(licenses.effective_for(&bar, None, None).accepts("MIT"));
 
         // No per-package entries ⇒ the global decision is borrowed unchanged.
         let plain = AcceptOverlay::new(global, Vec::new());
-        assert!(!plain.effective_for(&foo, None).accepts("GPL-2"));
-        assert!(plain.effective_for(&foo, None).accepts("MIT"));
+        assert!(!plain.effective_for(&foo, None, None).accepts("GPL-2"));
+        assert!(plain.effective_for(&foo, None, None).accepts("MIT"));
     }
 
     // `AcceptProperties`/`AcceptRestrict` are the same engine as
@@ -2773,19 +2898,19 @@ mod tests {
         let accept_properties = AcceptProperties::new(
             global.clone(),
             vec![(
-                dep("dev-libs/foo"),
+                atom("dev-libs/foo"),
                 AcceptSet::from_tokens_plain(&["interactive".into()]),
             )],
         );
         let interactive = portage_metadata::RestrictExpr::parse("interactive").unwrap();
         assert!(
             accept_properties
-                .effective_for(&foo, None)
+                .effective_for(&foo, None, None)
                 .accepts_restrict(&interactive, &|_| false)
         );
         assert!(
             !accept_properties
-                .effective_for(&bar, None)
+                .effective_for(&bar, None, None)
                 .accepts_restrict(&interactive, &|_| false)
         );
 
@@ -2795,7 +2920,7 @@ mod tests {
             Vec::new(),
         );
         let conditional = portage_metadata::RestrictExpr::parse("bindist? ( bindist )").unwrap();
-        let accept = accept_restrict.effective_for(&foo, None);
+        let accept = accept_restrict.effective_for(&foo, None, None);
         assert!(
             accept.accepts_restrict(&conditional, &|f| f != "bindist"),
             "inactive flag: the bindist restriction never applies"
@@ -2813,7 +2938,7 @@ mod tests {
     #[test]
     fn policy_facts_generation_changes_only_with_package_use() {
         let cache = PolicyFactsCache::new();
-        let empty: Vec<(Dep, Vec<UseOverride>)> = Vec::new();
+        let empty: Vec<(ConfigAtom, Vec<UseOverride>)> = Vec::new();
         let first = cache.generation_for(&empty);
         assert_eq!(first.generation(), 1);
         assert_eq!(
@@ -2822,7 +2947,7 @@ mod tests {
         );
 
         let changed = vec![(
-            dep("cat/pkg"),
+            atom("cat/pkg"),
             vec![UseOverride {
                 flag: Interned::intern("flag"),
                 enable: true,
@@ -2848,9 +2973,9 @@ mod tests {
         let restrict = AcceptRestrict::new(accept_all_licenses(), Vec::new());
         let force_mask = ForceMask::default();
         let cache = PolicyFactsCache::new();
-        let off: Vec<(Dep, Vec<UseOverride>)> = Vec::new();
+        let off: Vec<(ConfigAtom, Vec<UseOverride>)> = Vec::new();
         let on = vec![(
-            dep("cat/pkg"),
+            atom("cat/pkg"),
             vec![UseOverride {
                 flag: Interned::intern("licensed"),
                 enable: true,
@@ -2965,7 +3090,7 @@ mod tests {
         let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
         let defaults = portage_atom_pubgrub::UseLayer::parse("a b");
         let force_mask = ForceMask::default();
-        let package_use: Vec<(Dep, Vec<UseOverride>)> = Vec::new();
+        let package_use: Vec<(ConfigAtom, Vec<UseOverride>)> = Vec::new();
         let cache = PolicyFactsCache::new();
         let facts = cache.generation_for(&package_use);
         let licenses = AcceptLicenses::new(accept_all_licenses(), Vec::new());
@@ -3012,6 +3137,7 @@ mod tests {
             &entry.metadata.keywords,
             &cpv,
             Some(entry.metadata.slot.slot),
+            None,
         );
         let base =
             crate::effective_use::effective_use(&policy, &pkg, &cpv.version, entry, stable, &[]);
@@ -3121,8 +3247,8 @@ mod tests {
     ) -> ResolvePolicy<'a> {
         ResolvePolicy {
             accept_keywords: ak,
-            package_mask: Box::leak(Box::new(PolicyMaskList::new(mask.to_vec()))),
-            package_unmask: Box::leak(Box::new(PolicyMaskList::new(unmask.to_vec()))),
+            package_mask: Box::leak(Box::new(PolicyMaskList::new(config_atoms(mask)))),
+            package_unmask: Box::leak(Box::new(PolicyMaskList::new(config_atoms(unmask)))),
             accept_licenses: Box::leak(Box::new(AcceptOverlay::new(
                 accept_all_licenses(),
                 Vec::new(),
@@ -3314,9 +3440,7 @@ mod tests {
         );
         let raw = load_repos(&set).await;
 
-        let mask = PolicyMaskList::new(vec![
-            Dep::parse(&format!("dev-libs/foo::{overlay_name}")).unwrap(),
-        ]);
+        let mask = PolicyMaskList::new(vec![atom(&format!("dev-libs/foo::{overlay_name}"))]);
         let cpn = Cpn::parse("dev-libs/foo").unwrap();
         let entries = raw.versions.get(&cpn).unwrap();
 
@@ -3609,7 +3733,7 @@ mod tests {
         let arch = Arch::intern("arm64");
         let ak = AcceptKeywords::from_global(&arch, &["arm64"]);
         let cpn = Cpn::try_new("app-misc/thing").expect("cpn parses");
-        let mask = PolicyMaskList::new(vec![dep("=app-misc/thing-3.0")]);
+        let mask = PolicyMaskList::new(vec![atom("=app-misc/thing-3.0")]);
         let policy = ResolvePolicy {
             accept_keywords: &ak,
             package_mask: &mask,

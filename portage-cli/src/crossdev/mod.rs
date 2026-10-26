@@ -59,7 +59,7 @@ use std::io::Write;
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Dep, Operator, Pf, Version};
+use portage_atom::{ConfigAtom, Cpn, Cpv, Dep, Operator, Pf, Version};
 use portage_atom_pubgrub::{DepClass, UseOverride};
 use portage_repo::{MakeConf, ProfileStack, ReposConf, Repository};
 use portage_resolve::repo::AcceptToken;
@@ -429,7 +429,10 @@ struct RunStagedOpts<'a> {
     done_steps: usize,
     /// In-memory `package.use` for this staged run only. Native toolchain
     /// fills it; every other caller leaves it empty.
-    extra_package_use: &'a [(portage_atom::Dep, Vec<portage_atom_pubgrub::UseOverride>)],
+    extra_package_use: &'a [(
+        portage_atom::ConfigAtom,
+        Vec<portage_atom_pubgrub::UseOverride>,
+    )],
 }
 
 /// Run each step of a staged [`stages::StagePlan`] through [`crate::emerge_atoms`],
@@ -631,9 +634,11 @@ async fn native_prefix_guest(globals: &Cli, roots: &portage_resolve::Roots) -> b
 /// `su? ( pam )` pulls pambase then openrc. Prefix-guest baselayout already
 /// owns a stub `/sbin/openrc-run`. `-pam -su` stops that chain; a prefix
 /// does not need its own `su`.
-fn native_toolchain_package_use() -> Vec<(Dep, Vec<UseOverride>)> {
+fn native_toolchain_package_use() -> Vec<(ConfigAtom, Vec<UseOverride>)> {
     vec![(
-        Dep::parse("sys-apps/util-linux").expect("static atom"),
+        Dep::parse("sys-apps/util-linux")
+            .expect("static atom")
+            .into(),
         vec![UseOverride::parse("-pam"), UseOverride::parse("-su")],
     )]
 }
@@ -1677,13 +1682,13 @@ impl DerivedProfile {
     }
 
     /// Its `package-use` as staged-run USE overrides, which stage1's `-*` does not reset
-    fn use_overrides(&self) -> Vec<(Dep, Vec<UseOverride>)> {
+    fn use_overrides(&self) -> Vec<(ConfigAtom, Vec<UseOverride>)> {
         self.layer
             .package_use
             .iter()
             .map(|(dep, flags)| {
                 (
-                    dep.clone(),
+                    ConfigAtom::Dep(dep.clone()),
                     flags.iter().map(|f| UseOverride::parse(f)).collect(),
                 )
             })
@@ -2648,7 +2653,7 @@ mod tests {
     fn native_toolchain_package_use_is_util_linux_without_pam_or_su() {
         let entries = native_toolchain_package_use();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0.cpn.to_string(), "sys-apps/util-linux");
+        assert_eq!(entries[0].0.to_string(), "sys-apps/util-linux");
         let flags: Vec<(&str, bool)> = entries[0]
             .1
             .iter()

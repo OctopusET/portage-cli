@@ -89,7 +89,8 @@ impl ExtendedAtom {
             && repo_matches(self.repo, repo)
     }
 
-    fn matches_cpn(&self, cpn: &Cpn) -> bool {
+    /// Whether the category and package globs match `cpn`
+    pub fn matches_cpn(&self, cpn: &Cpn) -> bool {
         glob_match(&self.category, &cpn.category) && glob_match(&self.package, &cpn.package)
     }
 
@@ -178,6 +179,14 @@ impl ConfigAtom {
         match self {
             Self::Dep(dep) => dep.matches_cpv(cpv, slot) && repo_matches(dep.repo, repo),
             Self::Extended(e) => e.matches(cpv, slot, repo),
+        }
+    }
+
+    /// Whether this atom names `cpn` (for a wildcard, whether its globs match it)
+    pub fn matches_cpn(&self, cpn: &Cpn) -> bool {
+        match self {
+            Self::Dep(dep) => dep.cpn == *cpn,
+            Self::Extended(e) => e.matches_cpn(cpn),
         }
     }
 

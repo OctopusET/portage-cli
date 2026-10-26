@@ -3,7 +3,7 @@ use std::io::Write as _;
 
 use anstyle::{AnsiColor, Effects, Style};
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Dep, Version};
+use portage_atom::{ConfigAtom, Cpn, Cpv, Version};
 use portage_atom_pubgrub::{
     CededFlag, DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
     UseOverride, resolve_effective_use,
@@ -1458,7 +1458,7 @@ pub(super) struct PrettyCtx<'a> {
     pub defaults: &'a portage_atom_pubgrub::UseLayer,
     pub conf: &'a portage_atom_pubgrub::UseLayer,
     pub env_use: &'a portage_atom_pubgrub::UseLayer,
-    pub package_use: &'a [(Dep, Vec<UseOverride>)],
+    pub package_use: &'a [(ConfigAtom, Vec<UseOverride>)],
     pub profile_package_use: &'a [portage_atom_pubgrub::ProfileUseNode],
     pub use_expand: &'a [String],
     pub use_expand_hidden: &'a [String],
@@ -1629,7 +1629,8 @@ fn format_plan_parts(
     // `iuse_forced = use.force ∪ use.mask`).
     let mut forced_display: HashSet<Interned<DefaultInterner>> = HashSet::new();
     if let Some(c) = cache {
-        let stable = accept_keywords.is_stable(&c.metadata.keywords, &cpv, pkg.slot());
+        let repo = Some(super::repo::repo_name_of(data, &cpv));
+        let stable = accept_keywords.is_stable(&c.metadata.keywords, &cpv, pkg.slot(), repo);
         let iuse = super::effective_use::iuse_set(c, &force_mask.iuse_injection);
         let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
         if !force_mask.is_empty() {
