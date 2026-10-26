@@ -35,6 +35,7 @@
 //! ```
 #![warn(missing_docs)]
 
+mod config_atom;
 mod cpn;
 mod cpv;
 mod dep;
@@ -51,6 +52,7 @@ mod version;
 pub use gentoo_interner as interner;
 
 // Re-export main types
+pub use config_atom::{ConfigAtom, ExtendedAtom, order_by_specificity};
 pub use cpn::Cpn;
 pub use cpv::Cpv;
 pub use dep::{Blocker, Dep};
