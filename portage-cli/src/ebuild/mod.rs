@@ -1355,12 +1355,14 @@ impl PackageSetup {
         if let Some(settings) = &settings {
             crate::settings::seed_build_shell(&mut shell, settings).await?;
         }
-        if let Some(revisions) = repo_revisions(&repo, repos_conf.as_ref()) {
-            shell
-                .run_string(&format!("export PORTAGE_REPO_REVISIONS='{revisions}'"))
-                .await
-                .context("setting PORTAGE_REPO_REVISIONS")?;
-        }
+        let revisions = repo_revisions(&repo, repos_conf.as_ref());
+        shell
+            .run_string(&format!(
+                "export PORTAGE_REPO_REVISIONS={}",
+                crate::settings::shell_quote(&revisions)
+            ))
+            .await
+            .context("setting PORTAGE_REPO_REVISIONS")?;
 
         // Per-package build environment: `/etc/portage/package.env` maps this package
         // to env files under `/etc/portage/env/`, sourced on top of `make.conf` so
@@ -3620,20 +3622,23 @@ fn merge_spec_from_env(
 }
 
 /// `PORTAGE_REPO_REVISIONS`, `{"<name>": "<commit>"}`: git's `HEAD`, or the commit an
-/// rsync snapshot was cut from (`metadata/timestamp.commit`)
-fn repo_revisions(repo: &Repository, repos_conf: Option<&ReposConf>) -> Option<String> {
+/// rsync snapshot was cut from (`metadata/timestamp.commit`); `{}` when neither is known
+fn repo_revisions(repo: &Repository, repos_conf: Option<&ReposConf>) -> String {
     let name = repo.name();
     let path = repo.path();
-    let revision = match repos_conf?.find(name.as_str())?.sync_type.as_deref()? {
-        "git" => git_head(path)?,
+    let revision = || match repos_conf?.find(name.as_str())?.sync_type.as_deref()? {
+        "git" => git_head(path),
         "rsync" => std::fs::read_to_string(path.join("metadata/timestamp.commit"))
             .ok()?
             .split_whitespace()
-            .next()?
-            .to_owned(),
-        _ => return None,
+            .next()
+            .map(str::to_owned),
+        _ => None,
     };
-    Some(format!("{{\"{name}\": \"{revision}\"}}"))
+    match revision() {
+        Some(revision) => format!("{{\"{name}\": \"{revision}\"}}"),
+        None => "{}".to_owned(),
+    }
 }
 
 fn git_head(path: &Utf8Path) -> Option<String> {
@@ -3828,10 +3833,11 @@ mod tests {
         };
 
         assert_eq!(
-            repo_revisions(&repo, Some(&conf("rsync"))).as_deref(),
-            Some("{\"gentoo\": \"2ddd40f4\"}")
+            repo_revisions(&repo, Some(&conf("rsync"))),
+            "{\"gentoo\": \"2ddd40f4\"}"
         );
-        assert_eq!(repo_revisions(&repo, Some(&conf("svn"))), None);
+        assert_eq!(repo_revisions(&repo, Some(&conf("svn"))), "{}");
+        assert_eq!(repo_revisions(&repo, None), "{}");
     }
 
     #[test]

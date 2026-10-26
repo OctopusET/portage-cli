@@ -229,7 +229,7 @@ pub(crate) async fn export_provided_features(
     Ok(features)
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
