@@ -1,9 +1,7 @@
 //! Minimal single-level INI parsing shared by `repos.conf`/`binrepos.conf`-style
 //! config files: `[section]` headers, `key = value` lines, `#`/`;` comments,
-//! later files overriding earlier keys within the same section. No value
-//! interpolation (`%(VAR)s`) — real portage's `ConfigParser` supports it, but
-//! no configured value either format actually needs it here, so this is a
-//! documented simplification rather than a silent gap.
+//! later files overriding earlier keys within the same section. `[DEFAULT]` keys are
+//! layered under a section by [`section_with_defaults`]. No value interpolation (`%(VAR)s`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,6 +60,18 @@ pub fn merge_sections(
                 .insert(k.trim().to_string(), v.trim().to_string());
         }
     }
+}
+
+/// Section `name`'s keys over the `[DEFAULT]` section's, as `ConfigParser` reads an option
+pub fn section_with_defaults(
+    sections: &HashMap<String, HashMap<String, String>>,
+    name: &str,
+) -> HashMap<String, String> {
+    let mut out = sections.get("DEFAULT").cloned().unwrap_or_default();
+    if let Some(s) = sections.get(name) {
+        out.extend(s.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    out
 }
 
 #[cfg(test)]
