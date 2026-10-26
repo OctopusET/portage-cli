@@ -18,7 +18,7 @@ use crate::postprocess;
 use crate::preserve_libs;
 
 mod binpkg;
-mod build_info;
+pub(crate) mod build_info;
 mod flock;
 mod install_mask;
 mod protect;

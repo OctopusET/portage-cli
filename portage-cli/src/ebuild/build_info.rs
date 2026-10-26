@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_atom::{Cpv, Dep, Slot, SlotDep, SlotOperator, UseDep, UseDepKind};
+use portage_atom::{Cpn, Cpv, Dep, Slot, SlotDep, SlotOperator, UseDep, UseDepKind};
 use portage_metadata::Eapi;
 use portage_repo::EbuildEnv;
 use portage_vdb::Vdb;
@@ -139,13 +139,30 @@ pub(super) fn inject_libc_dep(
 
 /// `>=<cpv>` for each installed provider of `virtual/libc`, unless `cpv` is one
 fn libc_dep(vdb: &Vdb, cpv: &Cpv) -> Option<String> {
-    let virtual_libc = Dep::parse("virtual/libc").ok()?;
-    let rdepend = installed_matches(vdb, &virtual_libc)
-        .into_iter()
-        .max_by(|a, b| a.cpv().cmp(b.cpv()))?
-        .rdepend()
-        .ok()
-        .flatten()?;
+    let providers = libc_providers(vdb);
+    if providers.is_empty() || providers.iter().any(|p| p.cpn == cpv.cpn) {
+        return None;
+    }
+    let atoms: Vec<String> = providers.iter().map(|p| format!(">={p}")).collect();
+    Some(atoms.join(" "))
+}
+
+/// The packages providing the installed `virtual/libc`
+pub(crate) fn libc_cpns(vdb: &Vdb) -> Vec<Cpn> {
+    libc_providers(vdb).into_iter().map(|p| p.cpn).collect()
+}
+
+fn libc_providers(vdb: &Vdb) -> Vec<Cpv> {
+    let Some(rdepend) = Dep::parse("virtual/libc").ok().and_then(|virtual_libc| {
+        installed_matches(vdb, &virtual_libc)
+            .into_iter()
+            .max_by(|a, b| a.cpv().cmp(b.cpv()))?
+            .rdepend()
+            .ok()
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
     let mut providers = Vec::new();
     portage_atom::DepEntry::walk_atoms(&rdepend, &mut |dep| {
         if dep.blocker.is_none()
@@ -156,11 +173,55 @@ fn libc_dep(vdb: &Vdb, cpv: &Cpv) -> Option<String> {
             providers.push(p.cpv().clone());
         }
     });
-    if providers.is_empty() || providers.iter().any(|p| p.cpn == cpv.cpn) {
-        return None;
+    providers
+}
+
+/// Whether a binpkg's recorded dependency string still matches the ebuild's, as
+/// `--binpkg-changed-deps` compares them
+///
+/// Both are reduced with the binpkg's USE; `:=` bindings and top-level `libc` deps don't count.
+pub(crate) fn same_deps(
+    built: &str,
+    ebuild: &str,
+    use_flags: &HashSet<&str>,
+    libc: &[Cpn],
+) -> bool {
+    let compared = |raw: &str| {
+        let mut tokens = raw.split_whitespace().peekable();
+        let Some(nodes) = parse(&mut tokens, false).filter(|_| tokens.peek().is_none()) else {
+            return raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        };
+        let mut out = Vec::new();
+        reduce_into(
+            nodes,
+            use_flags,
+            &|t| unbound_atom(t, use_flags),
+            false,
+            &mut out,
+        );
+        out.retain(|node| match node {
+            Reduced::Token(t) => Dep::parse(t).map_or(true, |d| !libc.contains(&d.cpn)),
+            _ => true,
+        });
+        render(&out)
+    };
+    compared(built) == compared(ebuild)
+}
+
+/// `token` with its conditional USE deps evaluated and any `:slot=` binding cut to a bare `:=`
+fn unbound_atom(token: &str, use_flags: &HashSet<&str>) -> String {
+    let Ok(mut dep) = Dep::parse(token) else {
+        return token.to_owned();
+    };
+    evaluate_use_deps(&mut dep, use_flags);
+    if let Some(SlotDep::Slot {
+        op: Some(SlotOperator::Equal),
+        ..
+    }) = dep.slot_dep
+    {
+        dep.slot_dep = Some(SlotDep::Operator(SlotOperator::Equal));
     }
-    let atoms: Vec<String> = providers.iter().map(|p| format!(">={p}")).collect();
-    Some(atoms.join(" "))
+    dep.to_string()
 }
 
 fn installed_matches(vdb: &Vdb, dep: &Dep) -> Vec<portage_vdb::InstalledPackage> {
@@ -197,13 +258,7 @@ fn reduce_atom(token: &str, use_flags: &HashSet<&str>, vdbs: &[&Vdb]) -> String 
     if !conditional && !slot_equal {
         return token.to_owned();
     }
-    if let Some(use_deps) = dep.use_deps.take() {
-        let evaluated: Vec<UseDep> = use_deps
-            .into_iter()
-            .filter_map(|d| evaluate_use_dep(d, use_flags.contains(d.flag.as_str())))
-            .collect();
-        dep.use_deps = (!evaluated.is_empty()).then_some(evaluated);
-    }
+    evaluate_use_deps(&mut dep, use_flags);
     if slot_equal
         && let Some(slot) = vdbs.iter().find_map(|vdb| {
             installed_matches(vdb, &dep)
@@ -219,6 +274,16 @@ fn reduce_atom(token: &str, use_flags: &HashSet<&str>, vdbs: &[&Vdb]) -> String 
         });
     }
     dep.to_string()
+}
+
+fn evaluate_use_deps(dep: &mut Dep, use_flags: &HashSet<&str>) {
+    if let Some(use_deps) = dep.use_deps.take() {
+        let evaluated: Vec<UseDep> = use_deps
+            .into_iter()
+            .filter_map(|d| evaluate_use_dep(d, use_flags.contains(d.flag.as_str())))
+            .collect();
+        dep.use_deps = (!evaluated.is_empty()).then_some(evaluated);
+    }
 }
 
 /// PMS 8.3.4: a conditional USE dep becomes plain `[flag]`/`[-flag]` or drops out
@@ -457,5 +522,18 @@ mod tests {
             Some(">=sys-libs/glibc-2.43-r4")
         );
         assert_eq!(libc_dep(&vdb, &cpv("sys-libs/glibc-2.44")), None);
+    }
+
+    #[test]
+    fn changed_deps_ignore_slot_bindings_and_libc_but_not_new_atoms() {
+        let use_flags: HashSet<&str> = ["ssl"].into();
+        let libc = [Cpn::parse("sys-libs/glibc").unwrap()];
+        let same = |built: &str, ebuild: &str| same_deps(built, ebuild, &use_flags, &libc);
+        assert!(same(
+            "dev-libs/a:0/1= dev-libs/b[ssl] >=sys-libs/glibc-2.40",
+            "dev-libs/a:= ssl? ( dev-libs/b[ssl?] ) !ssl? ( dev-libs/c )",
+        ));
+        assert!(!same("dev-libs/a:0/1=", "dev-libs/a:= dev-libs/b"));
+        assert!(!same("dev-libs/a", "ssl? ( >=dev-libs/a-2 )"));
     }
 }

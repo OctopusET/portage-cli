@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+use portage_atom::interner::{DefaultInterner, Interned};
 use portage_repo::MakeConf;
 use portage_resolve::Roots;
 
@@ -96,25 +97,218 @@ pub(crate) async fn resolve_gpg_verify_home_for_roots(roots: &Roots) -> Utf8Path
         .join("etc/portage/gnupg")
 }
 
-/// Open the local `PKGDIR` binpkg index if `-k`/`--usepkg` or
-/// `-K`/`--usepkgonly` is active, for the `-p` display to check binary
-/// reuse against. `None` when neither flag is set — matching
-/// `run_merge_plan`'s `want_local` minus the remote (`-g`/`-G`) half: a
-/// binhost check here would add a network fetch to a plain preview. Silent
-/// on error (unlike `run_merge_plan`'s own open) — best-effort hint only.
-///
-/// Also single-index only, unlike the real merge path's per-entry host/target
-/// `dual_pkgdir` split (`run_merge_plan`): under `--target -k`, a `MergeRoot::Host`
-/// row may print `[ebuild ...]` here while the real merge reuses a host-PKGDIR
-/// binpkg — same display-only divergence class as the `-g`/`-G` one above.
-pub(crate) async fn open_local_index_for_preview(
-    globals: &Cli,
-    merge_flags: &crate::cli::MergeFlags,
-) -> Option<portage_binpkg::BinpkgIndex> {
-    if !(merge_flags.usepkg || merge_flags.usepkgonly) {
-        return None;
+/// How `-k`/`-K`/`-g`/`-G` judge a binpkg against the configuration and the current ebuild
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReusePolicy {
+    use_match: portage_binpkg::UseMatch,
+    /// Compare against the ebuild's `IUSE`, as portage does unless `--usepkgonly`
+    ebuild_iuse: bool,
+    /// `--binpkg-changed-deps`
+    changed_deps: bool,
+    /// Compare `DEPEND`/`BDEPEND` too, which portage does only under `--with-bdeps y`
+    build_deps: bool,
+}
+
+impl ReusePolicy {
+    /// The policy portage's `create_depgraph_params` derives from these options
+    pub(crate) fn new(flags: &crate::cli::MergeFlags, newuse: bool, changed_use: bool) -> Self {
+        use crate::cli::YesNo;
+        use portage_binpkg::UseMatch;
+        let binpkg_only = flags.usepkgonly || flags.getbinpkgonly;
+        let respect_use = flags
+            .binpkg_respect_use
+            .map_or(!binpkg_only, |v| v == YesNo::Y);
+        let use_match = if newuse || (respect_use && !changed_use) {
+            UseMatch::Iuse
+        } else if changed_use || respect_use {
+            UseMatch::Enabled
+        } else {
+            UseMatch::Any
+        };
+        Self {
+            use_match,
+            ebuild_iuse: !binpkg_only,
+            changed_deps: flags
+                .binpkg_changed_deps
+                .map_or(!binpkg_only, |v| v == YesNo::Y),
+            build_deps: flags.with_bdeps == Some(YesNo::Y),
+        }
     }
-    portage_binpkg::BinpkgIndex::open(resolve_pkgdir(globals).await.as_std_path()).ok()
+
+    /// Run `f` with the query a binpkg of an ebuild with `facts` must pass to stand in for
+    /// building it with `use_flags`, under `env` and its build-env `key`
+    ///
+    /// Without `facts` (no metadata) only the binpkg's own `IUSE` counts; `build_id` admits
+    /// only that build.
+    pub(crate) fn with_query<R>(
+        &self,
+        use_flags: &[Interned<DefaultInterner>],
+        facts: Option<&EbuildFacts>,
+        build_id: Option<u64>,
+        env: &DesiredBuildEnv,
+        key: &str,
+        f: impl FnOnce(&portage_binpkg::ReuseQuery) -> R,
+    ) -> R {
+        let accept = |entry: &portage_binpkg::BinpkgEntry| {
+            facts.is_none_or(|facts| {
+                !self.changed_deps || facts.same_deps(entry, self.build_deps, &env.libc)
+            })
+        };
+        let query = portage_binpkg::ReuseQuery {
+            use_flags: use_flags.iter().map(|f| f.as_str().to_owned()).collect(),
+            use_match: self.use_match,
+            iuse: facts.filter(|_| self.ebuild_iuse).map(|f| f.iuse.clone()),
+            forced: facts.map(|f| f.forced.clone()).unwrap_or_default(),
+            chost: &env.chost,
+            build_env_key: key,
+            build_id,
+            accept: Some(&accept),
+        };
+        f(&query)
+    }
+}
+
+/// What the current ebuild declares, to judge a binpkg built from an older one
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EbuildFacts {
+    /// `IUSE`, without `+`/`-` defaults
+    pub iuse: HashSet<String>,
+    /// The `use.force` and `use.mask` flags that apply to it
+    pub forced: HashSet<String>,
+    deps: [Vec<portage_atom::DepEntry>; 5],
+}
+
+impl EbuildFacts {
+    /// The facts of `cache`'s ebuild, given its forced and masked flags
+    pub(crate) fn new<'a>(
+        cache: &portage_metadata::CacheEntry,
+        forced: impl IntoIterator<Item = &'a Interned<DefaultInterner>>,
+    ) -> Self {
+        let m = &cache.metadata;
+        Self {
+            iuse: m.iuse.iter().map(|i| i.name().to_owned()).collect(),
+            forced: forced.into_iter().map(|f| f.as_str().to_owned()).collect(),
+            deps: [&m.rdepend, &m.pdepend, &m.idepend, &m.depend, &m.bdepend]
+                .map(|d| d.list().to_vec()),
+        }
+    }
+
+    /// Whether `entry` was built from the same dependencies, reduced with its own USE
+    fn same_deps(
+        &self,
+        entry: &portage_binpkg::BinpkgEntry,
+        build_deps: bool,
+        libc: &[portage_atom::Cpn],
+    ) -> bool {
+        let use_flags: HashSet<&str> = entry.use_set.iter().map(String::as_str).collect();
+        let d = &entry.deps;
+        let built = [&d.rdepend, &d.pdepend, &d.idepend, &d.depend, &d.bdepend];
+        let compared = if build_deps { 5 } else { 3 };
+        built
+            .iter()
+            .zip(&self.deps)
+            .take(compared)
+            .all(|(built, ebuild)| {
+                let ebuild: Vec<String> = ebuild.iter().map(ToString::to_string).collect();
+                crate::ebuild::build_info::same_deps(built, &ebuild.join(" "), &use_flags, libc)
+            })
+    }
+}
+
+/// What the `-p` display needs to mark the rows `-k`/`-K` would take from the local `PKGDIR`
+///
+/// Remote binhosts (`-g`/`-G`) are not checked: that would add a network fetch to a plain
+/// preview. Single-index, unlike the merge's per-entry host/target `PKGDIR` split.
+pub(crate) struct BinpkgPreview {
+    index: portage_binpkg::BinpkgIndex,
+    policy: ReusePolicy,
+    target: (DesiredBuildEnv, Vec<std::path::PathBuf>),
+    host: (DesiredBuildEnv, Vec<std::path::PathBuf>),
+}
+
+/// The build-env keys [`BinpkgPreview::reusable`] reads, per merge root and cpv
+pub(crate) type PreviewKeys = std::collections::HashMap<(bool, portage_atom::Cpv), String>;
+
+impl BinpkgPreview {
+    /// Open the local index if `-k`/`--usepkg` or `-K`/`--usepkgonly` is active; silent on error
+    pub(crate) async fn open(
+        globals: &Cli,
+        merge_flags: &crate::cli::MergeFlags,
+        policy: ReusePolicy,
+    ) -> Option<Self> {
+        if !(merge_flags.usepkg || merge_flags.usepkgonly) {
+            return None;
+        }
+        let pkgdir = resolve_pkgdir(globals).await;
+        let index = portage_binpkg::BinpkgIndex::open(pkgdir.as_std_path()).ok()?;
+        let env = async |roots: &Roots| {
+            (
+                DesiredBuildEnv::for_roots(roots).await,
+                DesiredBuildEnv::portage_dirs(roots),
+            )
+        };
+        Some(Self {
+            index,
+            policy,
+            target: env(&globals.roots()).await,
+            host: env(&globals.host_roots()).await,
+        })
+    }
+
+    /// The build-env keys of `pkgs`, given as (merges to the host, cpv)
+    pub(crate) async fn keys(
+        &self,
+        pkgs: impl IntoIterator<Item = (bool, portage_atom::Cpv)>,
+    ) -> PreviewKeys {
+        let mut keys = PreviewKeys::new();
+        for (host, cpv) in pkgs {
+            let (env, dirs) = if host { &self.host } else { &self.target };
+            let key = env.key_for(dirs, &cpv).await;
+            keys.insert((host, cpv), key);
+        }
+        keys
+    }
+
+    /// The local index
+    pub(crate) fn index(&self) -> &portage_binpkg::BinpkgIndex {
+        &self.index
+    }
+
+    /// A preview of `index` under `-k`'s policy, for an unconfigured host
+    #[cfg(test)]
+    pub(crate) fn for_test(index: portage_binpkg::BinpkgIndex) -> Self {
+        let flags = crate::cli::MergeFlags {
+            usepkg: true,
+            ..Default::default()
+        };
+        Self {
+            index,
+            policy: ReusePolicy::new(&flags, false, false),
+            target: (DesiredBuildEnv::default(), Vec::new()),
+            host: (DesiredBuildEnv::default(), Vec::new()),
+        }
+    }
+
+    /// The USE of the binpkg that would stand in for building `cpv` with `use_flags`, if any
+    ///
+    /// `build_id`, a build-id target's, admits only that build.
+    pub(crate) fn reusable(
+        &self,
+        keys: &PreviewKeys,
+        host: bool,
+        cpv: &portage_atom::Cpv,
+        build_id: Option<u64>,
+        use_flags: &[Interned<DefaultInterner>],
+        facts: Option<&EbuildFacts>,
+    ) -> Option<HashSet<String>> {
+        let env = if host { &self.host.0 } else { &self.target.0 };
+        let key = keys.get(&(host, cpv.clone())).map_or("", String::as_str);
+        self.policy
+            .with_query(use_flags, facts, build_id, env, key, |query| {
+                let (_, entry) = self.index.find_reusable_entry(&cpv.to_string(), query)?;
+                Some(entry.use_set.clone())
+            })
+    }
 }
 
 /// Read a variable from `make.conf` under the resolved config root
@@ -192,6 +386,8 @@ pub(crate) struct DesiredBuildEnv {
     pub ldflags: String,
     pub rustflags: String,
     pub chost: String,
+    /// The root's installed `virtual/libc` providers, which `--binpkg-changed-deps` ignores
+    pub libc: Vec<portage_atom::Cpn>,
     /// The full evaluated make.conf map this environment was derived from —
     /// kept so [`Self::key_for`] can seed a package.env overlay with it: an
     /// env file referencing e.g. `${COMMON_FLAGS}` needs the same baseline
@@ -220,6 +416,9 @@ impl DesiredBuildEnv {
             ldflags: get("LDFLAGS"),
             rustflags: get("RUSTFLAGS"),
             chost,
+            libc: portage_vdb::Vdb::open(roots.merge_root().join("var/db/pkg"))
+                .map(|vdb| crate::ebuild::build_info::libc_cpns(&vdb))
+                .unwrap_or_default(),
             make_conf_env,
         }
     }
@@ -1204,5 +1403,155 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "myhost");
         assert_eq!(result[0].sync_uri, "https://example.invalid/binhost");
+    }
+
+    const FOO_NLS: &str = "VERSION: 0\n\nCPV: app-test/foo-1.0\nIUSE: nls\n\
+        PATH: app-test/foo-1.0-1.gpkg.tar\nUSE: nls\nRDEPEND: dev-libs/a:0/1=\n";
+
+    fn policy(args: &[&str]) -> ReusePolicy {
+        let cli = crate::cli::parse_cli(&[&["em", "emerge"], args, &["app-test/foo"]].concat());
+        let f = cli.depgraph_flags();
+        ReusePolicy::new(&cli.merge_flags(), f.newuse, f.changed_use)
+    }
+
+    fn facts(iuse: &[&str], rdepend: &str) -> EbuildFacts {
+        EbuildFacts {
+            iuse: iuse.iter().map(|f| f.to_string()).collect(),
+            forced: HashSet::new(),
+            deps: [
+                portage_atom::DepEntry::parse(rdepend).unwrap(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ],
+        }
+    }
+
+    fn reused(policy: ReusePolicy, use_flags: &[&str], facts: Option<&EbuildFacts>) -> bool {
+        let idx = portage_binpkg::RemoteBinpkgIndex::new(FOO_NLS, "https://binhost.example");
+        let flags: Vec<Interned<DefaultInterner>> =
+            use_flags.iter().map(|f| Interned::intern(f)).collect();
+        let env = DesiredBuildEnv::default();
+        policy.with_query(&flags, facts, None, &env, "", |query| {
+            idx.find_reusable("app-test/foo-1.0", query).is_some()
+        })
+    }
+
+    #[test]
+    fn usepkgonly_takes_a_binpkg_as_built_unless_use_is_respected() {
+        assert!(!reused(policy(&["-k"]), &[], None));
+        assert!(reused(
+            policy(&["-k", "--binpkg-respect-use", "n"]),
+            &[],
+            None
+        ));
+        assert!(reused(policy(&["-K"]), &[], None));
+        assert!(reused(policy(&["-G"]), &[], None));
+        assert!(!reused(
+            policy(&["-K", "--binpkg-respect-use=y"]),
+            &[],
+            None
+        ));
+        assert!(!reused(policy(&["-K", "-N"]), &[], None));
+        assert!(!reused(policy(&["-K", "--changed-use"]), &[], None));
+    }
+
+    #[test]
+    fn an_ebuild_iuse_change_rejects_a_binpkg_except_under_usepkgonly() {
+        let ssl_added = facts(&["nls", "ssl"], "dev-libs/a:=");
+        assert!(reused(
+            policy(&["-k"]),
+            &["nls"],
+            Some(&facts(&["nls"], "dev-libs/a:="))
+        ));
+        assert!(!reused(policy(&["-k"]), &["nls"], Some(&ssl_added)));
+        assert!(reused(
+            policy(&["-k", "--changed-use"]),
+            &["nls"],
+            Some(&ssl_added)
+        ));
+        assert!(reused(policy(&["-K", "-N"]), &["nls"], Some(&ssl_added)));
+    }
+
+    #[test]
+    fn a_binpkg_with_changed_runtime_deps_is_rejected() {
+        let added = facts(&["nls"], "dev-libs/a:= dev-libs/b");
+        assert!(!reused(policy(&["-k"]), &["nls"], Some(&added)));
+        assert!(reused(
+            policy(&["-k", "--binpkg-changed-deps=n"]),
+            &["nls"],
+            Some(&added)
+        ));
+        assert!(reused(policy(&["-K"]), &["nls"], Some(&added)));
+    }
+
+    #[test]
+    fn the_preview_applies_the_chost_and_build_env_key_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Packages"),
+            "VERSION: 0\n\nCPV: app-test/foo-1.0\nCHOST: x86_64-pc-linux-gnu\n\
+             CFLAGS: -march=x86-64-v3\nPATH: app-test/foo-1.0-1.gpkg.tar\n",
+        )
+        .unwrap();
+        let key = portage_binpkg::build_env_key("-march=x86-64-v3", "", "", "");
+        let cpv = portage_atom::Cpv::parse("app-test/foo-1.0").unwrap();
+        let keys: PreviewKeys = [((false, cpv.clone()), key)].into();
+        let preview = |chost: &str| BinpkgPreview {
+            index: portage_binpkg::BinpkgIndex::open(dir.path()).unwrap(),
+            policy: policy(&["-k"]),
+            target: (DesiredBuildEnv::for_test(chost), Vec::new()),
+            host: (DesiredBuildEnv::default(), Vec::new()),
+        };
+        let x86 = preview("x86_64-pc-linux-gnu");
+        assert!(x86.reusable(&keys, false, &cpv, None, &[], None).is_some());
+        assert!(
+            x86.reusable(&PreviewKeys::new(), false, &cpv, None, &[], None)
+                .is_none()
+        );
+        let aarch64 = preview("aarch64-unknown-linux-gnu");
+        assert!(
+            aarch64
+                .reusable(&keys, false, &cpv, None, &[], None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_preview_marks_only_the_pinned_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = |id: u32, use_: &str| {
+            format!(
+                "CPV: app-misc/bar-1\nPATH: app-misc/bar/bar-1-{id}.gpkg.tar\nBUILD_ID: {id}\n\
+                 IUSE: foo\nUSE: {use_}\n"
+            )
+        };
+        let text = format!("VERSION: 0\n\n{}\n{}", entry(1, ""), entry(3, "foo"));
+        std::fs::write(dir.path().join("Packages"), text).unwrap();
+        let preview = BinpkgPreview {
+            index: portage_binpkg::BinpkgIndex::open(dir.path()).unwrap(),
+            policy: policy(&["-k"]),
+            target: (DesiredBuildEnv::default(), Vec::new()),
+            host: (DesiredBuildEnv::default(), Vec::new()),
+        };
+        let cpv = portage_atom::Cpv::parse("app-misc/bar-1").unwrap();
+        let keys = PreviewKeys::new();
+        let foo = [Interned::intern("foo")];
+        assert!(
+            preview
+                .reusable(&keys, false, &cpv, None, &[], None)
+                .is_some()
+        );
+        assert!(
+            preview
+                .reusable(&keys, false, &cpv, Some(3), &[], None)
+                .is_none()
+        );
+        assert!(
+            preview
+                .reusable(&keys, false, &cpv, Some(3), &foo, None)
+                .is_some()
+        );
     }
 }

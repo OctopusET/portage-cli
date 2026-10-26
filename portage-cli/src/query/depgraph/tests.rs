@@ -45,7 +45,7 @@ struct Solve<'a> {
     complete_graph: bool,
     exclude: &'a [String],
     resume: HashSet<(MergeRoot, String)>,
-    binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
+    binpkg_preview: Option<&'a crate::binpkg::BinpkgPreview>,
 }
 
 impl<'a> Solve<'a> {
@@ -64,7 +64,7 @@ impl<'a> Solve<'a> {
             complete_graph: false,
             exclude: &[],
             resume: HashSet::new(),
-            binpkg_index: None,
+            binpkg_preview: None,
         }
     }
 }
@@ -218,7 +218,7 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         extra_use_override: None,
         extra_package_use: extra,
         pending_config: None,
-        binpkg_index: opts.binpkg_index,
+        binpkg_preview: opts.binpkg_preview,
         exclude: opts.exclude,
         resume_completed: opts.resume,
         complete_graph: opts.complete_graph,
@@ -595,7 +595,7 @@ fn a_missing_explicit_atom_is_fatal() {
             extra_use_override: None,
             extra_package_use: extra,
             pending_config: None,
-            binpkg_index: None,
+            binpkg_preview: None,
             exclude: &[],
             resume_completed: HashSet::new(),
             complete_graph: false,
@@ -1192,12 +1192,12 @@ fn bar_binpkgs(dir: &tempfile::TempDir) -> portage_binpkg::BinpkgIndex {
 fn a_build_id_target_pins_its_binary_package() {
     let fix = fixture(&pair(), &[]);
     let pkgdir = tempfile::tempdir().unwrap();
-    let index = bar_binpkgs(&pkgdir);
+    let preview = crate::binpkg::BinpkgPreview::for_test(bar_binpkgs(&pkgdir));
     let atoms = [TargetAtom::explicit("=app-misc/bar-1-3")];
     let outcome = solve(
         &fix,
         Solve {
-            binpkg_index: Some(&index),
+            binpkg_preview: Some(&preview),
             ..Solve::new(&atoms)
         },
     );

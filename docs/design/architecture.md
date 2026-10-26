@@ -773,6 +773,11 @@ revision of its newest indexed build, since em keeps no sync history to check it
 `PROFILE` is relative to the nearest `profiles` directory, also for an overlay's profile.
 Entries keep the `CFLAGS` family and `BUILD_ENV_KEY` for em's reuse check.
 
+**Binpkg reuse.** em picks a binpkg after the solve, by portage's `--binpkg-respect-use` and
+`--binpkg-changed-deps` rules, so the plan always resolves the ebuild's dependencies with the
+configured USE. Under `-K`, where a binpkg is installed and shown with its own USE, portage
+resolves that binpkg's dependencies instead. Rejected binpkgs get no "ignored binary packages" notice.
+
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
 condensation + lexicographic Kahn) and the `:slot` suffix on autounmask

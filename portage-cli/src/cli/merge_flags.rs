@@ -96,6 +96,19 @@ pub struct MergeFlags {
     #[arg(short = 'G', long)]
     pub getbinpkgonly: bool,
 
+    /// Ignore binary packages whose USE does not match the current configuration
+    ///
+    /// On unless `-K`/`--usepkgonly` or `-G`/`--getbinpkgonly` is given.
+    #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
+    pub binpkg_respect_use: Option<YesNo>,
+
+    /// Ignore binary packages built against dependencies the ebuild has since changed
+    ///
+    /// On unless `-K`/`--usepkgonly` or `-G`/`--getbinpkgonly` is given. `DEPEND` and `BDEPEND`
+    /// count only with `--with-bdeps y`.
+    #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
+    pub binpkg_changed_deps: Option<YesNo>,
+
     /// Treat every atom as not-yet-installed, rebuilding the whole dependency
     /// tree from scratch rather than only what is missing or outdated.
     #[arg(short = 'e', long)]
@@ -256,9 +269,14 @@ fn saved_switch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<YesNo>,
 }
 
 /// Long options whose `y`/`n` value may also be the next word, as in emerge's `--buildpkg n`
-const DETACHED_YES_NO: [&str; 2] = ["--buildpkg", "--getbinpkg"];
+const DETACHED_YES_NO: [&str; 4] = [
+    "--buildpkg",
+    "--getbinpkg",
+    "--binpkg-respect-use",
+    "--binpkg-changed-deps",
+];
 
-/// `args` with a detached `y` or `n` after `--buildpkg` or `--getbinpkg` attached to it
+/// `args` with a detached `y` or `n` after one of [`DETACHED_YES_NO`] attached to it
 ///
 /// Any other next word is left alone, so a bare `--buildpkg` can still precede an atom.
 pub fn attach_yes_no_values(args: Vec<OsString>) -> Vec<OsString> {

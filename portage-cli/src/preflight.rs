@@ -202,6 +202,7 @@ mod tests {
             interactive: false,
             build_id: None,
             pretend: false,
+            facts: None,
         })
     }
 

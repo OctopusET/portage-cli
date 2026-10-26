@@ -75,6 +75,8 @@ pub struct PlannedMerge {
     pub build_id: Option<u64>,
     /// EAPI 4+ and `DEFINED_PHASES` lists `pretend`: runs before the first build of the merge list
     pub pretend: bool,
+    /// The ebuild's IUSE, forced flags and deps a binpkg is judged by; `None` without metadata
+    pub facts: Option<crate::binpkg::EbuildFacts>,
 }
 
 #[derive(Default)]
@@ -332,9 +334,9 @@ pub struct DepgraphOpts<'a> {
     /// Config pending `--init-target`'s writes, read in place of the files — see
     /// [`portage_resolve::use_env::PendingConfig`]. `None` for every ordinary resolve.
     pub pending_config: Option<&'a use_env::PendingConfig>,
-    /// See `output::PrettyCtx::binpkg_index`'s doc — passed straight through
+    /// See `output::PrettyCtx::binpkg_preview`'s doc — passed straight through
     /// to the `Pretty` printer so `-p` can show `[binary ...]`.
-    pub binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
+    pub binpkg_preview: Option<&'a crate::binpkg::BinpkgPreview>,
     /// `-X`/`--exclude`: package atoms to never install (emerge's own
     /// wording — "won't install any ebuild or binary package that matches
     /// any of the given atoms"). The solver steers `||` choices away from an
@@ -381,7 +383,17 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     let mut metrics = ResolveMetrics::default();
     let prepared = prepare::prepare(opts, &mut metrics).await?;
     let resolved = resolve(&prepared, &mut metrics)?;
-    assemble::assemble(prepared, resolved, &metrics)
+    let binpkg_keys = match prepared.binpkg_preview {
+        Some(preview) => {
+            let pkgs = resolved.outcome.order.iter().map(|(pkg, ver)| {
+                let host = pkg.merge_root() == MergeRoot::Host;
+                (host, Cpv::new(*pkg.cpn(), ver.clone()))
+            });
+            preview.keys(pkgs).await
+        }
+        None => Default::default(),
+    };
+    assemble::assemble(prepared, resolved, &metrics, &binpkg_keys)
 }
 
 /// Solve the classified roots, then repair retained-owner conflicts when

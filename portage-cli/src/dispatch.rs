@@ -587,7 +587,13 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             // overlay-aware under `--target` substitution, unlike `roots`.
             let host_roots = globals.host_roots();
             let merge_flags = cli::MergeFlags::default();
-            let binpkg_index = binpkg::open_local_index_for_preview(globals, &merge_flags).await;
+            let reuse_policy = binpkg::ReusePolicy::new(
+                &merge_flags,
+                depgraph_flags.newuse,
+                depgraph_flags.changed_use,
+            );
+            let binpkg_preview =
+                binpkg::BinpkgPreview::open(globals, &merge_flags, reuse_policy).await;
             let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
                 set,
                 atoms: &atoms,
@@ -623,7 +629,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 extra_use_override: None,
                 extra_package_use: &[],
                 pending_config: None,
-                binpkg_index: binpkg_index.as_ref(),
+                binpkg_preview: binpkg_preview.as_ref(),
                 exclude: &merge_flags.exclude,
                 resume_completed: std::collections::HashSet::new(),
                 complete_graph: false,

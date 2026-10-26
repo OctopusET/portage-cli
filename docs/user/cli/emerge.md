@@ -65,6 +65,16 @@ How the solver and build scheduler behave.
   * `n`: No
 * `-g` — Same as `--getbinpkg`
 * `-G, --getbinpkgonly` — Only fetch binary packages, do not install
+* `--binpkg-respect-use[=<y|n>]` — Ignore binary packages whose USE does not match the current configuration
+
+  On unless `-K`/`--usepkgonly` or `-G`/`--getbinpkgonly` is given.
+  * `y`: Yes
+  * `n`: No
+* `--binpkg-changed-deps[=<y|n>]` — Ignore binary packages built against dependencies the ebuild has since changed
+
+  On unless `-K`/`--usepkgonly` or `-G`/`--getbinpkgonly` is given. `DEPEND` and `BDEPEND` count only with `--with-bdeps y`.
+  * `y`: Yes
+  * `n`: No
 * `-e, --emptytree` — Treat every atom as not-yet-installed, rebuilding the whole dependency tree from scratch rather than only what is missing or outdated.
 * `-t, --tree` — Show the dependency tree, indenting each package under the one that pulled it in, before merging.
 * `--json` — Emit the depgraph as machine-parsable JSON instead of pretend text

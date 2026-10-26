@@ -420,6 +420,8 @@ pub fn merge_resume_flags(saved: &MergeFlags, cli: &MergeFlags) -> MergeFlags {
         buildpkg_short: false,
         getbinpkg_short: false,
         getbinpkgonly: saved.getbinpkgonly || cli.getbinpkgonly,
+        binpkg_respect_use: cli.binpkg_respect_use.or(saved.binpkg_respect_use),
+        binpkg_changed_deps: cli.binpkg_changed_deps.or(saved.binpkg_changed_deps),
         emptytree: saved.emptytree || cli.emptytree,
         onlydeps: saved.onlydeps || cli.onlydeps,
         noreplace: saved.noreplace || cli.noreplace,

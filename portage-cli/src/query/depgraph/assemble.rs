@@ -19,6 +19,7 @@ pub(super) fn assemble(
     prepared: Prepared<'_>,
     resolved: Resolved,
     metrics: &ResolveMetrics,
+    binpkg_keys: &crate::binpkg::PreviewKeys,
 ) -> anyhow::Result<DepgraphOutcome> {
     let Resolved {
         outcome,
@@ -38,7 +39,7 @@ pub(super) fn assemble(
         autounmask_persist,
         ask,
         roots,
-        binpkg_index,
+        binpkg_preview,
         quiet,
         cross,
         config_root,
@@ -247,8 +248,8 @@ pub(super) fn assemble(
         ceded: &ceded,
         force_mask: &force_mask,
         accept_keywords: &accept_keywords,
-        binpkg_index,
         build_ids: &build_ids,
+        binpkg_preview: binpkg_preview.map(|p| (p, binpkg_keys)),
         resolve_secs,
         selected: &selected,
         requested: &root_cpns,
@@ -487,7 +488,7 @@ pub(super) fn assemble(
                         .defined_phases
                         .contains(&portage_metadata::Phase::PkgPretend)
             });
-            let (depend, bdepend, mut flags) = if let Some(cache) = cache {
+            let (depend, bdepend, mut flags, facts) = if let Some(cache) = cache {
                 let repo = repo::repo_name_of(&data, &cpv);
                 let stable = accept_keywords.is_stable(
                     &cache.metadata.keywords,
@@ -504,10 +505,17 @@ pub(super) fn assemble(
                     stable,
                     &ceded,
                 );
+                let iuse = effective_use::iuse_set(cache, &force_mask.iuse_injection);
+                let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
+                let (forced, masked) = force_mask.effective(&cpv, slot_key.as_ref(), stable, &iuse);
                 (
                     cache.metadata.depend.list().to_vec(),
                     cache.metadata.bdepend.list().to_vec(),
                     effective.enabled_flags(),
+                    Some(crate::binpkg::EbuildFacts::new(
+                        cache,
+                        forced.iter().chain(&masked),
+                    )),
                 )
             } else {
                 let mut effective = portage_atom_pubgrub::resolve_effective_use(
@@ -534,7 +542,7 @@ pub(super) fn assemble(
                     &empty_iuse,
                 );
                 effective_use::apply_ceded(&mut effective, *cpn, &ceded);
-                (Vec::new(), Vec::new(), effective.enabled_flags())
+                (Vec::new(), Vec::new(), effective.enabled_flags(), None)
             };
             flags.sort();
             flags.dedup();
@@ -572,6 +580,7 @@ pub(super) fn assemble(
                 interactive,
                 build_id: build_ids.get(&cpv).copied(),
                 pretend,
+                facts,
             }
         })
         .collect();

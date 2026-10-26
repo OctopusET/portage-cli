@@ -139,48 +139,40 @@ fn find_binpkg_reuse(
     planned: &query::depgraph::PlannedMerge,
     binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
     remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
-    desired_chost: &str,
+    policy: &binpkg::ReusePolicy,
+    desired_env: &binpkg::DesiredBuildEnv,
     desired_build_env_key: &str,
 ) -> BinpkgReuse {
-    let desired_use: Vec<String> = planned
-        .use_flags
-        .iter()
-        .map(|f| f.as_str().to_string())
-        .collect();
-    let local = binpkg_index.and_then(|idx| {
-        idx.find_reusable_entry(
-            &planned.cpv.to_string(),
-            planned.build_id,
-            &desired_use,
-            desired_chost,
-            desired_build_env_key,
-        )
-    });
-    let local_pretend = local.as_ref().is_some_and(|(_, entry)| entry.pretend);
-    let local = local.map(|(path, _)| path);
-    let remote = if local.is_none() {
-        remote_indices.iter().find_map(|idx| {
-            idx.find_reusable(
-                &planned.cpv.to_string(),
-                planned.build_id,
-                &desired_use,
-                desired_chost,
-                desired_build_env_key,
-            )
-            .map(|(url, entry)| RemoteBinpkg {
-                url,
-                verify_signature: idx.verify_signature(),
-                entry: entry.clone(),
-            })
-        })
-    } else {
-        None
-    };
-    BinpkgReuse {
-        local,
-        local_pretend,
-        remote,
-    }
+    let cpv = planned.cpv.to_string();
+    policy.with_query(
+        &planned.use_flags,
+        planned.facts.as_ref(),
+        planned.build_id,
+        desired_env,
+        desired_build_env_key,
+        |query| {
+            let local = binpkg_index.and_then(|idx| idx.find_reusable_entry(&cpv, query));
+            let local_pretend = local.as_ref().is_some_and(|(_, entry)| entry.pretend);
+            let local = local.map(|(path, _)| path);
+            let remote = if local.is_none() {
+                remote_indices.iter().find_map(|idx| {
+                    idx.find_reusable(&cpv, query)
+                        .map(|(url, entry)| RemoteBinpkg {
+                            url,
+                            verify_signature: idx.verify_signature(),
+                            entry: entry.clone(),
+                        })
+                })
+            } else {
+                None
+            };
+            BinpkgReuse {
+                local,
+                local_pretend,
+                remote,
+            }
+        },
+    )
 }
 
 fn emit_pkg_start(
@@ -284,6 +276,7 @@ struct MergeRun<'a> {
     binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
     host_binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
     remote_indices: &'a [portage_binpkg::RemoteBinpkgIndex],
+    reuse_policy: binpkg::ReusePolicy,
     enforce_no_source: bool,
     target_env: &'a binpkg::DesiredBuildEnv,
     target_dirs: &'a [std::path::PathBuf],
@@ -379,7 +372,8 @@ impl MergeRun<'_> {
             planned,
             entry_binpkg_index(planned, self.binpkg_index, self.host_binpkg_index),
             self.remote_indices,
-            &desired_env.chost,
+            &self.reuse_policy,
+            desired_env,
             &desired_build_env_key,
         )
     }
@@ -836,6 +830,10 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         binpkg_index: binpkg_index.as_ref(),
         host_binpkg_index,
         remote_indices: &remote_indices,
+        reuse_policy: {
+            let f = globals.depgraph_flags();
+            binpkg::ReusePolicy::new(merge_flags, f.newuse, f.changed_use)
+        },
         enforce_no_source,
         target_env: &target_env,
         target_dirs: &target_dirs,
@@ -1807,6 +1805,7 @@ mod entry_roots_tests {
             interactive: false,
             build_id: None,
             pretend: false,
+            facts: None,
         })
     }
 
@@ -1907,7 +1906,10 @@ mod entry_roots_tests {
         let picked = entry_binpkg_index(&host_entry, Some(&target_idx), Some(&host_idx)).unwrap();
         assert_eq!(
             picked
-                .find_reusable("dev-python/jinja2-3.1.6", None, &[], "", "")
+                .find_reusable(
+                    "dev-python/jinja2-3.1.6",
+                    &portage_binpkg::ReuseQuery::new::<String>([])
+                )
                 .unwrap(),
             host_dir.path().join("dev-python/jinja2-3.1.6-1.gpkg.tar")
         );
@@ -1915,7 +1917,10 @@ mod entry_roots_tests {
         let picked = entry_binpkg_index(&target_entry, Some(&target_idx), Some(&host_idx)).unwrap();
         assert_eq!(
             picked
-                .find_reusable("dev-python/jinja2-3.1.6", None, &[], "", "")
+                .find_reusable(
+                    "dev-python/jinja2-3.1.6",
+                    &portage_binpkg::ReuseQuery::new::<String>([])
+                )
                 .unwrap(),
             target_dir.path().join("dev-python/jinja2-3.1.6-1.gpkg.tar")
         );
@@ -1936,6 +1941,19 @@ mod entry_roots_tests {
         Ok(())
     }
 
+    /// The reuse `p` gets from `local` alone under the default policy
+    fn local_reuse(p: &PlannedMerge, local: Option<&portage_binpkg::BinpkgIndex>) -> BinpkgReuse {
+        let policy = binpkg::ReusePolicy::new(&cli::MergeFlags::default(), false, false);
+        find_binpkg_reuse(
+            p,
+            local,
+            &[],
+            &policy,
+            &binpkg::DesiredBuildEnv::default(),
+            "",
+        )
+    }
+
     #[test]
     fn a_pinned_build_missing_from_the_index_refuses_a_source_build() -> Result<()> {
         let dir = tempfile::tempdir().unwrap();
@@ -1944,11 +1962,7 @@ mod entry_roots_tests {
         let mut p = planned(MergeRoot::Target)?;
         assert!(source_build_allowed(false, &p));
         p.build_id = Some(7);
-        assert!(
-            find_binpkg_reuse(&p, Some(&local), &[], "", "")
-                .local
-                .is_none()
-        );
+        assert!(local_reuse(&p, Some(&local)).local.is_none());
         assert!(!source_build_allowed(false, &p));
         Ok(())
     }
@@ -2021,7 +2035,15 @@ mod entry_roots_tests {
             buildpkg_exclude: Vec::new(),
         };
 
-        let reuse = find_binpkg_reuse(&p, Some(&local), &[remote], "", "");
+        let policy = binpkg::ReusePolicy::new(&cli::MergeFlags::default(), false, false);
+        let reuse = find_binpkg_reuse(
+            &p,
+            Some(&local),
+            &[remote],
+            &policy,
+            &binpkg::DesiredBuildEnv::default(),
+            "",
+        );
         assert!(reuse.local.is_some());
         assert!(reuse.remote.is_none(), "local reuse must retain precedence");
         assert_eq!(reuse.kind(&flags), crate::activity::PkgKind::Binpkg);
@@ -2047,14 +2069,14 @@ mod entry_roots_tests {
         )?;
         let local = portage_binpkg::BinpkgIndex::open(dir.path()).unwrap();
         let p = planned(MergeRoot::Target)?;
-        assert!(find_binpkg_reuse(&p, Some(&local), &[], "", "").needs_pretend(&p));
+        assert!(local_reuse(&p, Some(&local)).needs_pretend(&p));
 
         let source = PlannedMerge { pretend: true, ..p };
-        assert!(find_binpkg_reuse(&source, None, &[], "", "").needs_pretend(&source));
+        assert!(local_reuse(&source, None).needs_pretend(&source));
         let empty = tempfile::tempdir().unwrap();
         seed_index(empty.path());
         let local = portage_binpkg::BinpkgIndex::open(empty.path()).unwrap();
-        assert!(!find_binpkg_reuse(&source, Some(&local), &[], "", "").needs_pretend(&source));
+        assert!(!local_reuse(&source, Some(&local)).needs_pretend(&source));
         Ok(())
     }
 
@@ -2093,6 +2115,7 @@ mod entry_roots_tests {
         let index = portage_binpkg::BinpkgIndex::open(index_dir.path())?;
         let p = planned(MergeRoot::Target)?;
         let env_key = env.key();
+        let policy = binpkg::ReusePolicy::new(&cli::MergeFlags::default(), false, false);
 
         let mut key_samples = Vec::new();
         let mut lookup_samples = Vec::new();
@@ -2112,7 +2135,8 @@ mod entry_roots_tests {
                     &p,
                     Some(&index),
                     &[],
-                    &env.chost,
+                    &policy,
+                    &env,
                     &env_key,
                 ));
             }
@@ -2124,14 +2148,16 @@ mod entry_roots_tests {
                     &p,
                     Some(&index),
                     &[],
-                    &env.chost,
+                    &policy,
+                    &env,
                     &env_key,
                 ));
                 black_box(find_binpkg_reuse(
                     &p,
                     Some(&index),
                     &[],
-                    &env.chost,
+                    &policy,
+                    &env,
                     &env_key,
                 ));
             }
@@ -2186,6 +2212,7 @@ mod unmerge_scheduling_tests {
             interactive: false,
             build_id: None,
             pretend: false,
+            facts: None,
         }
     }
 
@@ -2342,6 +2369,8 @@ mod pretend_tests {
             interactive: false,
             build_id: None,
             pretend: defines_pretend,
+            slot: None,
+            facts: None,
         }
     }
 
@@ -2380,10 +2409,12 @@ mod pretend_tests {
             quiet: true,
             merge_flags: &merge_flags,
             ignore_blockers: false,
+            buildpkg_exclude: &[],
             extra_path: &[],
             binpkg_index: None,
             host_binpkg_index: None,
             remote_indices: &[],
+            reuse_policy: binpkg::ReusePolicy::new(&merge_flags, false, false),
             enforce_no_source: false,
             target_env: &env,
             target_dirs: &[],

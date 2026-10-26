@@ -41,7 +41,7 @@ pub(super) struct Prepared<'a> {
     pub(super) deep: bool,
     pub(super) update: bool,
     pub(super) nodeps: bool,
-    pub(super) binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
+    pub(super) binpkg_preview: Option<&'a crate::binpkg::BinpkgPreview>,
     pub(super) resume_completed: std::collections::HashSet<(MergeRoot, String)>,
     pub(super) complete_graph: bool,
     pub(super) quiet: bool,
@@ -120,7 +120,7 @@ pub(super) async fn prepare<'a>(
         extra_use_override,
         extra_package_use,
         pending_config,
-        binpkg_index,
+        binpkg_preview,
         exclude,
         resume_completed,
         complete_graph,
@@ -337,7 +337,10 @@ pub(super) async fn prepare<'a>(
         selective,
         set.is_multi(),
     )?;
-    let build_ids = target_build_ids(atoms, binpkg_index)?;
+    let build_ids = target_build_ids(
+        atoms,
+        binpkg_preview.map(crate::binpkg::BinpkgPreview::index),
+    )?;
 
     // The whole-repository slot map (unslotted-dep resolution against
     // multi-slot packages) computed once, up front, and reused by every
@@ -503,7 +506,7 @@ pub(super) async fn prepare<'a>(
         deep,
         update,
         nodeps,
-        binpkg_index,
+        binpkg_preview,
         resume_completed,
         complete_graph,
         quiet,

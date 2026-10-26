@@ -13,7 +13,8 @@ A candidate binpkg is reusable for a given plan entry iff all of these match:
 | Axis | Rule | Empty / missing |
 |------|------|------------------|
 | **CPV** | exact | required |
-| **USE ∩ IUSE** | equal (Portage bug #453400) | — |
+| **USE ∩ IUSE** | equal (Portage bug #453400); the ebuild's IUSE must also equal the binpkg's, apart from forced and masked flags (`--binpkg-respect-use`) | `-K`/`-G` take the binpkg as built unless `--binpkg-respect-use=y`, `-N` or `-U` |
+| **Dependencies** | `RDEPEND`/`PDEPEND`/`IDEPEND` (and `DEPEND`/`BDEPEND` with `--with-bdeps y`) reduced with the binpkg's USE equal the ebuild's, `:=` bindings and libc aside (`--binpkg-changed-deps`) | off under `-K`/`-G` unless `--binpkg-changed-deps=y` |
 | **CHOST** | equal | either side empty → skip the gate |
 | **Build-env key** | equal | **asymmetric**: an unkeyed binpkg (no recorded flags — old GPKG, backward compat) always matches; an unkeyed *desired* build never matches a binpkg that *is* keyed |
 

@@ -603,7 +603,8 @@ async fn emerge_atoms_inner(
             let f = cli.depgraph_flags();
             (f.deep, f.newuse, f.changed_use)
         });
-    let binpkg_index = binpkg::open_local_index_for_preview(cli, merge_flags).await;
+    let reuse_policy = binpkg::ReusePolicy::new(merge_flags, depgraph_flags.1, depgraph_flags.2);
+    let binpkg_preview = binpkg::BinpkgPreview::open(cli, merge_flags, reuse_policy).await;
     // Cross-alias targets (`cross-<tuple>/pkg`) only exist under crossdev
     // management, so they opt this resolve into widened candidate supply —
     // the same rescue `em crossdev` gets, available to a manual merge of a
@@ -650,7 +651,7 @@ async fn emerge_atoms_inner(
         extra_use_override,
         extra_package_use,
         pending_config,
-        binpkg_index: binpkg_index.as_ref(),
+        binpkg_preview: binpkg_preview.as_ref(),
         exclude: &merge_flags.exclude,
         // On `-r`, drop packages already finished in a prior attempt so the
         // `-p` preview and the merge plan agree (critical under `--emptytree`,

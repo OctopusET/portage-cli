@@ -1051,7 +1051,7 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
         extra_use_override: None,
         extra_package_use: &[],
         pending_config: None,
-        binpkg_index: None,
+        binpkg_preview: None,
         exclude: &[],
         resume_completed: std::collections::HashSet::new(),
         // Single-atom --nodeps probe: no update, so the gate is off regardless.

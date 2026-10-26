@@ -1,14 +1,9 @@
 //! The binhost `Packages` index format: parsing, and the local/remote
 //! reuse-matching readers `em`'s `-k`/`--usepkg`/`-g`/`--getbinpkg` build on.
 //!
-//! A binpkg is reusable only when it would produce the same result as a
-//! fresh build — portage's rule: the binpkg's recorded `USE`, restricted to
-//! the package's own `IUSE`, must equal the desired `USE` (similarly
-//! restricted), and the slot/subslot must match. Version matches by `cpv`
-//! lookup. This is the `_match_use`-style check portage applies to built
-//! packages (`use = USE ∩ IUSE`), so a stale-USE binpkg is correctly
-//! rejected and rebuilt — matching `emerge -k`
-//! (<https://github.com/gentoo/portage/blob/ac461a29/lib/portage/dbapi/__init__.py>).
+//! A binpkg stands in for a source build when it passes a [`ReuseQuery`]: portage's
+//! `--binpkg-respect-use` USE and IUSE test, the CHOST and build-env key, and any
+//! caller gate such as `--binpkg-changed-deps`. Version and slot match by `cpv` lookup.
 //
 // See bug #453400.
 
@@ -21,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::scan::{ContainerFacts, find_gpkg_containers};
 
 /// One `Packages` index entry, parsed into the fields the reuse check needs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BinpkgEntry {
     /// Path relative to `PKGDIR` (e.g. `app-test/foo-1.0-1.gpkg.tar`)
     pub path: String,
@@ -62,6 +57,114 @@ pub struct BinpkgEntry {
     pub sha1: String,
     /// The recorded `EAPI` (4+) and `DEFINED_PHASES` say the package's `pkg_pretend` runs
     pub pretend: bool,
+    /// Recorded `*DEPEND`, as built
+    pub deps: BinpkgDeps,
+}
+
+/// A binpkg's recorded dependency fields, USE conditionals already evaluated (empty if absent)
+#[derive(Debug, Clone, Default)]
+pub struct BinpkgDeps {
+    /// `DEPEND`
+    pub depend: String,
+    /// `BDEPEND`
+    pub bdepend: String,
+    /// `RDEPEND`
+    pub rdepend: String,
+    /// `PDEPEND`
+    pub pdepend: String,
+    /// `IDEPEND`
+    pub idepend: String,
+}
+
+impl BinpkgDeps {
+    fn from_fields(get: impl Fn(&str) -> Option<String>) -> Self {
+        let get = |key: &str| get(key).unwrap_or_default();
+        Self {
+            depend: get("DEPEND"),
+            bdepend: get("BDEPEND"),
+            rdepend: get("RDEPEND"),
+            pdepend: get("PDEPEND"),
+            idepend: get("IDEPEND"),
+        }
+    }
+}
+
+/// How a binpkg's `USE` must agree with the current configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseMatch {
+    /// Not at all: the binpkg is taken as built
+    Any,
+    /// The enabled flags within each side's `IUSE` must be the same
+    Enabled,
+    /// [`Self::Enabled`], and `IUSE` itself must be the same apart from forced and masked flags
+    Iuse,
+}
+
+/// What a binpkg must match to stand in for a source build of one cpv
+pub struct ReuseQuery<'a> {
+    /// The desired `USE`
+    pub use_flags: HashSet<String>,
+    /// How [`Self::use_flags`] must match the binpkg's
+    pub use_match: UseMatch,
+    /// The current ebuild's `IUSE`; `None` takes the binpkg's own
+    pub iuse: Option<HashSet<String>>,
+    /// The `use.force` and `use.mask` flags, exempt from the [`UseMatch::Iuse`] comparison
+    pub forced: HashSet<String>,
+    /// The desired `CHOST`; empty skips that gate, as does a binpkg without one
+    pub chost: &'a str,
+    /// The desired build-env key (see [`build_env_key`])
+    ///
+    /// An unkeyed binpkg matches any; a keyed one only an equal key.
+    pub build_env_key: &'a str,
+    /// A build-id atom's `BUILD_ID`, which admits only that instance
+    pub build_id: Option<u64>,
+    /// A further test each entry must pass, such as unchanged dependencies
+    pub accept: Option<&'a dyn Fn(&BinpkgEntry) -> bool>,
+}
+
+impl ReuseQuery<'_> {
+    /// A query for exactly `use_flags` over the binpkg's own `IUSE`, with no other gate
+    pub fn new<S: Into<String>>(use_flags: impl IntoIterator<Item = S>) -> Self {
+        Self {
+            use_flags: use_flags.into_iter().map(Into::into).collect(),
+            use_match: UseMatch::Iuse,
+            iuse: None,
+            forced: HashSet::new(),
+            chost: "",
+            build_env_key: "",
+            build_id: None,
+            accept: None,
+        }
+    }
+
+    fn matches(&self, entry: &BinpkgEntry) -> bool {
+        self.build_id
+            .is_none_or(|id| u64::from(entry.build_id) == id)
+            && self.use_matches(entry)
+            && chost_compatible(&entry.chost, self.chost)
+            && build_env_key_compatible(&entry.build_env_key, self.build_env_key)
+            && self.accept.is_none_or(|accept| accept(entry))
+    }
+
+    /// Portage's `--binpkg-respect-use` test of a binpkg's USE against the configuration's
+    ///
+    /// Flags outside `IUSE` (USE_EXPAND defaults, profile-implicit flags) never count.
+    fn use_matches(&self, entry: &BinpkgEntry) -> bool {
+        let cur_iuse = self.iuse.as_ref().unwrap_or(&entry.iuse);
+        let built: HashSet<&String> = entry.iuse.intersection(&entry.use_set).collect();
+        let wanted: HashSet<&String> = cur_iuse.intersection(&self.use_flags).collect();
+        match self.use_match {
+            UseMatch::Any => true,
+            UseMatch::Enabled => built == wanted,
+            UseMatch::Iuse => {
+                built == wanted
+                    && entry
+                        .iuse
+                        .symmetric_difference(cur_iuse)
+                        .all(|f| self.forced.contains(f))
+            }
+        }
+    }
 }
 
 impl BinpkgEntry {
@@ -169,6 +272,7 @@ impl BinpkgIndex {
                 md5: String::new(),
                 sha1: String::new(),
                 pretend,
+                deps: BinpkgDeps::from_fields(|key| meta.get(key).cloned()),
             };
             entries.entry(facts.cpv).or_default().push(entry);
         }
@@ -188,59 +292,21 @@ impl BinpkgIndex {
         self.entries.is_empty()
     }
 
-    /// Find a reusable binpkg for `cpv` given the desired `USE`, `CHOST`,
-    /// and `build_env_key`, returning the absolute container path.
+    /// Find the newest binpkg of `cpv` that `query` accepts, returning the absolute container path
     ///
-    /// `None` if no binpkg exists for the cpv, or if its recorded
-    /// USE/CHOST/build_env_key does not match (i.e. it must be rebuilt).
-    /// Version and slot match by `cpv` lookup (a binpkg for a cpv is that
-    /// ebuild's slot).
-    ///
-    /// `desired_chost` empty skips the CHOST gate (legacy/test callers); a
-    /// missing CHOST on the binpkg also skips it so sparse indexes still work.
-    ///
-    /// `desired_build_env_key` empty skips the build_env_key gate (backward compat);
-    /// a missing/empty build_env_key on the binpkg also skips it.
-    ///
-    /// Build-env fields ([`BinpkgEntry::cflags`] / [`BinpkgEntry::cxxflags`] /
-    /// [`BinpkgEntry::ldflags`]) are checked via the computed build_env_key.
-    ///
-    /// `build_id` (a build-id atom's) admits only the instance with that `BUILD_ID`.
-    pub fn find_reusable(
-        &self,
-        cpv: &str,
-        build_id: Option<u64>,
-        desired_use: &[String],
-        desired_chost: &str,
-        desired_build_env_key: &str,
-    ) -> Option<PathBuf> {
-        self.find_reusable_entry(
-            cpv,
-            build_id,
-            desired_use,
-            desired_chost,
-            desired_build_env_key,
-        )
-        .map(|(path, _)| path)
+    /// `None` if there is none, so it must be built. Version and slot match by the `cpv`
+    /// lookup (a binpkg for a cpv is that ebuild's slot).
+    pub fn find_reusable(&self, cpv: &str, query: &ReuseQuery) -> Option<PathBuf> {
+        self.find_reusable_entry(cpv, query).map(|(path, _)| path)
     }
 
     /// [`Self::find_reusable`], with the index entry the container came from
     pub fn find_reusable_entry(
         &self,
         cpv: &str,
-        build_id: Option<u64>,
-        desired_use: &[String],
-        desired_chost: &str,
-        desired_build_env_key: &str,
+        query: &ReuseQuery,
     ) -> Option<(PathBuf, &BinpkgEntry)> {
-        let best = best_reusable_entry(
-            &self.entries,
-            cpv,
-            build_id,
-            desired_use,
-            desired_chost,
-            desired_build_env_key,
-        )?;
+        let best = best_reusable_entry(&self.entries, cpv, query)?;
         Some((self.pkgdir.join(&best.path), best))
     }
 
@@ -428,6 +494,7 @@ pub fn parse_packages_entries(text: &str) -> BTreeMap<String, Vec<BinpkgEntry>> 
                 fields.get("EAPI").copied(),
                 fields.get("DEFINED_PHASES").copied(),
             ),
+            deps: BinpkgDeps::from_fields(|key| fields.get(key).map(|v| v.to_string())),
         };
         entries.entry(cpv.to_string()).or_default().push(entry);
     }
@@ -527,27 +594,9 @@ impl RemoteBinpkgIndex {
 
     /// Find a reusable remote binpkg for `cpv`, returning its download URL and entry
     ///
-    /// `None` if the cpv is absent or its USE/CHOST/build_env_key does not
-    /// match (same rules as the local index). URL = `base_uri` + `/` + `PATH`.
-    ///
-    /// CFLAGS/CXXFLAGS/LDFLAGS are carried on the entry ([`Self::get`]) and
-    /// checked via the computed build_env_key. `build_id` as for [`BinpkgIndex::find_reusable`].
-    pub fn find_reusable(
-        &self,
-        cpv: &str,
-        build_id: Option<u64>,
-        desired_use: &[String],
-        desired_chost: &str,
-        desired_build_env_key: &str,
-    ) -> Option<(String, &BinpkgEntry)> {
-        let best = best_reusable_entry(
-            &self.entries,
-            cpv,
-            build_id,
-            desired_use,
-            desired_chost,
-            desired_build_env_key,
-        )?;
+    /// Same rules as [`BinpkgIndex::find_reusable`]. URL = `base_uri` + `/` + `PATH`.
+    pub fn find_reusable(&self, cpv: &str, query: &ReuseQuery) -> Option<(String, &BinpkgEntry)> {
+        let best = best_reusable_entry(&self.entries, cpv, query)?;
         Some((format!("{}/{path}", self.base_uri, path = best.path), best))
     }
 
@@ -561,34 +610,17 @@ impl RemoteBinpkgIndex {
     }
 }
 
-/// The single reuse-gate the local and remote indexes share: among the
-/// entries recorded for `cpv` (only `build_id`'s, when given), the newest-`BUILD_ID`
-/// one whose USE/CHOST and build-env key are compatible with the desired build.
-///
-/// The callers differ only in how they render the winning entry's `path`
-/// (a local container path vs a remote download URL).
+/// The newest-`BUILD_ID` entry recorded for `cpv` that `query` accepts
 fn best_reusable_entry<'a>(
     entries: &'a BTreeMap<String, Vec<BinpkgEntry>>,
     cpv: &str,
-    build_id: Option<u64>,
-    desired_use: &[String],
-    desired_chost: &str,
-    desired_build_env_key: &str,
+    query: &ReuseQuery,
 ) -> Option<&'a BinpkgEntry> {
     entries
         .get(cpv)?
         .iter()
-        .filter(|entry| build_id.is_none_or(|id| u64::from(entry.build_id) == id))
-        .filter(|entry| entry_reusable(entry, desired_use, desired_chost))
-        .filter(|entry| build_env_key_compatible(&entry.build_env_key, desired_build_env_key))
+        .filter(|entry| query.matches(entry))
         .max_by_key(|entry| entry.build_id)
-}
-
-fn entry_reusable(entry: &BinpkgEntry, desired_use: &[String], desired_chost: &str) -> bool {
-    if !use_compatible(&entry.use_set, &entry.iuse, desired_use) {
-        return false;
-    }
-    chost_compatible(&entry.chost, desired_chost)
 }
 
 /// CHOST gate: both sides set and unequal → not reusable
@@ -617,29 +649,6 @@ fn build_env_key_compatible(binpkg_key: &str, desired_key: &str) -> bool {
         return false;
     }
     binpkg_key == desired_key
-}
-
-/// The reuse core: is a binpkg's `USE` (restricted to its `IUSE`) equal to
-/// the desired `USE` (restricted to `IUSE`)?
-///
-/// Flags outside `IUSE` (USE_EXPAND defaults, profile-implicit flags)
-/// don't affect the package and are ignored. This is portage's
-/// built-package USE check.
-//
-// See bug #453400.
-pub fn use_compatible(
-    binpkg_use: &HashSet<String>,
-    iuse: &HashSet<String>,
-    desired_use: &[String],
-) -> bool {
-    for flag in iuse {
-        let in_binpkg = binpkg_use.contains(flag);
-        let in_desired = desired_use.iter().any(|d| d == flag);
-        if in_binpkg != in_desired {
-            return false;
-        }
-    }
-    true
 }
 
 /// Compute a **sub-target / ISA identity** key for binpkg reuse
@@ -790,8 +799,52 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    fn desired(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
+    fn q<'a>(use_flags: &[&str], chost: &'a str, build_env_key: &'a str) -> ReuseQuery<'a> {
+        ReuseQuery {
+            chost,
+            build_env_key,
+            ..ReuseQuery::new(use_flags.iter().copied())
+        }
+    }
+
+    fn reusable(use_set: &HashSet<String>, iuse: &HashSet<String>, query: &ReuseQuery) -> bool {
+        query.matches(&BinpkgEntry {
+            use_set: use_set.clone(),
+            iuse: iuse.clone(),
+            ..BinpkgEntry::default()
+        })
+    }
+
+    #[test]
+    fn an_iuse_change_in_the_ebuild_rejects_the_binpkg_unless_forced() {
+        let with_ebuild_iuse = |forced: &[&str]| ReuseQuery {
+            iuse: Some(set(&["nls", "ssl"])),
+            forced: set(forced),
+            ..q(&["nls"], "", "")
+        };
+        let (built, built_iuse) = (set(&["nls"]), set(&["nls"]));
+        assert!(!reusable(&built, &built_iuse, &with_ebuild_iuse(&[])));
+        assert!(reusable(&built, &built_iuse, &with_ebuild_iuse(&["ssl"])));
+        let changed_use = ReuseQuery {
+            use_match: UseMatch::Enabled,
+            ..with_ebuild_iuse(&[])
+        };
+        assert!(reusable(&built, &built_iuse, &changed_use));
+        let enabled_new_flag = ReuseQuery {
+            use_flags: set(&["nls", "ssl"]),
+            ..changed_use
+        };
+        assert!(!reusable(&built, &built_iuse, &enabled_new_flag));
+    }
+
+    #[test]
+    fn use_match_any_takes_the_binpkg_as_built() {
+        let any = ReuseQuery {
+            use_match: UseMatch::Any,
+            ..q(&[], "", "")
+        };
+        assert!(reusable(&set(&["nls"]), &set(&["nls"]), &any));
+        assert!(!reusable(&set(&["nls"]), &set(&["nls"]), &q(&[], "", "")));
     }
 
     #[test]
@@ -803,7 +856,7 @@ mod tests {
             let text =
                 format!("VERSION: 0\n\nCPV: app-test/foo-1.0\nPATH: foo-1.0-1.gpkg.tar\n{extra}");
             RemoteBinpkgIndex::new(&text, "https://binhost.example")
-                .find_reusable("app-test/foo-1.0", None, &[], "", "")
+                .find_reusable("app-test/foo-1.0", &q(&[], "", ""))
                 .unwrap()
                 .1
                 .clone()
@@ -831,20 +884,20 @@ mod tests {
     #[test]
     fn identical_use_is_reusable() {
         // binpkg built with nls,debug; IUSE nls,debug,ssl; desired nls,debug.
-        assert!(use_compatible(
+        assert!(reusable(
             &set(&["nls", "debug"]),
             &set(&["nls", "debug", "ssl"]),
-            &desired(&["nls", "debug"]),
+            &q(&["nls", "debug"], "", "")
         ));
     }
 
     #[test]
     fn differing_iuse_flag_is_stale() {
         // binpkg has nls on, desired has it off (within IUSE) → not reusable.
-        assert!(!use_compatible(
+        assert!(!reusable(
             &set(&["nls", "debug"]),
             &set(&["nls", "debug", "ssl"]),
-            &desired(&["debug"]),
+            &q(&["debug"], "", "")
         ));
     }
 
@@ -852,16 +905,16 @@ mod tests {
     fn non_iuse_flags_are_ignored() {
         // A USE_EXPAND/implicit flag not in IUSE (python_targets_3_13) differs,
         // but since it's not in IUSE it must not block reuse.
-        assert!(use_compatible(
+        assert!(reusable(
             &set(&["nls", "python_targets_3_13"]),
             &set(&["nls"]),
-            &desired(&["nls"]),
+            &q(&["nls"], "", "")
         ));
         // And conversely.
-        assert!(use_compatible(
+        assert!(reusable(
             &set(&["nls"]),
             &set(&["nls"]),
-            &desired(&["nls", "python_targets_3_13"]),
+            &q(&["nls", "python_targets_3_13"], "", "")
         ));
     }
 
@@ -871,20 +924,20 @@ mod tests {
         // ssl on (within IUSE) is stale.
         let iuse = split_iuse("+ssl -debug nls");
         assert_eq!(iuse, set(&["ssl", "debug", "nls"]));
-        assert!(!use_compatible(
+        assert!(!reusable(
             &set(&["nls"]),
             &iuse,
-            &desired(&["nls", "ssl"])
+            &q(&["nls", "ssl"], "", "")
         ));
     }
 
     #[test]
     fn ssl_off_in_both_is_reusable() {
         // ssl is in IUSE but off in both binpkg and desired → reusable.
-        assert!(use_compatible(
+        assert!(reusable(
             &set(&["nls"]),
             &set(&["nls", "ssl"]),
-            &desired(&["nls"]),
+            &q(&["nls"], "", "")
         ));
     }
 
@@ -914,25 +967,25 @@ USE: ssl
 
         // foo: nls on matches desired [nls]; debug off in both → reusable.
         let p = idx
-            .find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "")
+            .find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
             .unwrap();
         assert_eq!(p, PathBuf::from("/pkgdir/app-test/foo-1.0-1.gpkg.tar"));
 
         // foo with nls off → stale (nls is in IUSE, differs) → None.
         assert!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&[]), "", "")
+            idx.find_reusable("app-test/foo-1.0", &q(&[], "", ""))
                 .is_none()
         );
 
         // bar: ssl matches → reusable.
         assert!(
-            idx.find_reusable("app-test/bar-2.0", None, &desired(&["ssl"]), "", "")
+            idx.find_reusable("app-test/bar-2.0", &q(&["ssl"], "", ""))
                 .is_some()
         );
 
         // Wrong cpv → None.
         assert!(
-            idx.find_reusable("app-test/missing-9.9", None, &desired(&["nls"]), "", "")
+            idx.find_reusable("app-test/missing-9.9", &q(&["nls"], "", ""))
                 .is_none()
         );
     }
@@ -952,26 +1005,20 @@ USE: nls
         assert!(
             idx.find_reusable(
                 "app-test/foo-1.0",
-                None,
-                &desired(&["nls"]),
-                "aarch64-unknown-linux-gnu",
-                ""
+                &q(&["nls"], "aarch64-unknown-linux-gnu", "")
             )
             .is_some()
         );
         assert!(
             idx.find_reusable(
                 "app-test/foo-1.0",
-                None,
-                &desired(&["nls"]),
-                "riscv64-unknown-linux-gnu",
-                ""
+                &q(&["nls"], "riscv64-unknown-linux-gnu", "")
             )
             .is_none()
         );
         // Empty desired CHOST: no gate.
         assert!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "")
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
                 .is_some()
         );
     }
@@ -993,25 +1040,19 @@ USE: nls
         assert_eq!(idx.len(), 1);
         // Trailing slash on base_uri is trimmed; URL = base + "/" + PATH.
         assert_eq!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "",)
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
                 .unwrap()
                 .0,
             "https://binhost.example/app-test/foo-1.0-1.gpkg.tar"
         );
         // Stale USE → None (same use_compatible rule as the local index).
         assert!(
-            idx.find_reusable(
-                "app-test/foo-1.0",
-                None,
-                &desired(&["nls", "debug"]),
-                "",
-                "",
-            )
-            .is_none()
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls", "debug"], "", ""))
+                .is_none()
         );
         // Unknown cpv → None.
         assert!(
-            idx.find_reusable("app-test/missing-9.9", None, &desired(&["nls"]), "", "",)
+            idx.find_reusable("app-test/missing-9.9", &q(&["nls"], "", ""))
                 .is_none()
         );
     }
@@ -1038,14 +1079,15 @@ USE: nls
         assert!(
             idx.find_reusable(
                 "app-test/foo-1.0",
-                None,
-                &desired(&["nls"]),
-                "riscv64-unknown-linux-gnu",
-                &build_env_key(
-                    "-O2 -pipe -march=rv64gcv",
-                    "-O2 -pipe -march=rv64gcv",
-                    "",
-                    ""
+                &q(
+                    &["nls"],
+                    "riscv64-unknown-linux-gnu",
+                    &build_env_key(
+                        "-O2 -pipe -march=rv64gcv",
+                        "-O2 -pipe -march=rv64gcv",
+                        "",
+                        ""
+                    )
                 )
             )
             .is_some()
@@ -1056,10 +1098,7 @@ USE: nls
         assert!(
             idx.find_reusable(
                 "app-test/foo-1.0",
-                None,
-                &desired(&["nls"]),
-                "riscv64-unknown-linux-gnu",
-                ""
+                &q(&["nls"], "riscv64-unknown-linux-gnu", "")
             )
             .is_none()
         );
@@ -1078,7 +1117,7 @@ USE: nls
 ";
         let idx = BinpkgIndex::parse(text, PathBuf::from("/pkgdir"));
         assert!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "")
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
                 .is_none()
         );
     }
@@ -1098,16 +1137,13 @@ USE: nls
 ";
         let idx = BinpkgIndex::parse(text, PathBuf::from("/pkgdir"));
         assert!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "")
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
                 .is_some()
         );
         assert!(
             idx.find_reusable(
                 "app-test/foo-1.0",
-                None,
-                &desired(&["nls"]),
-                "",
-                &build_env_key("-march=rv64gcv", "", "", "")
+                &q(&["nls"], "", &build_env_key("-march=rv64gcv", "", "", ""))
             )
             .is_some()
         );
@@ -1144,10 +1180,7 @@ BUILD_ID: 2
         assert_eq!(
             idx.find_reusable(
                 "app-test/foo-1.0",
-                None,
-                &desired(&["nls"]),
-                "riscv64-unknown-linux-gnu",
-                ""
+                &q(&["nls"], "riscv64-unknown-linux-gnu", "")
             ),
             Some(PathBuf::from("/pkgdir/app-test/foo-1.0-3.gpkg.tar"))
         );
@@ -1162,7 +1195,13 @@ BUILD_ID: 2
         };
         let text = format!("VERSION: 0\n\n{}\n{}", entry(1), entry(3));
         let idx = BinpkgIndex::parse(&text, PathBuf::from("/pkgdir"));
-        let pick = |id| idx.find_reusable("app-test/foo-1.0", id, &[], "", "");
+        let pick = |id| {
+            let query = ReuseQuery {
+                build_id: id,
+                ..q(&[], "", "")
+            };
+            idx.find_reusable("app-test/foo-1.0", &query)
+        };
         assert_eq!(
             pick(Some(1)),
             Some(PathBuf::from("/pkgdir/app-test/foo/foo-1.0-1.gpkg.tar"))
@@ -1344,7 +1383,7 @@ USE: nls
         let idx = RemoteBinpkgIndex::new(text, "https://binhost.example/unused/");
         assert_eq!(idx.base_uri(), "https://cdn.example/gentoo/arm64");
         assert_eq!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "",)
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
                 .unwrap()
                 .0,
             "https://cdn.example/gentoo/arm64/app-test/foo-1.0-1.gpkg.tar"
@@ -1367,7 +1406,7 @@ USE: nls
         let idx = RemoteBinpkgIndex::new(text, "https://binhost.example/unused/");
         assert_eq!(idx.base_uri(), "https://cdn.example/gentoo/arm64");
         assert_eq!(
-            idx.find_reusable("app-test/foo-1.0", None, &desired(&["nls"]), "", "",)
+            idx.find_reusable("app-test/foo-1.0", &q(&["nls"], "", ""))
                 .unwrap()
                 .0,
             "https://cdn.example/gentoo/arm64/app-test/foo-1.0-1.gpkg.tar"
@@ -1413,11 +1452,11 @@ PATH: app-test/foo-1.0-1.gpkg.tar
 ";
         let idx = BinpkgIndex::parse(text, PathBuf::from("/pkgdir"));
         assert!(
-            idx.find_reusable("app-test/foo-1.0", &[], "x86_64-pc-linux-gnu", "")
+            idx.find_reusable("app-test/foo-1.0", &q(&[], "x86_64-pc-linux-gnu", ""))
                 .is_none()
         );
         assert!(
-            idx.find_reusable("app-test/foo-1.0", &[], "aarch64-unknown-linux-gnu", "")
+            idx.find_reusable("app-test/foo-1.0", &q(&[], "aarch64-unknown-linux-gnu", ""))
                 .is_some()
         );
     }
@@ -1443,15 +1482,15 @@ PATH: app-test/mixed/mixed-1.0-1.gpkg.tar
 ";
         let idx = RemoteBinpkgIndex::new(text, "https://binhost.example");
         assert!(
-            idx.find_reusable("app-test/xpak-1.0", &[], "", "")
+            idx.find_reusable("app-test/xpak-1.0", &q(&[], "", ""))
                 .is_none()
         );
         assert!(
-            idx.find_reusable("app-test/nopath-1.0", &[], "", "")
+            idx.find_reusable("app-test/nopath-1.0", &q(&[], "", ""))
                 .is_none()
         );
         assert_eq!(
-            idx.find_reusable("app-test/mixed-1.0", &[], "", "")
+            idx.find_reusable("app-test/mixed-1.0", &q(&[], "", ""))
                 .unwrap()
                 .0,
             "https://binhost.example/app-test/mixed/mixed-1.0-1.gpkg.tar"
