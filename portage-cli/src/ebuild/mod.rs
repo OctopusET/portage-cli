@@ -1272,6 +1272,7 @@ impl PackageSetup {
             ref phase_log,
             roots,
             buildpkg,
+            group,
             ..
         } = *opts;
         let RootContext {
@@ -1394,8 +1395,8 @@ impl PackageSetup {
                 .export_sourced_env()
                 .context("exporting package.env environment")?;
         }
-        // `-b` is recorded as FEATURES=buildpkg, as when it is configured.
-        if buildpkg {
+        // `-b` is recorded as FEATURES=buildpkg, as when it is configured; `-B` is not.
+        if buildpkg && !matches!(group, PhaseGroup::BuildOnly) {
             add_feature(&mut shell, "buildpkg").await?;
         }
 
