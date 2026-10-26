@@ -1475,7 +1475,7 @@ async fn execute_unmerge_batch(
         ld_library_path.as_deref(),
     );
     shell.set_terminal(crate::style::terminal_config());
-    if !ebuild::apply_profile_env(&mut shell, roots.config(), roots.config_overlay()).await? {
+    if !ebuild::apply_profile_env(&mut shell, roots.config(), roots.config_overlay(), None).await? {
         crate::style::warn_line!(
             "no usable profile at {}/etc/portage/make.profile — {} without profile defaults",
             roots.config().unwrap_or(Utf8Path::new("/")),

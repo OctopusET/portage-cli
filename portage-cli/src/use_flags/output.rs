@@ -153,7 +153,7 @@ async fn expand_var_names(cli: &cli::Cli) -> Result<Vec<String>> {
 
     let mut shell = repo.shell().await.context("creating shell")?;
     let has_profile =
-        crate::ebuild::apply_profile_env(&mut shell, roots.config(), roots.config_overlay())
+        crate::ebuild::apply_profile_env(&mut shell, roots.config(), roots.config_overlay(), None)
             .await
             .context("resolving active profile")?;
 

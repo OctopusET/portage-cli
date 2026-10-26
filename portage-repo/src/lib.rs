@@ -74,7 +74,7 @@ pub use make_conf::{
 };
 pub use metadata_cache::{DirMetadataCache, MemoryMetadataCache, MetadataCache};
 pub use package_conf::{PackageConf, Token as PackageToken};
-pub use package_env::env_files_for;
+pub use package_env::{env_files_for, env_hook_files, package_bashrc_files};
 pub use portage_metadata::EbuildMetadata;
 pub use portage_metadata::interner::{
     DefaultInterner, GlobalInterner, Interned, Interner, NoInterner,

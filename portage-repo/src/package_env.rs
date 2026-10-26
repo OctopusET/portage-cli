@@ -45,6 +45,54 @@ pub fn env_files_for(
     out
 }
 
+/// The `package.bashrc` hooks of the profile at `profile_dir` that match `cpv`,
+/// as paths under its `bashrc/` directory, in file order
+///
+/// Not PMS: portage's `profile-bashrcs` profile format. Only existing files are returned.
+pub fn package_bashrc_files(
+    profile_dir: &Path,
+    cpv: &Cpv,
+    slot: Option<&portage_atom::Slot>,
+) -> Vec<PathBuf> {
+    load_package_env(&profile_dir.join("package.bashrc"))
+        .into_iter()
+        .filter(|(dep, _)| dep.matches_cpv(cpv, slot))
+        .flat_map(|(_, names)| names)
+        .map(|name| profile_dir.join("bashrc").join(name))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// The per-package hook files under `env_dir` (`etc/portage/env`) for `cpv`:
+/// `${CATEGORY}/` then `${PN}`, `${PN}:${SLOT}`, `${P}`, `${PF}`, those that exist
+///
+/// Not PMS: portage sources them after the user `bashrc`, in addition to `package.env`.
+pub fn env_hook_files(
+    env_dir: &Path,
+    cpv: &Cpv,
+    slot: Option<&portage_atom::Slot>,
+) -> Vec<PathBuf> {
+    let pn = cpv.cpn.package.as_str();
+    let pvr = cpv.version.to_string();
+    let rev = cpv.version.revision.0;
+    let pv = match rev {
+        0 => pvr.as_str(),
+        _ => pvr.strip_suffix(&format!("-r{rev}")).unwrap_or(&pvr),
+    };
+    let mut names = vec![pn.to_string()];
+    if let Some(slot) = slot {
+        names.push(format!("{pn}:{}", slot.slot));
+    }
+    names.push(format!("{pn}-{pv}"));
+    names.push(format!("{pn}-{pvr}"));
+    let dir = env_dir.join(cpv.cpn.category.as_str());
+    names
+        .into_iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
 /// Parse a `package.env` file (or directory of files) into `(atom, [env file
 /// names])` entries.
 ///
@@ -216,5 +264,35 @@ mod tests {
     fn absent_package_env_is_empty() {
         let td = TempDir::new().unwrap();
         assert!(env_files_for(&[td.path().to_path_buf()], &cpv("dev-libs/foo-1"), None).is_empty());
+    }
+
+    #[test]
+    fn package_bashrc_maps_matching_atoms_to_the_profile_bashrc_dir() {
+        let td = TempDir::new().unwrap();
+        let pd = td.path();
+        fs::write(
+            pd.join("package.bashrc"),
+            "dev-libs/foo a missing\ndev-libs/bar b\n",
+        )
+        .unwrap();
+        fs::create_dir(pd.join("bashrc")).unwrap();
+        fs::write(pd.join("bashrc/a"), "").unwrap();
+        fs::write(pd.join("bashrc/b"), "").unwrap();
+        let got = package_bashrc_files(pd, &cpv("dev-libs/foo-1"), None);
+        assert_eq!(got, vec![pd.join("bashrc/a")]);
+    }
+
+    #[test]
+    fn env_hooks_follow_pn_slot_p_pf_order() {
+        let td = TempDir::new().unwrap();
+        let dir = td.path().join("dev-libs");
+        fs::create_dir(&dir).unwrap();
+        for name in ["foo", "foo:2", "foo-1.0", "foo-1.0-r1", "foo-9"] {
+            fs::write(dir.join(name), "").unwrap();
+        }
+        let slot = portage_atom::Slot::new("2");
+        let got = env_hook_files(td.path(), &cpv("dev-libs/foo-1.0-r1"), Some(&slot));
+        let names: Vec<_> = got.iter().map(|p| p.file_name().unwrap()).collect();
+        assert_eq!(names, ["foo", "foo:2", "foo-1.0", "foo-1.0-r1"]);
     }
 }

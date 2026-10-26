@@ -339,10 +339,13 @@ pub fn package_work_dir(
 /// `/etc/portage/profile`) and make.conf into the shell, and set its
 /// effective USE. Returns `false` when no profile is resolvable (the build
 /// proceeds with bare defaults).
+///
+/// `pkg` is the package about to build, for its per-package bashrc hooks.
 pub(crate) async fn apply_profile_env(
     shell: &mut portage_repo::EbuildShell,
     config_root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
+    pkg: Option<(&portage_atom::Cpv, Option<&portage_atom::Slot>)>,
 ) -> Result<bool> {
     // PORTAGE_CONFIGROOT: profile/make.conf come from here (host unless --root
     // / --config-root offsets it). See docs/user/root-model.md.
@@ -371,14 +374,29 @@ pub(crate) async fn apply_profile_env(
     // order, then the user's `${config_root}/etc/portage/bashrc`. run_phase
     // sources these per phase with the full env — the user hook is where overlay
     // search paths can be wired without build-system knowledge in our code.
+    // With `pkg`, each `profile-bashrcs` profile's matching `package.bashrc` hooks follow its
+    // `profile.bashrc`, and the `etc/portage/env/${CATEGORY}/${PN}`-style hooks come last.
     let mut bashrc: Vec<Utf8PathBuf> = Vec::new();
     for profile in stack.profiles() {
-        let p = profile.path().join("profile.bashrc");
-        if p.is_file()
-            && let Ok(p) = Utf8PathBuf::from_path_buf(p)
+        let mut files = vec![profile.path().join("profile.bashrc")];
+        if let Some((cpv, slot)) = pkg
+            && profile
+                .profile_formats()
+                .iter()
+                .any(|f| f == "profile-bashrcs")
         {
-            bashrc.push(p);
+            files.extend(portage_repo::package_bashrc_files(
+                profile.path(),
+                cpv,
+                slot,
+            ));
         }
+        bashrc.extend(
+            files
+                .into_iter()
+                .filter(|p| p.is_file())
+                .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok()),
+        );
     }
     let user = base.join("etc/portage/bashrc");
     if user.is_file() {
@@ -392,6 +410,14 @@ pub(crate) async fn apply_profile_env(
         if ob.is_file() {
             bashrc.push(ob);
         }
+    }
+    if let Some((cpv, slot)) = pkg {
+        let env = base.join("etc/portage/env");
+        bashrc.extend(
+            portage_repo::env_hook_files(env.as_std_path(), cpv, slot)
+                .into_iter()
+                .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok()),
+        );
     }
     shell.set_bashrc_files(bashrc);
 
@@ -1347,7 +1373,13 @@ impl PackageSetup {
             .then_some(eprefix)
             .flatten()
             .map(|e| e.join("etc/portage"));
-        if !apply_profile_env(&mut shell, config_root, config_overlay.as_deref()).await? {
+        let slot = repo
+            .cache_entry(ebuild.cpv())
+            .ok()
+            .flatten()
+            .map(|c| c.metadata.slot);
+        let pkg = Some((ebuild.cpv(), slot.as_ref()));
+        if !apply_profile_env(&mut shell, config_root, config_overlay.as_deref(), pkg).await? {
             let cr = config_root.unwrap_or_else(|| Utf8Path::new("/"));
             crate::style::warn_line!(
                 "no usable profile at {cr}/etc/portage/make.profile — building without profile defaults"
@@ -1378,11 +1410,6 @@ impl PackageSetup {
             if let Some(overlay) = config_overlay.as_deref() {
                 portage_dirs.push(overlay.as_std_path().to_path_buf());
             }
-            let slot = repo
-                .cache_entry(ebuild.cpv())
-                .ok()
-                .flatten()
-                .map(|c| c.metadata.slot);
             for env_file in portage_repo::env_files_for(&portage_dirs, ebuild.cpv(), slot.as_ref())
             {
                 shell

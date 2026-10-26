@@ -612,7 +612,7 @@ async fn native_prefix_guest(globals: &Cli, roots: &portage_resolve::Roots) -> b
     let Ok(mut shell) = repo.shell().await else {
         return false;
     };
-    if crate::ebuild::apply_profile_env(&mut shell, roots.config(), roots.config_overlay())
+    if crate::ebuild::apply_profile_env(&mut shell, roots.config(), roots.config_overlay(), None)
         .await
         .is_err()
     {
