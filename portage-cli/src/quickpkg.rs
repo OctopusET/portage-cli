@@ -7,6 +7,7 @@
 //! `--include-unmodified-config y` packs those whose on-disk MD5 still matches CONTENTS.
 
 use std::collections::BTreeSet;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use anyhow::{Context, Result, bail};
@@ -202,9 +203,11 @@ fn package_one(
         .contents()
         .with_context(|| format!("reading CONTENTS for {}", pkg.cpv()))?;
 
+    // In PKGDIR, which is more often on the live root's filesystem than the temp dir is, so
+    // staging can hardlink instead of copy.
     let staging = tempfile::Builder::new()
-        .prefix("em-quickpkg-")
-        .tempdir()
+        .prefix(".em-quickpkg-")
+        .tempdir_in(pkgdir.as_std_path())
         .context("creating quickpkg staging dir")?;
     let image_dir = staging.path().join("image");
     let excluded = stage_image(
@@ -398,20 +401,43 @@ fn stage_placeholder(
     Ok(())
 }
 
-/// Best-effort copy of `src`'s owner, mode and mtime onto the staged `dest`
+/// Best-effort copy of `src`'s owner, mode, extended attributes and mtime onto the staged `dest`
 ///
-/// Owner first, since `chown` clears set-id bits. A non-root run cannot give away
-/// ownership, so the archive then records the invoking user, as an unprivileged tar would.
+/// Owner first, since `chown` clears set-id bits and file capabilities. A non-root run cannot
+/// give away ownership, so the archive then records the invoking user, as an unprivileged tar would.
 fn copy_metadata(src: &Utf8Path, dest: &std::path::Path) {
     let Ok(meta) = std::fs::metadata(src.as_std_path()) else {
         return;
     };
     let _ = std::os::unix::fs::chown(dest, Some(meta.uid()), Some(meta.gid()));
     let _ = std::fs::set_permissions(dest, meta.permissions());
+    copy_xattrs(src.as_std_path(), dest);
     if let Ok(mtime) = meta.modified()
         && let Ok(f) = std::fs::File::open(dest)
     {
         let _ = f.set_modified(mtime);
+    }
+}
+
+/// Copy every extended attribute of `src` that `dest` accepts
+fn copy_xattrs(src: &std::path::Path, dest: &std::path::Path) {
+    let Ok(len) = rustix::fs::llistxattr_query(src) else {
+        return;
+    };
+    let mut names = vec![0u8; len];
+    let Ok(len) = rustix::fs::llistxattr(src, &mut names[..]) else {
+        return;
+    };
+    for name in names[..len].split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let name = std::ffi::OsStr::from_bytes(name);
+        let Ok(size) = rustix::fs::lgetxattr_query(src, name) else {
+            continue;
+        };
+        let mut value = vec![0u8; size];
+        if let Ok(size) = rustix::fs::lgetxattr(src, name, &mut value[..]) {
+            let _ =
+                rustix::fs::lsetxattr(dest, name, &value[..size], rustix::fs::XattrFlags::empty());
+        }
     }
 }
 
@@ -596,6 +622,24 @@ mod tests {
         let staged = std::fs::metadata(image.join("var/lib/foo")).unwrap();
         assert_eq!(staged.mode() & 0o7777, 0o750);
         assert_eq!(staged.modified().unwrap(), old);
+    }
+
+    #[test]
+    fn a_copied_file_keeps_its_extended_attributes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("live");
+        let dest = tmp.path().join("staged");
+        std::fs::write(&src, b"x").unwrap();
+        std::fs::write(&dest, b"x").unwrap();
+        let flags = rustix::fs::XattrFlags::empty();
+        if rustix::fs::lsetxattr(&src, "user.em_test", b"v1", flags).is_err() {
+            eprintln!("skipping: no user xattrs on {}", tmp.path().display());
+            return;
+        }
+        copy_metadata(Utf8Path::from_path(&src).unwrap(), &dest);
+        let mut buf = [0u8; 8];
+        let n = rustix::fs::lgetxattr(&dest, "user.em_test", &mut buf[..]).unwrap();
+        assert_eq!(&buf[..n], b"v1");
     }
 
     #[test]
