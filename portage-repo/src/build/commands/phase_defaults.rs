@@ -780,7 +780,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapplyUserComman
         }
         // A marker in ${T}, so the once-per-build rule also holds across the
         // separate processes a `--jobs` build runs its phases in.
-        let tag = Path::new(&var("T")).join(".eapply_user_done");
+        let tag = Path::new(&var("T")).join(".portage_user_patches_applied");
         if tag.exists() {
             return Ok(brush_core::ExecutionResult::success());
         }
