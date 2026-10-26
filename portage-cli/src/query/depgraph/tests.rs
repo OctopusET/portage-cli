@@ -984,21 +984,33 @@ fn slot_op_rebuild_follows_its_trigger() {
 
 #[test]
 fn slot_op_rebuild_solves_the_consumer_upgrade() {
-    let consumers = [
+    let plan = slot_op_update(&consumer_upgrade_with_new_dep(), &[]);
+    let at = |name: &str| plan.iter().position(|p| p == name).unwrap();
+    assert_eq!(plan.len(), 3);
+    assert!(at("dev-libs/lib-2") < at("app-misc/consumer-2"));
+    assert!(at("dev-libs/newdep-1") < at("app-misc/consumer-2"));
+}
+
+/// `consumer-2` needs `dev-libs/newdep`, which only a solved (not spliced) upgrade pulls in.
+fn consumer_upgrade_with_new_dep() -> [Pkg; 3] {
+    [
         pkg("app-misc/consumer-1", "0", "dev-libs/lib:="),
-        pkg("app-misc/consumer-2", "0", ">=dev-libs/lib-2:="),
-    ];
-    assert_eq!(
-        slot_op_update(&consumers, &[]),
-        ["dev-libs/lib-2", "app-misc/consumer-2"]
-    );
+        pkg(
+            "app-misc/consumer-2",
+            "0",
+            ">=dev-libs/lib-2:= dev-libs/newdep",
+        ),
+        pkg("dev-libs/newdep-1", "0", ""),
+    ]
 }
 
 #[test]
 fn slot_op_rebuild_honours_exclude() {
-    let consumer = [pkg("app-misc/consumer-1", "0", "dev-libs/lib:=")];
     let exclude = ["app-misc/consumer".to_string()];
-    assert_eq!(slot_op_update(&consumer, &exclude), ["dev-libs/lib-2"]);
+    assert_eq!(
+        slot_op_update(&consumer_upgrade_with_new_dep(), &exclude),
+        ["dev-libs/lib-2"]
+    );
 }
 
 #[test]

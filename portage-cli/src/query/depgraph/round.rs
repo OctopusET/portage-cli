@@ -820,8 +820,17 @@ pub(super) fn solve_round(
         };
         let deep_update: Option<subslot::TreeDeps<'_>> = (update && deep).then_some(&tree_deps);
         let found = subslot::find_rebuilds(target_installed, &planned_slots, &in_plan, deep_update);
+        // An excluded consumer is never selected, so it must not become a target that pulls in deps.
+        let excluded = |rb: &subslot::SubslotRebuild| {
+            let cpv = Cpv::new(rb.cpn, rb.version.clone());
+            let slot = rb.slot.map(portage_atom::Slot::from_name);
+            exclude_atoms
+                .iter()
+                .any(|d| d.matches_cpv(&cpv, slot.as_ref()))
+        };
         (slot_op_rebuilds, slot_op_unbuildable) = found
             .into_iter()
+            .filter(|rb| !excluded(rb))
             .partition(|rb| rebuild_visible(data, target_policy, rb));
     }
 
