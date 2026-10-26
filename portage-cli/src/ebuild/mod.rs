@@ -3220,9 +3220,14 @@ impl ImagePass<'_> {
                 std::fs::rename(dest.as_std_path(), backup.as_std_path())
                     .with_context(|| format!("moving {dest} to {backup}"))?;
             }
-            std::fs::create_dir_all(entry.dest_path.as_std_path())
-                .with_context(|| format!("mkdir {}", entry.dest_path))?;
-            preserve_owner(&entry.dest_path, &entry.meta);
+            // An existing directory, or a symlink to one, is kept as it is.
+            if !dest.is_dir() {
+                std::fs::create_dir_all(dest.as_std_path())
+                    .with_context(|| format!("mkdir {dest}"))?;
+                preserve_owner(dest, &entry.meta);
+                std::fs::set_permissions(dest.as_std_path(), entry.meta.permissions())
+                    .with_context(|| format!("chmod {dest}"))?;
+            }
         }
         self.record(ContentsKind::Dir, entry, None, None);
         Ok(())
@@ -5058,6 +5063,42 @@ mod tests {
         .unwrap();
         assert!(contents.is_empty());
         assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn walk_image_keeps_a_dir_symlink_and_sets_a_new_dirs_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(image.join("usr/sbin").as_std_path()).unwrap();
+        fs::write(image.join("usr/sbin/tool").as_std_path(), b"x").unwrap();
+        fs::create_dir_all(image.join("var/private").as_std_path()).unwrap();
+        fs::set_permissions(
+            image.join("var/private").as_std_path(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("usr/bin").as_std_path()).unwrap();
+        symlink("bin", root.join("usr/sbin").as_std_path()).unwrap();
+
+        walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Merge,
+        )
+        .unwrap();
+
+        assert!(root.join("usr/sbin").as_std_path().is_symlink());
+        assert!(root.join("usr/bin/tool").exists());
+        let mode = fs::metadata(root.join("var/private").as_std_path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]
