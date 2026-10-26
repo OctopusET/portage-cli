@@ -1349,7 +1349,19 @@ pub struct ResolvePolicy<'a> {
 }
 
 impl<'a> ResolvePolicy<'a> {
+    /// Whether `cpv` from `repo` passes the keyword, package.mask/unmask and license checks
+    /// the solver applies
+    pub fn version_accepted(
+        &self,
+        cpv: &Cpv,
+        cache: &CacheEntry,
+        repo: Interned<DefaultInterner>,
+    ) -> bool {
+        version_accepted_for(self, cpv, cache, repo)
+    }
+
     /// Rebind `package_use` and its policy-fact generation together.
+
     pub fn with_package_use(
         self,
         cache: &'a PolicyFactsCache,

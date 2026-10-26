@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use portage_atom::{Cpn, Cpv};
 use portage_metadata::RawCacheEntry;
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
@@ -226,20 +226,41 @@ impl SearchKey {
 /// available/installed versions, distfile size, homepage, description and
 /// license, bracketed by the search-key header and the result count.
 pub async fn run_emerge_style(
-    repo_paths: &[std::path::PathBuf],
+    cli: &crate::cli::Cli,
     patterns: &[String],
     search_desc: bool,
     regex_auto: bool,
 ) -> Result<()> {
-    let repos = open_repos(repo_paths)?;
+    let repos = open_repos(&cli.search_repos())?;
     let keys = patterns
         .iter()
         .map(|p| SearchKey::parse(p, regex_auto))
         .collect::<Result<Vec<_>>>()?;
 
+    let roots = cli.roots();
+    let set = portage_repo::RepoSet::from_ordered(
+        repos.iter().cloned().map(std::sync::Arc::new).collect(),
+        0,
+        Vec::new(),
+    );
+    let use_env = portage_resolve::use_env::build_use_env(
+        &set,
+        roots.config(),
+        roots.config_overlay(),
+        None,
+        None,
+    )
+    .await
+    .context("resolving the profile for search visibility")?;
+    let (policy, _) = portage_resolve::repo::ResolvedPolicy::from_use_env(use_env, &cli.arch());
+    let policy = policy.as_policy();
+    let accepts = |cpv: &Cpv, entry: &portage_metadata::CacheEntry, repo: &Repository| {
+        policy.version_accepted(cpv, entry, repo.name())
+    };
+
     // Installed versions (best per cpn) from the VDB.
     let mut installed: BTreeMap<Cpn, portage_atom::Version> = BTreeMap::new();
-    if let Ok(vdb) = portage_vdb::Vdb::open_default() {
+    if let Ok(vdb) = crate::vdb::open_cli_vdb(cli) {
         for pkg in vdb.packages() {
             let cpv = pkg.cpv();
             installed
@@ -252,9 +273,6 @@ pub async fn run_emerge_style(
                 .or_insert_with(|| cpv.version.clone());
         }
     }
-
-    let arch = gentoo_core::Arch::current();
-    let arch_str = arch.as_str().to_string();
 
     for (pat, key) in patterns.iter().zip(&keys) {
         let mut out = anstream::stdout();
@@ -275,7 +293,7 @@ pub async fn run_emerge_style(
                 for pkg in cat.packages() {
                     let mut hit = key.matches_package(cat.name(), pkg.name());
                     if !hit && search_desc && !has_cache {
-                        hit = latest_visible(&repos, idx, pkg.cpn(), &arch_str)
+                        hit = latest_visible(&repos, idx, pkg.cpn(), &accepts)
                             .is_some_and(|(_, e, _)| key.re.is_match(&e.metadata.description));
                     }
                     if hit {
@@ -302,31 +320,41 @@ pub async fn run_emerge_style(
             for (cpv, hit) in desc_hits {
                 if hit.unwrap_or(false) {
                     let key = format!("{}/{}", cpv.cpn.category, cpv.cpn.package);
-                    matched.entry(key).or_insert((cpv.cpn, 0));
+                    if let Some(idx) = repo_providing(&repos, &cpv.cpn) {
+                        matched.entry(key).or_insert((cpv.cpn, idx));
+                    }
                 }
             }
         }
 
         for (key, (cpn, idx)) in &matched {
-            print_search_block(&repos, *idx, cpn, key, &installed, &arch_str);
+            print_search_block(&repos, *idx, cpn, key, &installed, &accepts);
         }
         println!("[ Applications found : {} ]\n", matched.len());
     }
     Ok(())
 }
 
-/// The latest version whose KEYWORDS accept this arch (stable or testing),
-/// with its metadata and a visibility flag.
+/// Whether a version from a repo is visible on the searched root
+type Accepts<'a> = dyn Fn(&Cpv, &portage_metadata::CacheEntry, &Repository) -> bool + 'a;
+
+/// The first of `repos` that has `cpn`
+fn repo_providing(repos: &[Repository], cpn: &Cpn) -> Option<usize> {
+    repos.iter().position(|r| {
+        r.category(cpn.category.as_str())
+            .is_some_and(|c| c.package(cpn.package.as_str()).is_some())
+    })
+}
+
+/// The latest version `accepts` lets through, with its metadata and a visibility flag
 ///
-/// The bool is `true` iff a keyword-matching version (stable ~ or *) was
-/// found for the arch; `false` means the returned entry is a fallback to the
-/// newest version that had metadata (the package appears as "\[ Masked \]" in
-/// emerge-style search output).
+/// The bool is `false` when no version is accepted and the entry is the newest one with
+/// metadata instead (the package appears as "\[ Masked \]" in emerge-style search output).
 fn latest_visible(
     repos: &[Repository],
     idx: usize,
     cpn: &Cpn,
-    arch: &str,
+    accepts: &Accepts<'_>,
 ) -> Option<(portage_atom::Version, portage_metadata::CacheEntry, bool)> {
     let repo = &repos[idx];
     let cat = repo.category(cpn.category.as_str())?;
@@ -340,11 +368,7 @@ fn latest_visible(
         if newest.is_none() {
             newest = Some((eb.cpv().version.clone(), entry.clone(), false));
         }
-        let visible = entry.metadata.keywords.iter().any(|k| {
-            let k = k.to_string();
-            k == arch || k == format!("~{arch}") || k == "*" || k == "~*"
-        });
-        if visible {
+        if accepts(eb.cpv(), &entry, repo) {
             return Some((eb.cpv().version.clone(), entry, true));
         }
     }
@@ -392,9 +416,10 @@ fn print_search_block(
     cpn: &Cpn,
     key: &str,
     installed: &BTreeMap<Cpn, portage_atom::Version>,
-    arch: &str,
+    accepts: &Accepts<'_>,
 ) {
-    let latest = latest_visible(repos, idx, cpn, arch);
+    let latest = latest_visible(repos, idx, cpn, accepts);
+
     let is_masked = latest.as_ref().is_some_and(|(_, _, vis)| !vis);
 
     let mut out = anstream::stdout();
@@ -516,5 +541,44 @@ mod tests {
             "a bad regex is text"
         );
         assert!(SearchKey::parse("%(", true).is_err());
+    }
+
+    #[test]
+    fn latest_available_is_the_newest_version_the_policy_accepts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("metadata")).unwrap();
+        std::fs::write(root.join("metadata/layout.conf"), "").unwrap();
+        std::fs::create_dir_all(root.join("profiles")).unwrap();
+        std::fs::write(root.join("profiles/repo_name"), "test\n").unwrap();
+        std::fs::write(root.join("profiles/categories"), "app-misc\n").unwrap();
+        std::fs::create_dir_all(root.join("app-misc/foo")).unwrap();
+        let repo = Repository::builder().in_memory_cache().open(root).unwrap();
+        for (ver, keywords) in [("1", "amd64"), ("2", "~amd64")] {
+            std::fs::write(
+                root.join(format!("app-misc/foo/foo-{ver}.ebuild")),
+                "EAPI=8\nSLOT=0\n",
+            )
+            .unwrap();
+            let text = format!("EAPI=8\nDESCRIPTION=d\nSLOT=0\nKEYWORDS={keywords}\n");
+            let entry = portage_metadata::CacheEntry::parse(&text).unwrap();
+            let cpv = Cpv::parse(&format!("app-misc/foo-{ver}")).unwrap();
+            repo.write_cache_entry(&cpv, &entry).unwrap();
+        }
+        let repos = [repo];
+        let cpn = Cpn::parse("app-misc/foo").unwrap();
+        assert_eq!(repo_providing(&repos, &cpn), Some(0));
+        let arch = gentoo_core::Arch::intern("amd64");
+        let latest = |accept: &[&str]| {
+            let keywords = portage_resolve::repo::AcceptKeywords::from_global(&arch, accept);
+            let accepts = |cpv: &Cpv, e: &portage_metadata::CacheEntry, _: &Repository| {
+                keywords.accepts(&e.metadata.keywords, cpv, Some(e.metadata.slot.slot))
+            };
+            let (ver, _, visible) = latest_visible(&repos, 0, &cpn, &accepts).unwrap();
+            (ver.to_string(), visible)
+        };
+        assert_eq!(latest(&["amd64"]), ("1".to_string(), true));
+        assert_eq!(latest(&["amd64", "~amd64"]), ("2".to_string(), true));
+        assert_eq!(latest(&["arm64"]), ("2".to_string(), false));
     }
 }
