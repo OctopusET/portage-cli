@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use gentoo_interner::{DefaultInterner, Interned};
-use winnow::combinator::{alt, cut_err, delimited, opt, preceded, separated, terminated};
+use winnow::combinator::{alt, cut_err, delimited, opt, preceded, separated};
 use winnow::error::StrContext;
 use winnow::prelude::*;
 
@@ -229,14 +229,23 @@ pub(crate) fn parse_use_dep_item(input: &mut &str) -> ModalResult<UseDep> {
     .parse_next(input)
 }
 
+/// Whether no flag carries two different default annotations (counting "none" as one)
+fn defaults_agree(deps: &[UseDep]) -> bool {
+    deps.iter().enumerate().all(|(i, a)| {
+        deps[..i]
+            .iter()
+            .all(|b| b.flag != a.flag || b.default == a.default)
+    })
+}
+
 /// Parse USE dependencies (with brackets)
 pub(crate) fn parse_use_deps(input: &mut &str) -> ModalResult<Vec<UseDep>> {
     delimited(
         '[',
-        cut_err(terminated(
-            separated(0.., parse_use_dep_item, ','),
-            opt(','),
-        )),
+        cut_err(
+            separated(1.., parse_use_dep_item, ',')
+                .verify(|deps: &Vec<UseDep>| defaults_agree(deps)),
+        ),
         cut_err(']'),
     )
     .context(StrContext::Label("use deps"))
@@ -291,11 +300,19 @@ mod tests {
         assert_eq!(deps[2].kind, UseDepKind::Conditional);
     }
 
-    // Issue 1: Empty USE dep brackets []
     #[test]
-    fn test_empty_use_deps() {
-        let deps = parse_use_deps.parse("[]").unwrap();
-        assert!(deps.is_empty());
+    fn malformed_use_dep_lists_are_rejected() {
+        for list in [
+            "[]",
+            "[a,]",
+            "[introspection?,]",
+            "[a(+),-a(-)]",
+            "[a,-a(+)]",
+        ] {
+            assert!(parse_use_deps.parse(list).is_err(), "{list}");
+        }
+        assert_eq!(parse_use_deps.parse("[a,a]").unwrap().len(), 2);
+        assert_eq!(parse_use_deps.parse("[a(+),-a(+)]").unwrap().len(), 2);
     }
 
     // Issue 2: USE dep defaults (+) and (-)
@@ -318,15 +335,6 @@ mod tests {
         assert_eq!(dep.kind, UseDepKind::Enabled);
         assert_eq!(dep.default, Some(UseDefault::Enabled));
         assert_eq!(dep.to_string(), "icu(+)");
-    }
-
-    // Issue 4: Trailing comma in USE dep list
-    #[test]
-    fn test_use_deps_with_trailing_comma() {
-        let deps = parse_use_deps.parse("[introspection?,]").unwrap();
-        assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].flag, "introspection");
-        assert_eq!(deps[0].kind, UseDepKind::Conditional);
     }
 
     #[test]

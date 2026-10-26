@@ -957,32 +957,14 @@ mod tests {
         assert!(DepEntry::parse("?? dev-libs/a").is_err());
     }
 
-    // Issue 1: Empty USE dep brackets []
     #[test]
-    fn test_atoms_with_empty_use_deps() {
-        let entries = DepEntry::parse("dev-libs/libbsd[]").unwrap();
-        assert_eq!(entries.len(), 1);
-        match &entries[0] {
-            DepEntry::Atom(dep) => {
-                assert_eq!(dep.package(), "libbsd");
-                assert!(dep.use_deps.as_ref().unwrap().is_empty());
-            }
-            _ => panic!("expected Atom"),
-        }
-
-        let entries = DepEntry::parse(">=dev-libs/libatomic_ops-7.4[]").unwrap();
-        assert_eq!(entries.len(), 1);
-        match &entries[0] {
-            DepEntry::Atom(dep) => {
-                assert_eq!(dep.package(), "libatomic_ops");
-                assert!(dep.version.is_some());
-                assert!(dep.use_deps.as_ref().unwrap().is_empty());
-            }
-            _ => panic!("expected Atom"),
-        }
+    fn atoms_with_empty_or_trailing_comma_use_deps_are_rejected() {
+        assert!(DepEntry::parse("dev-libs/libbsd[]").is_err());
+        assert!(
+            DepEntry::parse(">=app-accessibility/at-spi2-core-2.46.0[introspection?,]").is_err()
+        );
     }
 
-    // Issue 2: USE dep defaults (+) and (-)
     #[test]
     fn test_atoms_with_use_dep_defaults() {
         let entries = DepEntry::parse("sys-libs/ncurses:=[unicode(+)?]").unwrap();
@@ -1073,26 +1055,6 @@ mod tests {
         assert!(!v1_3.glob_matches(&v1_2_star));
     }
 
-    // Issue 4: Trailing comma in USE dep list
-    #[test]
-    fn test_atoms_with_trailing_comma_in_use_deps() {
-        let entries =
-            DepEntry::parse(">=app-accessibility/at-spi2-core-2.46.0[introspection?,]").unwrap();
-        assert_eq!(entries.len(), 1);
-        match &entries[0] {
-            DepEntry::Atom(dep) => {
-                assert_eq!(dep.package(), "at-spi2-core");
-                assert!(dep.version.is_some());
-                let use_deps = dep.use_deps.as_ref().unwrap();
-                assert_eq!(use_deps.len(), 1);
-                assert_eq!(use_deps[0].flag, "introspection");
-                assert_eq!(use_deps[0].kind, UseDepKind::Conditional);
-            }
-            _ => panic!("expected Atom"),
-        }
-    }
-
-    // Issue 5: USE-conditional dep groups with whitespace handling
     #[test]
     fn test_use_conditional_with_whitespace() {
         let entries =
