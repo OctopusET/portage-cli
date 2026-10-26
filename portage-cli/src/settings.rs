@@ -189,6 +189,7 @@ const HONOURED_FEATURES: &[&str] = &[
     "pkgdir-index-trusted",
     "preserve-libs",
     "protect-owned",
+    "strict",
     "test",
     "unmerge-orphans",
 ];

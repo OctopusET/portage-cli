@@ -2525,7 +2525,7 @@ pub struct EbuildArgs {
     /// Path to the `.ebuild` file to execute
     #[arg(positional)]
     pub ebuild_path: String,
-    /// Phase(s) to run in order (e.g. `compile`, `install`, `qmerge`)
+    /// Phase(s) to run in order (e.g. `compile`, `install`, `qmerge`, `manifest`)
     #[arg(positional, required)]
     pub phase: Vec<String>,
     /// Override the build work directory (default: `/var/tmp/portage/<cat>/<pf>`)

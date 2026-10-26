@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use sha2::Digest;
@@ -20,7 +20,9 @@ pub enum ManifestEntry {
     },
     /// `DATA` / `EBUILD` / `MISC` / `AUX` — a tracked repo file
     Data {
-        /// Repository-relative path to the file
+        /// Which tag the line carried
+        kind: DataKind,
+        /// Path to the file, relative to the package directory (`files/` for `AUX`)
         path: String,
         /// Expected file size in bytes
         size: u64,
@@ -48,7 +50,53 @@ pub enum ManifestEntry {
     },
 }
 
+/// The tag of a [`ManifestEntry::Data`] line
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DataKind {
+    /// `AUX`: a file under the package's `files/`
+    Aux,
+    /// `DATA`: a GLEP 74 tree file
+    Data,
+    /// `EBUILD`: an ebuild in the package directory
+    Ebuild,
+    /// `MISC`: any other package file, such as `metadata.xml`
+    Misc,
+}
+
+impl DataKind {
+    /// The Manifest tag
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aux => "AUX",
+            Self::Data => "DATA",
+            Self::Ebuild => "EBUILD",
+            Self::Misc => "MISC",
+        }
+    }
+}
+
 impl ManifestEntry {
+    /// A `DIST` entry for the distfile at `path`, with the size and every hash in `algos`
+    pub fn dist_from_file(filename: &str, path: &Path, algos: &[String]) -> Result<Self> {
+        let (size, hashes) = hash_file(path, algos)?;
+        Ok(Self::Dist {
+            filename: filename.to_owned(),
+            size,
+            hashes,
+        })
+    }
+
+    /// The line tag and the name the entry is keyed by
+    fn key(&self) -> (&str, &str) {
+        match self {
+            Self::Dist { filename, .. } => ("DIST", filename),
+            Self::Data { kind, path, .. } => (kind.as_str(), path),
+            Self::SubManifest { path, .. } => ("MANIFEST", path),
+            Self::Ignore { path } => ("IGNORE", path),
+            Self::Timestamp { value } => ("TIMESTAMP", value),
+        }
+    }
+
     /// Verify that `path` matches this Manifest entry's recorded size and hashes
     ///
     /// `Ignore` and `Timestamp` entries always return `Ok(())`.
@@ -77,43 +125,54 @@ impl ManifestEntry {
     }
 }
 
+impl std::fmt::Display for ManifestEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (tag, name) = self.key();
+        write!(f, "{tag} {name}")?;
+        match self {
+            Self::Dist { size, hashes, .. }
+            | Self::Data { size, hashes, .. }
+            | Self::SubManifest { size, hashes, .. } => {
+                write!(f, " {size}")?;
+                let mut hashes: Vec<_> = hashes.iter().collect();
+                hashes.sort();
+                for (algo, hex) in hashes {
+                    write!(f, " {algo} {hex}")?;
+                }
+                Ok(())
+            }
+            Self::Ignore { .. } | Self::Timestamp { .. } => Ok(()),
+        }
+    }
+}
+
 const SUPPORTED_HASHES: [&str; 3] = ["BLAKE2B", "SHA512", "SHA256"];
 
-/// Single-pass size + multi-hash verification
-fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -> Result<()> {
-    // --- size check (cheap, no I/O beyond stat) ---
-    let actual_size = std::fs::metadata(path)
+/// Size and `algos` digests of `path`, refusing an algorithm this crate cannot compute
+fn hash_file(path: &Path, algos: &[String]) -> Result<(u64, Vec<(String, String)>)> {
+    if let Some(algo) = algos
+        .iter()
+        .find(|a| !SUPPORTED_HASHES.contains(&a.as_str()))
+    {
+        return Err(Error::InvalidManifest(format!(
+            "unsupported manifest hash {algo}"
+        )));
+    }
+    let size = std::fs::metadata(path)
         .map_err(|e| Error::Io {
             path: path.to_path_buf(),
             source: e,
         })?
         .len();
-    if actual_size != expected_size {
-        return Err(Error::ManifestVerifyFailed {
-            path: path.to_path_buf(),
-            reason: format!(
-                "size mismatch: expected {} bytes, got {}",
-                expected_size, actual_size
-            ),
-        });
-    }
+    let wanted: Vec<&str> = algos.iter().map(String::as_str).collect();
+    Ok((size, digest_file(path, &wanted)?))
+}
 
-    // --- decide which hashers we need ---
-    let need_blake2b = hashes.iter().any(|(a, _)| a == "BLAKE2B");
-    let need_sha512 = hashes.iter().any(|(a, _)| a == "SHA512");
-    let need_sha256 = hashes.iter().any(|(a, _)| a == "SHA256");
-
-    if !need_blake2b && !need_sha512 && !need_sha256 {
-        return Err(Error::ManifestVerifyFailed {
-            path: path.to_path_buf(),
-            reason: "insufficient data: no supported hash".to_owned(),
-        });
-    }
-
-    // --- single read pass ---
-    let mut blake2b_h: Option<blake2::Blake2b512> = need_blake2b.then(Digest::new);
-    let mut sha512_h: Option<sha2::Sha512> = need_sha512.then(Digest::new);
-    let mut sha256_h: Option<sha2::Sha256> = need_sha256.then(Digest::new);
+/// Hex digests of `path` for each algorithm in `algos` this crate supports, in that order, in one read pass
+fn digest_file(path: &Path, algos: &[&str]) -> Result<Vec<(String, String)>> {
+    let mut blake2b_h: Option<blake2::Blake2b512> = algos.contains(&"BLAKE2B").then(Digest::new);
+    let mut sha512_h: Option<sha2::Sha512> = algos.contains(&"SHA512").then(Digest::new);
+    let mut sha256_h: Option<sha2::Sha256> = algos.contains(&"SHA256").then(Digest::new);
 
     let file = std::fs::File::open(path).map_err(|e| Error::Io {
         path: path.to_path_buf(),
@@ -141,18 +200,60 @@ fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -
         }
     }
 
-    // --- compare digests ---
-    let blake2b_hex = blake2b_h.map(|h| hex::encode(h.finalize()));
-    let sha512_hex = sha512_h.map(|h| hex::encode(h.finalize()));
-    let sha256_hex = sha256_h.map(|h| hex::encode(h.finalize()));
+    let mut blake2b_hex = blake2b_h.map(|h| hex::encode(h.finalize()));
+    let mut sha512_hex = sha512_h.map(|h| hex::encode(h.finalize()));
+    let mut sha256_hex = sha256_h.map(|h| hex::encode(h.finalize()));
+    Ok(algos
+        .iter()
+        .filter_map(|&algo| {
+            let hex = match algo {
+                "BLAKE2B" => blake2b_hex.take(),
+                "SHA512" => sha512_hex.take(),
+                "SHA256" => sha256_hex.take(),
+                _ => None,
+            }?;
+            Some((algo.to_owned(), hex))
+        })
+        .collect())
+}
+
+/// Single-pass size + multi-hash verification
+fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -> Result<()> {
+    // --- size check (cheap, no I/O beyond stat) ---
+    let actual_size = std::fs::metadata(path)
+        .map_err(|e| Error::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?
+        .len();
+    if actual_size != expected_size {
+        return Err(Error::ManifestVerifyFailed {
+            path: path.to_path_buf(),
+            reason: format!(
+                "size mismatch: expected {} bytes, got {}",
+                expected_size, actual_size
+            ),
+        });
+    }
+
+    let wanted: Vec<&str> = hashes
+        .iter()
+        .map(|(a, _)| a.as_str())
+        .filter(|a| SUPPORTED_HASHES.contains(a))
+        .collect();
+    if wanted.is_empty() {
+        return Err(Error::ManifestVerifyFailed {
+            path: path.to_path_buf(),
+            reason: "insufficient data: no supported hash".to_owned(),
+        });
+    }
+    let digests = digest_file(path, &wanted)?;
 
     for (algo, expected_hex) in hashes {
-        let actual_opt = match algo.as_str() {
-            "BLAKE2B" => blake2b_hex.as_deref(),
-            "SHA512" => sha512_hex.as_deref(),
-            "SHA256" => sha256_hex.as_deref(),
-            _ => None, // unknown algo — skip
-        };
+        let actual_opt = digests
+            .iter()
+            .find(|(a, _)| a == algo)
+            .map(|(_, hex)| hex.as_str());
         if let Some(actual) = actual_opt
             && actual != expected_hex.to_lowercase()
         {
@@ -208,8 +309,19 @@ impl Manifest {
                     }
                 }
                 "DATA" | "EBUILD" | "MISC" | "AUX" => {
+                    let kind = match tag {
+                        "AUX" => DataKind::Aux,
+                        "EBUILD" => DataKind::Ebuild,
+                        "MISC" => DataKind::Misc,
+                        _ => DataKind::Data,
+                    };
                     let (path, size, hashes) = parse_path_size_hashes(tag, line, lineno)?;
-                    ManifestEntry::Data { path, size, hashes }
+                    ManifestEntry::Data {
+                        kind,
+                        path,
+                        size,
+                        hashes,
+                    }
                 }
                 "MANIFEST" => {
                     let (path, size, hashes) = parse_path_size_hashes(tag, line, lineno)?;
@@ -255,6 +367,137 @@ impl Manifest {
             .iter()
             .filter(|e| matches!(e, ManifestEntry::Dist { .. }))
     }
+
+    /// Add `entry`, replacing any entry with the same tag and name
+    pub fn upsert(&mut self, entry: ManifestEntry) {
+        let key = entry.key();
+        match self.entries.iter().position(|e| e.key() == key) {
+            Some(i) => self.entries[i] = entry,
+            None => self.entries.push(entry),
+        }
+    }
+
+    /// The Manifest text, one line per entry sorted by tag then name, as portage writes it
+    pub fn render(&self) -> String {
+        let mut entries: Vec<&ManifestEntry> = self.entries.iter().collect();
+        entries.sort_by(|a, b| a.key().cmp(&b.key()));
+        entries.iter().map(|e| format!("{e}\n")).collect()
+    }
+
+    /// Replace every `EBUILD`/`AUX`/`MISC` entry with ones hashed from `pkg_dir` (a thick Manifest)
+    pub fn regenerate_package_files(&mut self, pkg_dir: &Path, algos: &[String]) -> Result<()> {
+        self.entries.retain(|e| {
+            !matches!(
+                e,
+                ManifestEntry::Data {
+                    kind: DataKind::Ebuild | DataKind::Aux | DataKind::Misc,
+                    ..
+                }
+            )
+        });
+        for (kind, path) in package_files(pkg_dir)? {
+            let (size, hashes) = hash_file(&package_file_path(pkg_dir, kind, &path), algos)?;
+            self.entries.push(ManifestEntry::Data {
+                kind,
+                path,
+                size,
+                hashes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Verify the `EBUILD`/`AUX`/`MISC` entries against `pkg_dir`; a listed `MISC` file may be absent
+    pub fn verify_package_dir(&self, pkg_dir: &Path) -> Result<()> {
+        for entry in &self.entries {
+            let ManifestEntry::Data { kind, path, .. } = entry else {
+                continue;
+            };
+            if *kind == DataKind::Data {
+                continue;
+            }
+            let file = package_file_path(pkg_dir, *kind, path);
+            if *kind == DataKind::Misc && !file.exists() {
+                continue;
+            }
+            entry.verify_file(&file)?;
+        }
+        Ok(())
+    }
+
+    /// Ebuilds and `files/` entries in `pkg_dir` that the Manifest does not list
+    pub fn unlisted_package_files(&self, pkg_dir: &Path) -> Result<Vec<PathBuf>> {
+        let listed = |kind: DataKind, path: &str| {
+            self.entries.iter().any(|e| {
+                matches!(e, ManifestEntry::Data { kind: k, path: p, .. } if *k == kind && p == path)
+            })
+        };
+        Ok(package_files(pkg_dir)?
+            .into_iter()
+            .filter(|(kind, path)| *kind != DataKind::Misc && !listed(*kind, path))
+            .map(|(kind, path)| package_file_path(pkg_dir, kind, &path))
+            .collect())
+    }
+}
+
+fn package_file_path(pkg_dir: &Path, kind: DataKind, path: &str) -> PathBuf {
+    match kind {
+        DataKind::Aux => pkg_dir.join("files").join(path),
+        _ => pkg_dir.join(path),
+    }
+}
+
+/// The files a thick Manifest covers in `pkg_dir`: ebuilds, other top-level files, and `files/`
+///
+/// Hidden names, `CVS` and `files/digest-*` are left out, as portage does.
+fn package_files(pkg_dir: &Path) -> Result<Vec<(DataKind, String)>> {
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| Error::Io { path, source }
+    };
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(pkg_dir).map_err(io(pkg_dir))? {
+        let entry = entry.map_err(io(pkg_dir))?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') || name == "Manifest" || !entry.path().is_file() {
+            continue;
+        }
+        let kind = if name.ends_with(".ebuild") {
+            DataKind::Ebuild
+        } else {
+            DataKind::Misc
+        };
+        out.push((kind, name));
+    }
+    let mut dirs = vec![PathBuf::new()];
+    let files = pkg_dir.join("files");
+    while let Some(rel) = dirs.pop() {
+        let dir = files.join(&rel);
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read {
+            let entry = entry.map_err(io(&dir))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.starts_with('.') || name == "CVS" {
+                continue;
+            }
+            let rel = rel.join(&name);
+            if entry.path().is_dir() {
+                dirs.push(rel);
+            } else if let Some(rel) = rel.to_str()
+                && !rel.starts_with("digest-")
+            {
+                out.push((DataKind::Aux, rel.to_owned()));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Parse `tag path size [algo hex ...]` from a whitespace-split line
@@ -361,6 +604,94 @@ mod tests {
             assert_eq!(manifest.entries.len(), 1);
             assert!(matches!(manifest.entries[0], ManifestEntry::Data { .. }));
         }
+    }
+
+    #[test]
+    fn render_round_trips_parse_and_sorts_like_portage() {
+        let input = "\
+EBUILD foo-1.ebuild 3 SHA512 bb BLAKE2B aa
+DIST b.tar.gz 2 BLAKE2B cc SHA512 dd
+AUX fix.patch 1 BLAKE2B ee SHA512 ff
+DIST a.tar.gz 4 BLAKE2B 11 SHA512 22
+";
+        let manifest = Manifest::parse(input).unwrap();
+        let rendered = manifest.render();
+        assert_eq!(
+            rendered,
+            "\
+AUX fix.patch 1 BLAKE2B ee SHA512 ff
+DIST a.tar.gz 4 BLAKE2B 11 SHA512 22
+DIST b.tar.gz 2 BLAKE2B cc SHA512 dd
+EBUILD foo-1.ebuild 3 BLAKE2B aa SHA512 bb
+"
+        );
+        assert_eq!(Manifest::parse(&rendered).unwrap().entries.len(), 4);
+    }
+
+    #[test]
+    fn dist_from_file_hashes_with_the_requested_algorithms() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, b"hello").unwrap();
+        let algos = ["BLAKE2B".to_owned(), "SHA512".to_owned()];
+        let entry = ManifestEntry::dist_from_file("hello.tar", f.path(), &algos).unwrap();
+        assert_eq!(
+            entry,
+            ManifestEntry::Dist {
+                filename: "hello.tar".into(),
+                size: 5,
+                hashes: hello_hashes(),
+            }
+        );
+        assert!(ManifestEntry::dist_from_file("hello.tar", f.path(), &["MD5".to_owned()]).is_err());
+    }
+
+    fn package_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("files/sub")).unwrap();
+        std::fs::write(dir.path().join("foo-1.ebuild"), "EAPI=8\n").unwrap();
+        std::fs::write(dir.path().join("metadata.xml"), "<pkgmetadata/>\n").unwrap();
+        std::fs::write(dir.path().join("files/sub/fix.patch"), "patch\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_regenerated_thick_manifest_verifies_with_aux_paths_under_files() {
+        let dir = package_dir();
+        let mut manifest = Manifest { entries: vec![] };
+        let algos = ["BLAKE2B".to_owned(), "SHA512".to_owned()];
+        manifest
+            .regenerate_package_files(dir.path(), &algos)
+            .unwrap();
+        let rendered = manifest.render();
+        assert!(rendered.starts_with("AUX sub/fix.patch 6 BLAKE2B "));
+        assert!(rendered.contains("\nEBUILD foo-1.ebuild 7 "));
+        assert!(rendered.contains("\nMISC metadata.xml 15 "));
+        let manifest = Manifest::parse(&rendered).unwrap();
+        manifest.verify_package_dir(dir.path()).unwrap();
+        assert!(
+            manifest
+                .unlisted_package_files(dir.path())
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::write(dir.path().join("foo-1.ebuild"), "EAPI=7\n").unwrap();
+        assert!(manifest.verify_package_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn unlisted_ebuilds_and_aux_files_are_reported() {
+        let dir = package_dir();
+        let manifest = Manifest { entries: vec![] };
+        std::fs::write(dir.path().join("files/.hidden"), "").unwrap();
+        std::fs::write(dir.path().join("files/digest-foo-1"), "").unwrap();
+        assert_eq!(
+            manifest.unlisted_package_files(dir.path()).unwrap(),
+            [
+                dir.path().join("files/sub/fix.patch"),
+                dir.path().join("foo-1.ebuild"),
+            ]
+        );
     }
 
     #[test]

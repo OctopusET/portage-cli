@@ -198,7 +198,7 @@ or `.secondary_memory()`.
 - `struct Category`, `struct Package`, `struct Ebuild` — Directory hierarchy
 - `struct Ebuilds` / `EbuildsIter` — Lazy ebuild discovery with filtering
 - `struct LayoutConf` — `metadata/layout.conf` parser
-- `struct Manifest` / `ManifestEntry` — `Manifest` file parser (BLAKE2/SHA256/MD5)
+- `struct Manifest` / `ManifestEntry` / `DataKind`: `Manifest` parser, writer and package-directory check (BLAKE2B/SHA512/SHA256)
 - `struct PkgMetadata` — `metadata/pkg_desc_index` + `metadata.xml` parsing
 - `struct Profile` / `ProfileDesc` / `ProfileStack` / `ProfileStatus` — Profile resolution
 - `struct ProfileEnv` / `ProfileEnvLayer` — Per-layer profile variable tracking
@@ -747,6 +747,10 @@ parse is skipped, since emerge does not check their syntax. Narrower than emerge
 check covers EAPI 5+ only and skips `[flag?]` USE-dep conditionals, a SRC_URI syntax error and
 IUSE defaults under EAPI 0 are not masked, and the `:*` slot map and the query views still
 count a version whose dependency field fails to parse.
+
+**`em ebuild <ebuild> manifest`.** It hashes the distfiles of the one ebuild it runs for and keeps
+every other `DIST` entry, where portage rebuilds the Manifest from all ebuilds in the package and
+drops entries none of them reference. There is no `--force` to replace a `DIST` entry whose file changed.
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC

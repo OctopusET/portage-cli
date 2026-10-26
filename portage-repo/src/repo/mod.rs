@@ -19,7 +19,7 @@ pub mod util;
 pub use category::{Categories, CategoriesIter, Category, Packages, PackagesIter};
 pub use ebuild::Ebuild;
 pub use layout::LayoutConf;
-pub use manifest::{Manifest, ManifestEntry};
+pub use manifest::{DataKind, Manifest, ManifestEntry};
 pub use package::Package;
 pub use pkgmetadata::{Maintainer, MaintainerKind, PkgMetadata};
 pub use profile::{

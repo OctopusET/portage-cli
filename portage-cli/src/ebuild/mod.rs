@@ -88,6 +88,8 @@ enum PhaseGroup {
 enum RunPhase {
     Ebuild(portage_metadata::Phase),
     Fetch,
+    /// `manifest`/`digest`: fetch every distfile and rewrite the package's Manifest
+    Manifest,
     Clean,
     Qmerge,
 }
@@ -108,6 +110,7 @@ impl std::fmt::Display for RunPhase {
         match self {
             Self::Ebuild(p) => write!(f, "{p}"),
             Self::Fetch => write!(f, "fetch"),
+            Self::Manifest => write!(f, "manifest"),
             Self::Clean => write!(f, "clean"),
             Self::Qmerge => write!(f, "qmerge"),
         }
@@ -120,6 +123,7 @@ impl std::str::FromStr for RunPhase {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "fetch" => Ok(Self::Fetch),
+            "manifest" | "digest" => Ok(Self::Manifest),
             "clean" => Ok(Self::Clean),
             "merge" | "qmerge" => Ok(Self::Qmerge),
             _ => s.parse().map(Self::Ebuild),
@@ -1433,7 +1437,12 @@ impl PackageSetup {
             .shell_with_masters(&master_refs)
             .await
             .context("creating shell")?;
-        let mirror_repos = if opts.group.phases().contains(&RunPhase::Fetch) {
+        let mirror_repos = if opts
+            .group
+            .phases()
+            .iter()
+            .any(|p| matches!(p, RunPhase::Fetch | RunPhase::Manifest))
+        {
             fetch_mirror_repos(&repo, masters, repos_conf.as_ref())
         } else {
             Vec::new()
@@ -2084,7 +2093,40 @@ async fn run_one_phase(
                 mirror_repos,
                 ..
             } = context;
-            run_fetch(shell, ebuild, repo, mirror_repos, work_root, fetch_all_uri).await
+            // FEATURES=digest regenerates the Manifest from every distfile, as portage's digestgen
+            // does before fetching; a failure to write it does not fail the fetch.
+            if has_feature(shell, "digest") {
+                let distfiles =
+                    run_fetch(shell, ebuild, repo, mirror_repos, work_root, true, true).await?;
+                if let Err(e) = write_manifest(shell, ebuild, repo, &distfiles) {
+                    crate::style::warn_line!("{e:#}");
+                }
+                return Ok(());
+            }
+            run_fetch(
+                shell,
+                ebuild,
+                repo,
+                mirror_repos,
+                work_root,
+                fetch_all_uri,
+                false,
+            )
+            .await
+            .map(drop)
+        }
+        RunPhase::Manifest => {
+            let distfiles = run_fetch(
+                shell,
+                ebuild,
+                repo,
+                context.mirror_repos,
+                work_root,
+                true,
+                true,
+            )
+            .await?;
+            write_manifest(shell, ebuild, repo, &distfiles)
         }
         RunPhase::Clean => run_clean(work_root),
         RunPhase::Qmerge => {
@@ -2106,6 +2148,9 @@ async fn run_one_phase(
             .await
         }
         RunPhase::Ebuild(p) => {
+            if phase == RunPhase::UNPACK {
+                check_package_manifest(shell, ebuild, repo)?;
+            }
             // PMS: pkg_pretend takes no part in environment saving, so nothing
             // it sets may reach pkg_setup. An ebuild known not to define it
             // keeps the shell, and with it the sourcing, as it is. A restored
@@ -2170,6 +2215,9 @@ fn append_log_line(path: &Utf8Path, line: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
 }
 
+/// Fetch the package's distfiles into DISTDIR, returning their names
+///
+/// `waive_digests` accepts a distfile the Manifest does not list yet, for generating one.
 async fn run_fetch(
     shell: &mut portage_repo::EbuildShell,
     ebuild: &Ebuild,
@@ -2178,7 +2226,8 @@ async fn run_fetch(
     work_root: &Utf8Path,
     // `-F`/`--fetch-all-uri`: resolve every SRC_URI entry regardless of USE.
     fetch_all_uri: bool,
-) -> Result<()> {
+    waive_digests: bool,
+) -> Result<Vec<String>> {
     // Read SRC_URI from the live shell. In a merge run the ebuild is already
     // sourced (the `pretend` phase ran first), so avoid re-sourcing here: doing
     // so over an already-sourced shell no-ops the eclasses (their include guards
@@ -2202,7 +2251,7 @@ async fn run_fetch(
 
     if src_uri_str.trim().is_empty() {
         tracing::info!("fetch: nothing to fetch (SRC_URI is empty)");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let entries = SrcUriEntry::parse(&src_uri_str).context("parsing SRC_URI")?;
@@ -2237,7 +2286,7 @@ async fn run_fetch(
 
     if distfiles.is_empty() {
         tracing::info!("fetch: nothing to fetch");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let manifest_path = ebuild
@@ -2255,7 +2304,7 @@ async fn run_fetch(
 
     let defaults = fetch_commands(shell);
     let config = FetchConfig {
-        allow_missing_digests: allow_missing_digests(shell, repo),
+        allow_missing_digests: waive_digests || allow_missing_digests(shell, repo),
         checksum_try_mirrors: checksum_try_mirrors(
             shell
                 .get_var("PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS")
@@ -2344,7 +2393,120 @@ async fn run_fetch(
         }
         bail!("one or more distfiles could not be fetched");
     }
+    Ok(seen.into_iter().collect())
+}
+
+/// Rewrite the package's Manifest with `distfiles`' `DIST` entries hashed from DISTDIR
+///
+/// Other `DIST` entries are kept, since the package's other ebuilds may still need them; a
+/// repository without thin manifests also gets its `EBUILD`/`AUX`/`MISC` entries regenerated.
+fn write_manifest(
+    shell: &portage_repo::EbuildShell,
+    ebuild: &Ebuild,
+    repo: &Repository,
+    distfiles: &[String],
+) -> Result<()> {
+    let layout = repo.layout();
+    let pkg_dir = ebuild
+        .path()
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no package directory", ebuild.path()))?;
+    if layout.properties.get("use-manifests").map(String::as_str) == Some("false") {
+        tracing::info!(
+            target: portage_repo::ACTION_TARGET,
+            ">>> Skipping creating Manifest for {pkg_dir}; repository is configured to not use them"
+        );
+        return Ok(());
+    }
+    let path = pkg_dir.join("Manifest");
+    let mut manifest = match std::fs::read_to_string(&path) {
+        Ok(raw) => Manifest::parse(&raw).with_context(|| format!("parsing {path}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest { entries: vec![] },
+        Err(e) => return Err(e).with_context(|| format!("reading {path}")),
+    };
+    let distdir = Utf8PathBuf::from(
+        shell
+            .get_var("DISTDIR")
+            .unwrap_or_else(|| "/var/cache/distfiles".into()),
+    );
+    tracing::info!(target: portage_repo::ACTION_TARGET, ">>> Creating Manifest for {pkg_dir}");
+    let algos = &layout.manifest_hashes;
+    for name in distfiles {
+        let file = distdir.join(name);
+        let entry = portage_repo::ManifestEntry::dist_from_file(name, file.as_std_path(), algos)
+            .with_context(|| format!("hashing {file}"))?;
+        manifest.upsert(entry);
+    }
+    if !layout.thin_manifests {
+        manifest
+            .regenerate_package_files(pkg_dir.as_std_path(), algos)
+            .with_context(|| format!("hashing the files of {pkg_dir}"))?;
+    }
+    let text = manifest.render();
+    if text.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("removing {path}"))
+            }
+            _ => Ok(()),
+        };
+    }
+    let tmp = pkg_dir.join(".Manifest.em-tmp");
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .with_context(|| format!("writing {path}"))
+}
+
+/// Check a thick Manifest's `EBUILD`/`AUX`/`MISC` entries before unpack, as portage's digestcheck does
+///
+/// Only FEATURES=strict verifies hashes and fails on a file the Manifest does not list; without
+/// it an unlisted ebuild or `files/` entry is a warning.
+fn check_package_manifest(
+    shell: &portage_repo::EbuildShell,
+    ebuild: &Ebuild,
+    repo: &Repository,
+) -> Result<()> {
+    let layout = repo.layout();
+    if layout.thin_manifests
+        || layout.allow_missing_manifest()
+        || shell.get_var("EBUILD_SKIP_MANIFEST").as_deref() == Some("1")
+        || shell.get_var("PORTAGE_PARALLEL_FETCHONLY").is_some()
+    {
+        return Ok(());
+    }
+    let Some(pkg_dir) = ebuild.path().parent() else {
+        return Ok(());
+    };
+    let path = pkg_dir.join("Manifest");
+    let manifest = match std::fs::read_to_string(&path) {
+        Ok(raw) => Manifest::parse(&raw).with_context(|| format!("parsing {path}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest { entries: vec![] },
+        Err(e) => return Err(e).with_context(|| format!("reading {path}")),
+    };
+    let strict = has_feature(shell, "strict");
+    if strict {
+        manifest
+            .verify_package_dir(pkg_dir.as_std_path())
+            .context("Manifest verification failed")?;
+    }
+    let unlisted = manifest
+        .unlisted_package_files(pkg_dir.as_std_path())
+        .with_context(|| format!("listing {pkg_dir}"))?;
+    for file in &unlisted {
+        crate::style::warn_line!("A file is not listed in the Manifest: '{}'", file.display());
+    }
+    if strict && !unlisted.is_empty() {
+        bail!("{path} does not list every file of the package");
+    }
     Ok(())
+}
+
+fn has_feature(shell: &portage_repo::EbuildShell, feature: &str) -> bool {
+    shell
+        .get_var("FEATURES")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|f| f == feature)
 }
 
 /// `PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS`, or `default` when it is unset or not a positive integer
@@ -4765,6 +4927,94 @@ mod tests {
         assert!(!config.scheme_commands.contains_key("SSH"));
     }
 
+    async fn run_alone(
+        probe: &Probe,
+        ebuild: &Ebuild,
+        phase: RunPhase,
+        features: &str,
+    ) -> Result<()> {
+        let repo = probe.repo();
+        let mut shell = repo.shell().await.unwrap();
+        shell.set_distdir(probe.path("distfiles"));
+        shell.preset_var("FEATURES", features);
+        let mirror_repos = [repo.clone()];
+        let context = PhaseContext {
+            fetch_all_uri: false,
+            mirror_repos: &mirror_repos,
+            merge_state: None,
+            binpkg_metadata: None,
+            binpkg_record: &[],
+        };
+        let work = probe.path("work");
+        run_one_phase(
+            &mut shell,
+            ebuild,
+            &repo,
+            phase,
+            &work,
+            &probe.path("root"),
+            context,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_manifest_phase_writes_dist_lines_with_the_layout_hashes() {
+        let probe = Probe::new();
+        fs::write(
+            probe.path("repo/metadata/layout.conf"),
+            "masters =\nthin-manifests = true\n",
+        )
+        .unwrap();
+        fs::create_dir_all(probe.path("distfiles")).unwrap();
+        fs::write(probe.path("distfiles/probe-1.tar.gz"), b"hello").unwrap();
+        let ebuild = probe.ebuild(
+            "probe",
+            "1",
+            "SRC_URI=\"http://example.invalid/probe-1.tar.gz\"\n",
+        );
+        let manifest = probe.path("repo/app-misc/probe/Manifest");
+        fs::write(&manifest, "DIST other-0.tar.gz 1 BLAKE2B aa SHA512 bb\n").unwrap();
+        run_alone(&probe, &ebuild, "manifest".parse().unwrap(), "")
+            .await
+            .unwrap();
+        let algos = ["BLAKE2B".to_owned(), "SHA512".to_owned()];
+        let dist = portage_repo::ManifestEntry::dist_from_file(
+            "probe-1.tar.gz",
+            probe.path("distfiles/probe-1.tar.gz").as_std_path(),
+            &algos,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&manifest).unwrap(),
+            format!("DIST other-0.tar.gz 1 BLAKE2B aa SHA512 bb\n{dist}\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_thick_manifest_is_checked_before_unpack_under_strict() {
+        let probe = Probe::new();
+        let ebuild = probe.ebuild("probe", "1", "");
+        let manifest = probe.path("repo/app-misc/probe/Manifest");
+        let unpack = RunPhase::UNPACK;
+
+        // Unlisted ebuild: a warning, or a failure under strict.
+        run_alone(&probe, &ebuild, unpack, "").await.unwrap();
+        assert!(run_alone(&probe, &ebuild, unpack, "strict").await.is_err());
+
+        let pkg_dir = probe.path("repo/app-misc/probe");
+        let mut m = Manifest { entries: vec![] };
+        let algos = ["BLAKE2B".to_owned()];
+        m.regenerate_package_files(pkg_dir.as_std_path(), &algos)
+            .unwrap();
+        fs::write(&manifest, m.render()).unwrap();
+        run_alone(&probe, &ebuild, unpack, "strict").await.unwrap();
+
+        fs::write(ebuild.path(), "EAPI=8\n# tampered\n").unwrap();
+        assert!(run_alone(&probe, &ebuild, unpack, "strict").await.is_err());
+        run_alone(&probe, &ebuild, unpack, "").await.unwrap();
+    }
+
     /// Fetch `body`'s one distfile, which has no Manifest entry and so fails without a download;
     /// returns whether `pkg_nofetch` is defined afterwards
     async fn failed_fetch(probe: &Probe, body: &str) -> bool {
@@ -4775,7 +5025,16 @@ mod tests {
         shell.set_distdir(probe.path("distfiles"));
         let work = probe.path("work");
         let mirror_repos = [repo.clone()];
-        let err = run_fetch(&mut shell, &ebuild, &repo, &mirror_repos, &work, false).await;
+        let err = run_fetch(
+            &mut shell,
+            &ebuild,
+            &repo,
+            &mirror_repos,
+            &work,
+            false,
+            false,
+        )
+        .await;
         assert!(err.is_err());
         shell.defines_function("pkg_nofetch")
     }

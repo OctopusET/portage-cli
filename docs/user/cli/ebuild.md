@@ -12,7 +12,7 @@ em ebuild [OPTIONS] <EBUILD_PATH> <PHASE>...
 ## Arguments
 
 * `<EBUILD_PATH>` — Path to the `.ebuild` file to execute
-* `<PHASE>...` — Phase(s) to run in order (e.g. `compile`, `install`, `qmerge`)
+* `<PHASE>...` — Phase(s) to run in order (e.g. `compile`, `install`, `qmerge`, `manifest`)
 
 ## Options
 

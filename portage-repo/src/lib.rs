@@ -103,10 +103,10 @@ pub use repo::{
     RepositoryBuilder,
 };
 pub use repo::{Categories, CategoriesIter, Category, Packages, PackagesIter};
+pub use repo::{DataKind, Manifest, ManifestEntry};
 pub use repo::{EbuildIn, EbuildsAcross, EntryIn, RepoSet};
 pub use repo::{Location, RepoEntry, ReposConf};
 pub use repo::{Maintainer, MaintainerKind, PkgMetadata};
-pub use repo::{Manifest, ManifestEntry};
 pub use repo::{
     Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus, UseFlags,
 };

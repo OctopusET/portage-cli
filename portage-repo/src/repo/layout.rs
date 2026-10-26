@@ -19,6 +19,8 @@ pub struct LayoutConf {
     pub thin_manifests: bool,
     /// Whether manifests are signed
     pub sign_manifests: bool,
+    /// Hashes a generated Manifest records (`manifest-hashes`, default `BLAKE2B SHA512`)
+    pub manifest_hashes: Vec<String>,
     /// Cache formats used (e.g. `md5-dict`)
     pub cache_formats: Vec<String>,
     /// Profile formats (e.g. `portage-2`)
@@ -63,6 +65,10 @@ impl LayoutConf {
             masters: split_ws("masters"),
             thin_manifests: get_bool("thin-manifests", false),
             sign_manifests: get_bool("sign-manifests", true),
+            manifest_hashes: match split_ws("manifest-hashes") {
+                hashes if hashes.is_empty() => vec!["BLAKE2B".to_owned(), "SHA512".to_owned()],
+                hashes => hashes,
+            },
             cache_formats: split_ws("cache-formats"),
             profile_formats: split_ws("profile-formats"),
             eapis_banned: split_ws("eapis-banned"),
@@ -112,6 +118,13 @@ profile-formats = portage-2
         assert!(!layout.sign_manifests);
         assert_eq!(layout.cache_formats, vec!["md5-dict"]);
         assert_eq!(layout.profile_formats, vec!["portage-2"]);
+    }
+
+    #[test]
+    fn manifest_hashes_default_to_blake2b_and_sha512() {
+        let hashes = |input: &str| LayoutConf::parse(input).unwrap().manifest_hashes;
+        assert_eq!(hashes(""), ["BLAKE2B", "SHA512"]);
+        assert_eq!(hashes("manifest-hashes = SHA512\n"), ["SHA512"]);
     }
 
     #[test]
