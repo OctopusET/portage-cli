@@ -135,8 +135,9 @@ fn approximate_bounds(v: &Version) -> (Version, Version) {
 ///
 /// PMS order has no least version above a prefix (`1_alpha_alpha` < `1_alpha`), so each bound
 /// is taken one `_alpha` below its version ([`alpha_below`]); deeper `_alpha` chains fall outside.
+/// Leading zeros of a later component also leak: `=1.09*` admits `1.095`.
 fn glob_ranges(v: Version) -> Ranges<Version> {
-    if v.to_string().contains("-r") {
+    if v.revision.0 != 0 {
         return Ranges::singleton(v);
     }
     let upper = glob_upper(&v);
