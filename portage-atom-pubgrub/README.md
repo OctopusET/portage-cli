@@ -138,6 +138,9 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   branch already pulled into the graph; here only installed state, USE-dep
   satisfaction and listing order rank branches, so `|| ( a b )` can pull `a`
   while another dependency already pulled `b`.
+- **Circular `||` build-dep branches ignore the edge's root.** A DEPEND/BDEPEND
+  branch only the package itself satisfies is taken when ROOT or BROOT has the
+  package in range; a cross build does not check the root the edge resolves on.
 - **Reverse-dependency consistency is checked, and reported.** Unlike a default
   targeted `emerge -p` (which does not pull reverse deps into the graph), the
   consumer checks every installed package's constraints against the plan and

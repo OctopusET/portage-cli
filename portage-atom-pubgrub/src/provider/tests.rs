@@ -1254,6 +1254,20 @@ fn or_branch_satisfied_only_by_owner_is_demoted() {
         .unwrap();
     assert!(solution.get(&bootstrap).is_none(), "go on BROOT");
 
+    // `-uD` keeps host-satisfied build edges, so the || reaches choose_version.
+    let mut provider = PortageDependencyProvider::new(go_bootstrap_repo());
+    provider.set_prefer_update(true);
+    provider.add_host_installed(
+        go.clone(),
+        Version::parse("1.24.6").unwrap(),
+        vec![],
+        vec![],
+    );
+    let solution = provider
+        .resolve_targets(vec![(go.clone(), target.clone())])
+        .unwrap();
+    assert!(solution.get(&bootstrap).is_none(), "go on BROOT, -uD");
+
     let mut provider = PortageDependencyProvider::new(go_bootstrap_repo());
     provider.add_installed(InstalledPackage {
         package: go.clone(),
