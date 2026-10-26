@@ -12,6 +12,7 @@
 //! richer node/edge/requirement types (keyed on `PortagePackage`) are mapped to
 //! their plain `Cpn`/[`SelectedPackage`] counterparts.
 
+use portage_atom::Version;
 use portage_solver::{
     CededFlag, DepEdge, DroppedDep, InstalledPackage as SolverInstalled, Plan, SelectedPackage,
     SolveError, Solver, TargetSpec, UseFlagRequirement, Violation,
@@ -180,10 +181,18 @@ impl PortageDependencyProvider {
     /// "any slot" node. Consumers that need a single slot pin it in the
     /// `TargetSpec` (keyword/mask-aware selection).
     fn to_portage_targets(&self, spec: &TargetSpec) -> Vec<(PortagePackage, PortageVersionSet)> {
-        let vs = match (spec.op, &spec.version) {
+        let mut vs = match (spec.op, &spec.version) {
             (Some(op), Some(v)) => PortageVersionSet::from_operator(op, spec.glob, v.clone()),
             _ => PortageVersionSet::any(),
         };
+        if let Some(v) = spec.version.as_ref().filter(|_| spec.glob) {
+            let known: Vec<Version> = self
+                .packages_for_cpn(&spec.cpn)
+                .iter()
+                .flat_map(|p| self.versions_for_pkg(p))
+                .collect();
+            vs = vs.glob_over(v, &known);
+        }
         match spec.slot {
             Some(slot) => vec![(PortagePackage::slotted(spec.cpn, slot), vs)],
             None => {

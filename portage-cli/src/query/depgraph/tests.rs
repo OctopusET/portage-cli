@@ -1115,3 +1115,17 @@ fn changed_deps_rebuilds_only_an_installed_package_whose_deps_changed() {
         );
     }
 }
+
+#[test]
+fn a_glob_target_matches_only_versions_with_that_prefix() {
+    let pkgs = [
+        pkg("app-misc/foo-1.09", "0", ""),
+        pkg("app-misc/foo-1.095", "0", ""),
+    ];
+    let fix = fixture(&pkgs, &[]);
+    let atoms = [TargetAtom::explicit("=app-misc/foo-1.09*")];
+    assert_eq!(
+        names(&solve(&fix, Solve::new(&atoms))),
+        ["app-misc/foo-1.09"]
+    );
+}

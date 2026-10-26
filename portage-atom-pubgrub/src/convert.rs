@@ -410,15 +410,15 @@ impl ConvertCtx<'_> {
         if pattern.is_none() && needed.is_empty() {
             return vs;
         }
+        let candidates = self.candidates.get(&dep.cpn);
+        let vs = match pattern {
+            Some(p) => vs.glob_over(p, candidates.iter().map(|(v, _)| v)),
+            None => vs,
+        };
         let mut ranges = vs.ranges().clone();
-        for (v, iuse) in self.candidates.get(&dep.cpn).iter() {
-            let one = Ranges::singleton(v.clone());
-            if pattern.is_some_and(|p| !v.glob_matches(p))
-                || !needed.iter().all(|f| iuse.contains(f))
-            {
-                ranges = ranges.intersection(&one.complement());
-            } else if pattern.is_some() {
-                ranges = ranges.union(&one);
+        for (v, iuse) in candidates.iter() {
+            if !needed.iter().all(|f| iuse.contains(f)) {
+                ranges = ranges.intersection(&Ranges::singleton(v.clone()).complement());
             }
         }
         PortageVersionSet::from_ranges(ranges)

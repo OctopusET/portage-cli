@@ -893,6 +893,12 @@ fn classify_root_targets(
         let dep = Dep::parse(atom).map_err(|e| anyhow::anyhow!("bad atom '{atom}': {e}"))?;
         let pkg = repo::target_package(data, &dep, target_policy);
         let vs = match &dep.version {
+            Some(v) if dep.glob => {
+                let tree = data.versions.get(&dep.cpn).into_iter().flatten();
+                let vdb = installed.get(&dep.cpn).into_iter().flat_map(|s| s.values());
+                PortageVersionSet::from_operator(Operator::Equal, true, v.clone())
+                    .glob_over(v, tree.map(|(cpv, _)| &cpv.version).chain(vdb))
+            }
             Some(v) => {
                 let op = dep.op.unwrap_or(Operator::GreaterOrEqual);
                 PortageVersionSet::from_operator(op, dep.glob, v.clone())

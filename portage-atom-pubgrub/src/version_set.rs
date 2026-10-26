@@ -28,6 +28,24 @@ impl PortageVersionSet {
         Self(ranges)
     }
 
+    /// `=pattern*` made exact over `candidates`, which [`Version::glob_matches`] keeps or drops
+    pub fn glob_over<'a>(
+        self,
+        pattern: &Version,
+        candidates: impl IntoIterator<Item = &'a Version>,
+    ) -> Self {
+        let mut ranges = self.0;
+        for v in candidates {
+            let one = Ranges::singleton(v.clone());
+            ranges = if v.glob_matches(pattern) {
+                ranges.union(&one)
+            } else {
+                ranges.intersection(&one.complement())
+            };
+        }
+        Self(ranges)
+    }
+
     /// Returns the inner ranges
     pub fn ranges(&self) -> &Ranges<Version> {
         &self.0
@@ -139,7 +157,7 @@ fn approximate_bounds(v: &Version) -> (Version, Version) {
 ///
 /// PMS order has no least version above a prefix (`1_alpha_alpha` < `1_alpha`), so each bound
 /// is taken one `_alpha` below its version ([`alpha_below`]); deeper `_alpha` chains fall outside,
-/// and `=1.09*` admits `1.095`. Dependency conversion corrects both over the repository's versions.
+/// and `=1.09*` admits `1.095`. [`PortageVersionSet::glob_over`] corrects both over known versions.
 fn glob_ranges(v: Version) -> Ranges<Version> {
     if v.revision.0 != 0 {
         return Ranges::singleton(v);
