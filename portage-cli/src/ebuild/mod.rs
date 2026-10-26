@@ -283,18 +283,18 @@ pub(crate) fn build_ld_library_path(
     (!dirs.is_empty()).then(|| dirs.join(":"))
 }
 
-/// The base directory for build work trees: `${PORTAGE_TMPDIR}/portage` when
-/// `tmpdir` is given; else `<prefix>/var/tmp/portage` under a prefix; otherwise
-/// the system `/var/tmp/portage` when writable, falling back to the user cache.
+/// The base directory for build work trees: `<prefix>/var/tmp/portage` under a prefix;
+/// else `${PORTAGE_TMPDIR}/portage` when `tmpdir` is given; otherwise the system
+/// `/var/tmp/portage` when writable, falling back to the user cache.
 ///
 /// Per-package trees live under [`package_work_dir`], which further keys by
 /// merge root so dual-root plan entries (host + target) never share a WORKDIR.
 pub fn default_work_base(prefix: Option<&Utf8Path>, tmpdir: Option<&Utf8Path>) -> Utf8PathBuf {
-    if let Some(t) = tmpdir {
-        return t.join("portage");
-    }
     if let Some(p) = prefix {
         return p.join("var/tmp/portage");
+    }
+    if let Some(t) = tmpdir {
+        return t.join("portage");
     }
     let system = Utf8Path::new("/var/tmp/portage");
     let probe = system.join(format!(".em-write-probe-{}", std::process::id()));
@@ -315,16 +315,18 @@ fn portage_tmpdir(settings: Option<&portage_repo::Settings>) -> Option<&Utf8Path
         .then(|| Utf8Path::new(s.value.as_str()))
 }
 
-/// [`default_work_base`] under `prefix`, with the `PORTAGE_TMPDIR` of the settings `cli` selects
+/// [`default_work_base`] under `prefix`, or with the `PORTAGE_TMPDIR` of the settings `cli` selects
+///
+/// A prefix keeps its work trees inside itself: the host make.conf's `PORTAGE_TMPDIR` does not apply.
 pub(crate) async fn work_base(
     cli: &crate::cli::Cli,
     prefix: Option<&Utf8Path>,
 ) -> Result<Utf8PathBuf> {
+    if prefix.is_some() {
+        return Ok(default_work_base(prefix, None));
+    }
     let settings = crate::settings::load(cli).await?;
-    Ok(default_work_base(
-        prefix,
-        portage_tmpdir(settings.as_deref()),
-    ))
+    Ok(default_work_base(None, portage_tmpdir(settings.as_deref())))
 }
 
 /// Stable subdirectory key for a merge root under [`default_work_base`]
@@ -4244,8 +4246,12 @@ mod tests {
             Some(Utf8Path::new("/mnt/tmpfs"))
         );
         assert_eq!(
-            default_work_base(Some(Utf8Path::new("/p")), portage_tmpdir(Some(&conf))),
+            default_work_base(None, portage_tmpdir(Some(&conf))),
             "/mnt/tmpfs/portage"
+        );
+        assert_eq!(
+            default_work_base(Some(Utf8Path::new("/p")), portage_tmpdir(Some(&conf))),
+            "/p/var/tmp/portage"
         );
     }
 
