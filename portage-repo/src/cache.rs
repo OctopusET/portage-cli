@@ -202,6 +202,13 @@ pub async fn regen_cache(
     let covered_cb = Arc::clone(&covered);
     let reconcile_cb = reconcile_repo_cache;
     let repo_for_write = repo.clone();
+    // Portage writes no md5-cache entry for an unsupported EAPI; only em's own store keeps the stub.
+    let stubs_to_target = dir_swap.as_ref().is_some_and(|(dir, _)| {
+        !matches!(opts.write, RegenWriteTarget::Dir(_))
+            && repo
+                .secondary_cache_dir()
+                .is_some_and(|s| s.as_std_path() == dir)
+    });
 
     let sourced = crate::source::source_parallel_join(
         repo,
@@ -209,11 +216,26 @@ pub async fn regen_cache(
         &opts.source,
         &ctx,
         move |ebuild, result| {
+            let mut written = true;
             let item_result = match result {
                 Err(e) => Err(e),
                 Ok(sourced) => {
+                    let stub = sourced.metadata.unsupported_eapi().is_some();
                     let write_err = match &write {
                         PreparedWriteTarget::None => None,
+                        PreparedWriteTarget::Dir(_) if stub && !stubs_to_target => {
+                            written = false;
+                            None
+                        }
+                        PreparedWriteTarget::Repository if stub => {
+                            build_entry(&ebuild, sourced, &checksum_cache)
+                                .and_then(|entry| {
+                                    repo_for_write
+                                        .put_secondary(ebuild.cpv(), &entry)
+                                        .map_err(|e| e.to_string())
+                                })
+                                .err()
+                        }
                         PreparedWriteTarget::Dir(writer) => {
                             write_entry_to_dir(&ebuild, sourced, writer, &checksum_cache).err()
                         }
@@ -234,6 +256,7 @@ pub async fn regen_cache(
                 }
             };
             if reconcile_cb
+                && written
                 && item_result.is_ok()
                 && let Ok(mut covered) = covered_cb.lock()
             {

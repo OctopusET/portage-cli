@@ -301,6 +301,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unsupported_eapi_gets_no_md5_cache_entry() {
+        let (tmp, repo, ebuilds) = repo_with_eclass("");
+        std::fs::write(ebuilds[0].path(), "EAPI=99\n").unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for write in [
+            RegenWriteTarget::Dir(output.path().to_owned()),
+            RegenWriteTarget::Repository,
+        ] {
+            let (tx, _rx) = flume::unbounded();
+            let opts = RegenOpts {
+                write,
+                ..RegenOpts::default()
+            };
+            let stats = regen_cache(&repo, ebuilds.clone(), &opts, tx)
+                .await
+                .unwrap();
+            assert_eq!(stats.errors, 0);
+        }
+        assert!(!output.path().join("cat/pkg-1.0").exists());
+        assert!(!tmp.path().join("metadata/md5-cache/cat/pkg-1.0").exists());
+    }
+
+    #[tokio::test]
     async fn zero_jobs_still_writes_a_sourced_entry() {
         let (_tmp, repo, ebuilds) = repo_with_eclass("");
         let output = tempfile::tempdir().unwrap();
