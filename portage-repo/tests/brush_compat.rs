@@ -949,7 +949,7 @@ async fn inherit_nested_eclass() {
 }
 
 #[tokio::test]
-async fn inherit_skips_already_inherited() {
+async fn inherit_re_sources_an_already_inherited_eclass() {
     let (tmp, mut shell) = inherit_shell().await;
 
     std::fs::write(tmp.path().join("eclass/foo.eclass"), "IUSE=\"ssl\"\n").unwrap();
@@ -961,13 +961,13 @@ async fn inherit_skips_already_inherited() {
         inherit foo
         IUSE="${IUSE} extra"
         inherit foo
-        __OUT="E_IUSE=${E_IUSE} IUSE=${IUSE}"
+        __OUT="E_IUSE=${E_IUSE} IUSE=${IUSE} INHERITED=${INHERITED}"
         "#,
     )
     .await;
     assert_eq!(
-        got, "E_IUSE=ssl IUSE= extra",
-        "second inherit of same eclass is a no-op for sourcing but INHERIT still records it"
+        got, "E_IUSE=ssl ssl IUSE= extra INHERITED=foo",
+        "an unguarded eclass contributes again on a second inherit, as in portage"
     );
 }
 

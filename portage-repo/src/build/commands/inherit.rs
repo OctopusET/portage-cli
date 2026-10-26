@@ -148,22 +148,9 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for InheritCommand {
         let cache: Arc<papaya::HashMap<String, std::result::Result<Program, String>>> =
             context.state_mut::<InheritState>().cache.clone();
 
+        // An already-inherited eclass is sourced again, as portage does: its own
+        // include guard skips the body, but a trailing EXPORT_FUNCTIONS re-exports.
         for eclass in &self.eclasses {
-            let already_inherited = {
-                let state = context.state_mut::<InheritState>();
-                state.inherited.iter().any(|e| &e.name == eclass)
-            };
-            if already_inherited {
-                if is_top_level {
-                    if !inherit.is_empty() {
-                        inherit.push(' ');
-                    }
-                    inherit.push_str(eclass);
-                    set_var(context.shell, "INHERIT", &inherit);
-                }
-                continue;
-            }
-
             let eclass_file = find_eclass(context.shell, eclass);
             let Some(eclass_file) = eclass_file else {
                 let message = format!("inherit: eclass not found: {eclass}");
@@ -245,9 +232,8 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for InheritCommand {
                 set_var(context.shell, var, saved_val);
             }
 
-            // Update state: push this eclass and sync $INHERITED.
-            {
-                let state = context.state_mut::<InheritState>();
+            let state = context.state_mut::<InheritState>();
+            if !state.inherited.iter().any(|e| &e.name == eclass) {
                 state.inherited.push(InheritedEclass {
                     name: eclass.clone(),
                     path: eclass_file.clone(),

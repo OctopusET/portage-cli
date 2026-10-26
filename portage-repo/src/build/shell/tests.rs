@@ -3020,6 +3020,34 @@ async fn unsupported_eapi_yields_a_stub_without_sourcing() {
 }
 
 #[tokio::test]
+async fn reinheriting_an_eclass_re_exports_its_functions() {
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(dir.path(), "inherit b a\n");
+    let eclass = dir.path().join("repo/eclass");
+    std::fs::create_dir_all(&eclass).unwrap();
+    std::fs::write(
+        eclass.join("a.eclass"),
+        "if [[ -z ${_A_ECLASS} ]]; then\n_A_ECLASS=1\nIUSE=\"fa\"\n\
+         a_src_prepare() { :; }\nfi\nEXPORT_FUNCTIONS src_prepare\n",
+    )
+    .unwrap();
+    std::fs::write(
+        eclass.join("b.eclass"),
+        "inherit a\nIUSE=\"fb\"\nb_src_prepare() { :; }\nEXPORT_FUNCTIONS src_prepare\n",
+    )
+    .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell.source_ebuild(&ebuild).await.unwrap();
+    shell
+        .run_string("EM_F=$(declare -f src_prepare)")
+        .await
+        .unwrap();
+    let body = shell.get_var("EM_F").unwrap_or_default();
+    assert!(body.contains("a_src_prepare"), "{body}");
+    assert_eq!(shell.get_var("INHERITED").as_deref(), Some("a b"));
+}
+
+#[tokio::test]
 async fn src_prepare_must_call_eapply_user_from_eapi_6() {
     for (eapi, body, ok) in [
         ("8", "src_prepare() { :; }", false),
