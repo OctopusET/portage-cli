@@ -108,16 +108,18 @@ fn satisfied(entry: &DepEntry, installed: &[InstalledPackage], out: &mut Vec<Str
 /// Runtime dependencies of the packages depclean keeps that nothing installed satisfies,
 /// as `(dependency, parent)` pairs
 ///
-/// `IDEPEND` is left out: it resolves against the running root, which need not be this VDB.
+/// `IDEPEND` resolves against the running root, so it is checked only when this VDB is that
+/// root's (`with_idepend`). USE-dep brackets are not checked, so this can under-report.
 fn unresolved_deps(
     installed: &[InstalledPackage],
     cleanlist: &[InstalledPackage],
+    with_idepend: bool,
 ) -> Vec<(String, Cpv)> {
     let removed: HashSet<&Cpv> = cleanlist.iter().map(|p| p.cpv()).collect();
     let mut out = Vec::new();
     for pkg in installed.iter().filter(|p| !removed.contains(p.cpv())) {
         let mut missing = Vec::new();
-        for entry in own_entries(pkg, false, false) {
+        for entry in own_entries(pkg, with_idepend, false) {
             satisfied(&entry, installed, &mut missing);
         }
         out.extend(missing.into_iter().map(|m| (m, pkg.cpv().clone())));
@@ -337,20 +339,16 @@ pub async fn run_with_targets(
         &target_atoms,
         with_bdeps,
     );
-    if target_atoms.is_empty() {
-        let unresolved = unresolved_deps(&installed, &cleanlist);
-        if !unresolved.is_empty() {
-            crate::style::error_line!(
-                "Dependencies could not be completely resolved due to the following required \
-                 packages not being installed:"
-            );
-            for (dep, parent) in &unresolved {
-                crate::style::ewarn_sub_bullet!("{dep} pulled in by: {parent}");
-            }
-            bail!(
-                "depclean: installed packages have unsatisfied dependencies; update @world first"
-            );
+    let unresolved = unresolved_deps(&installed, &cleanlist, root == "/");
+    if !unresolved.is_empty() {
+        crate::style::error_line!(
+            "Dependencies could not be completely resolved due to the following required \
+             packages not being installed:"
+        );
+        for (dep, parent) in &unresolved {
+            crate::style::ewarn_sub_bullet!("{dep} pulled in by: {parent}");
         }
+        bail!("depclean: installed packages have unsatisfied dependencies; update @world first");
     }
     let cleanlist = removal_order(&cleanlist, with_bdeps);
 
@@ -461,11 +459,28 @@ mod tests {
         let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
         let world = vec![Dep::parse("app-misc/topapp").unwrap()];
         let cleanlist = compute_cleanlist(&installed, &world, &[], &[], false);
-        let got: Vec<String> = unresolved_deps(&installed, &cleanlist)
+        let got: Vec<String> = unresolved_deps(&installed, &cleanlist, false)
             .into_iter()
             .map(|(d, p)| format!("{d} {p}"))
             .collect();
         assert_eq!(got, ["dev-libs/missing app-misc/topapp-1.0"]);
+    }
+
+    #[test]
+    fn unresolved_idepend_is_checked_only_on_the_running_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "app-misc", "topapp-1.0", "", "");
+        std::fs::write(
+            vdb_root.join("app-misc/topapp-1.0/IDEPEND"),
+            "dev-util/gone",
+        )
+        .unwrap();
+
+        let vdb = open_vdb(tmp.path());
+        let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
+        assert!(unresolved_deps(&installed, &[], false).is_empty());
+        assert_eq!(unresolved_deps(&installed, &[], true).len(), 1);
     }
 
     #[test]
