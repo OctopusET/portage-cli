@@ -175,14 +175,17 @@ pub(crate) async fn seed_build_shell(shell: &mut EbuildShell, settings: &Setting
             Some(format!("export {name}={}\n", shell_quote(value)))
         })
         .collect();
-    let mut features = shell.get_var("FEATURES").unwrap_or_default();
+    let current = shell.get_var("FEATURES").unwrap_or_default();
+    let mut features = current.clone();
     let enabled = settings.get("FEATURES").unwrap_or_default();
     for &f in PROVIDED_FEATURES {
         let has = |list: &str| list.split_whitespace().any(|w| w == f);
         if has(enabled) && !has(&features) {
             features = format!("{features} {f}").trim_start().to_owned();
-            script += &format!("export FEATURES={}\n", shell_quote(&features));
         }
+    }
+    if features != current {
+        script += &format!("export FEATURES={}\n", shell_quote(&features));
     }
     shell
         .run_string(&script)
