@@ -36,12 +36,11 @@ use crate::cli;
 use crate::emerge::parse_atoms_strict;
 use crate::vdb::open_cli_vdb;
 
-/// Evaluate `pkg`'s own `RDEPEND`/`IDEPEND`/`PDEPEND` (+ `DEPEND`/`BDEPEND` under
-/// `with_bdeps`) against its own recorded `USE`, returning concrete,
-/// non-blocker atoms. `UseConditional`s are resolved by
+/// Evaluate `pkg`'s own `RDEPEND`/`PDEPEND` (+ `IDEPEND` under `with_idepend`, `DEPEND`/`BDEPEND`
+/// under `with_bdeps`) against its own recorded `USE`. `UseConditional`s are resolved by
 /// `DepEntry::evaluate_use`, matching the convention
 /// `bdepend_avail.rs`'s `collect_unsatisfied` already relies on.
-fn own_atoms(pkg: &InstalledPackage, with_bdeps: bool) -> Vec<Dep> {
+fn own_entries(pkg: &InstalledPackage, with_idepend: bool, with_bdeps: bool) -> Vec<DepEntry> {
     let use_set: HashSet<Interned<DefaultInterner>> = pkg
         .use_flags()
         .unwrap_or_default()
@@ -53,7 +52,7 @@ fn own_atoms(pkg: &InstalledPackage, with_bdeps: bool) -> Vec<Dep> {
     if let Ok(Some(e)) = pkg.rdepend() {
         entries.extend(e);
     }
-    if let Ok(Some(e)) = pkg.idepend() {
+    if with_idepend && let Ok(Some(e)) = pkg.idepend() {
         entries.extend(e);
     }
     if let Ok(Some(e)) = pkg.pdepend() {
@@ -68,10 +67,62 @@ fn own_atoms(pkg: &InstalledPackage, with_bdeps: bool) -> Vec<Dep> {
         }
     }
 
-    let evaluated = DepEntry::evaluate_use(&entries, &use_set);
+    DepEntry::evaluate_use(&entries, &use_set)
+}
+
+/// [`own_entries`] flattened into concrete, non-blocker atoms.
+fn own_atoms(pkg: &InstalledPackage, with_bdeps: bool) -> Vec<Dep> {
     let mut atoms = Vec::new();
-    collect_atoms(&evaluated, &mut atoms);
+    collect_atoms(&own_entries(pkg, true, with_bdeps), &mut atoms);
     atoms
+}
+
+/// Whether `entry` is satisfied by `installed`; pushes each unsatisfied atom or `||` group to `out`.
+fn satisfied(entry: &DepEntry, installed: &[InstalledPackage], out: &mut Vec<String>) -> bool {
+    match entry {
+        DepEntry::Atom(dep) if dep.blocker.is_none() => {
+            let ok = matching(dep, installed).next().is_some();
+            if !ok {
+                out.push(dep.to_string());
+            }
+            ok
+        }
+        DepEntry::AnyOf(c) | DepEntry::ExactlyOneOf(c) => {
+            let ok = c.iter().any(|e| satisfied(e, installed, &mut Vec::new()));
+            if !ok {
+                out.push(entry.to_string());
+            }
+            ok
+        }
+        DepEntry::AllOf(c) => {
+            let mut ok = true;
+            for e in c {
+                ok &= satisfied(e, installed, out);
+            }
+            ok
+        }
+        _ => true,
+    }
+}
+
+/// Runtime dependencies of the packages depclean keeps that nothing installed satisfies,
+/// as `(dependency, parent)` pairs
+///
+/// `IDEPEND` is left out: it resolves against the running root, which need not be this VDB.
+fn unresolved_deps(
+    installed: &[InstalledPackage],
+    cleanlist: &[InstalledPackage],
+) -> Vec<(String, Cpv)> {
+    let removed: HashSet<&Cpv> = cleanlist.iter().map(|p| p.cpv()).collect();
+    let mut out = Vec::new();
+    for pkg in installed.iter().filter(|p| !removed.contains(p.cpv())) {
+        let mut missing = Vec::new();
+        for entry in own_entries(pkg, false, false) {
+            satisfied(&entry, installed, &mut missing);
+        }
+        out.extend(missing.into_iter().map(|m| (m, pkg.cpv().clone())));
+    }
+    out
 }
 
 /// Flatten a (already USE-evaluated) `DepEntry` tree into concrete atoms, dropping blockers
@@ -286,6 +337,21 @@ pub async fn run_with_targets(
         &target_atoms,
         with_bdeps,
     );
+    if target_atoms.is_empty() {
+        let unresolved = unresolved_deps(&installed, &cleanlist);
+        if !unresolved.is_empty() {
+            crate::style::error_line!(
+                "Dependencies could not be completely resolved due to the following required \
+                 packages not being installed:"
+            );
+            for (dep, parent) in &unresolved {
+                crate::style::ewarn_sub_bullet!("{dep} pulled in by: {parent}");
+            }
+            bail!(
+                "depclean: installed packages have unsatisfied dependencies; update @world first"
+            );
+        }
+    }
     let cleanlist = removal_order(&cleanlist, with_bdeps);
 
     if cleanlist.is_empty() {
@@ -369,6 +435,37 @@ mod tests {
         let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
         let world = vec![Dep::parse("app-misc/topapp").unwrap()];
         assert!(compute_cleanlist(&installed, &world, &[], &[], false).is_empty());
+    }
+
+    #[test]
+    fn unresolved_deps_reports_kept_packages_only_at_group_level() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(
+            &vdb_root,
+            "app-misc",
+            "topapp-1.0",
+            "|| ( dev-libs/gone dev-libs/there ) dev-libs/missing !dev-libs/blocked",
+            "",
+        );
+        write_fake_package(&vdb_root, "dev-libs", "there-1.0", "", "");
+        write_fake_package(
+            &vdb_root,
+            "dev-libs",
+            "orphan-1.0",
+            "dev-libs/alsomissing",
+            "",
+        );
+
+        let vdb = open_vdb(tmp.path());
+        let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
+        let world = vec![Dep::parse("app-misc/topapp").unwrap()];
+        let cleanlist = compute_cleanlist(&installed, &world, &[], &[], false);
+        let got: Vec<String> = unresolved_deps(&installed, &cleanlist)
+            .into_iter()
+            .map(|(d, p)| format!("{d} {p}"))
+            .collect();
+        assert_eq!(got, ["dev-libs/missing app-misc/topapp-1.0"]);
     }
 
     #[test]
