@@ -82,26 +82,57 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
                 .or_else(|| flag("--prefix="))
                 .map_or_else(|| format!("{eprefix}/usr"), str::to_owned);
             let prefix = format!("/{}", prefix.trim_start_matches('/'));
+            let arg = squash_slashes(&format!("--libdir={prefix}/{libdir}"));
+            (prefix, arg)
+        });
+        let cwd = shell.working_dir().to_path_buf();
+        // configure path: $ECONF_SOURCE/configure, defaulting to $S (cwd).
+        let configure = if econf_source == "." {
+            cwd.join("configure")
+        } else {
+            std::path::Path::new(&econf_source).join("configure")
+        };
+        if !configure.exists() {
+            return Ok(brush_core::ExecutionResult::new(0));
+        }
+
+        // Not PMS, but what portage's econf does to every package.
+        let config_shell = get("CONFIG_SHELL");
+        if !config_shell.is_empty()
+            && let Err(e) = rewrite_sh_shebang(&configure, &config_shell)
+        {
+            let _ = writeln!(
+                context.params.stderr(shell),
+                "econf: {}: {e}",
+                configure.display()
+            );
+        }
+        let gnuconfig = std::path::PathBuf::from(format!("{eprefix}/usr/share/gnuconfig"));
+        let workdir = get("WORKDIR");
+        if gnuconfig.exists() && !workdir.is_empty() {
+            let workdir = std::path::Path::new(&workdir);
+            let quiet = get("PORTAGE_QUIET") == "1";
+            for updated in refresh_gnuconfig(workdir, &gnuconfig) {
+                if !quiet {
+                    let rel = updated.strip_prefix(workdir).unwrap_or(&updated);
+                    let name = updated.file_name().unwrap_or_default().to_string_lossy();
+                    let _ = writeln!(
+                        context.params.stderr(shell),
+                        " * econf: updating {} with {}/{name}",
+                        rel.display(),
+                        gnuconfig.display()
+                    );
+                }
+            }
+        }
+        if let Some((prefix, _)) = &libdir_arg {
             let mut v =
                 brush_core::ShellVariable::new(brush_core::ShellValue::String(prefix.clone()));
             v.export();
             let _ = shell.set_env_global("CONF_PREFIX", v);
-            squash_slashes(&format!("--libdir={prefix}/{libdir}"))
-        });
-        let cwd = shell.working_dir().to_path_buf();
+        }
 
         let exit = tokio::task::spawn_blocking(move || {
-            // configure path: $ECONF_SOURCE/configure, defaulting to $S (cwd).
-            let base = if econf_source == "." {
-                cwd.clone()
-            } else {
-                std::path::PathBuf::from(&econf_source)
-            };
-            let configure = base.join("configure");
-            if !configure.exists() {
-                return 0u8;
-            }
-
             // Probe EAPI-conditional flags from configure --help.
             let help = if eapi >= 4 {
                 std::process::Command::new(&configure)
@@ -161,7 +192,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
             if eapi >= 7 && contains_flag(&help, "--with-sysroot") {
                 conf_args.push(format!("--with-sysroot={esysroot}"));
             }
-            if let Some(arg) = &libdir_arg {
+            if let Some((_, arg)) = &libdir_arg {
                 conf_args.push(arg.clone());
             }
 
@@ -211,6 +242,78 @@ fn squash_slashes(s: &str) -> String {
     out
 }
 
+/// Point a `#!/bin/sh` `configure` at `config_shell`, keeping its mode and mtime
+fn rewrite_sh_shebang(configure: &std::path::Path, config_shell: &str) -> std::io::Result<()> {
+    let content = std::fs::read(configure)?;
+    let Some(rest) = content.strip_prefix(b"#!") else {
+        return Ok(());
+    };
+    let Some(after) = rest.trim_ascii_start().strip_prefix(b"/bin/sh") else {
+        return Ok(());
+    };
+    if after.first().is_some_and(|c| !c.is_ascii_whitespace()) {
+        return Ok(());
+    }
+    let meta = std::fs::metadata(configure)?;
+    let tmp = tmp_sibling(configure);
+    let mut new = format!("#!{config_shell}").into_bytes();
+    new.extend_from_slice(after);
+    std::fs::write(&tmp, new)?;
+    std::fs::set_permissions(&tmp, meta.permissions())?;
+    std::fs::File::options()
+        .write(true)
+        .open(&tmp)?
+        .set_modified(meta.modified()?)?;
+    std::fs::rename(&tmp, configure)
+}
+
+/// Replace every regular `config.guess`/`config.sub` under `workdir` with
+/// `gnuconfig`'s copy, returning the files replaced
+///
+/// Each copy lands under a temporary name first, so a parallel build never reads half a script.
+fn refresh_gnuconfig(
+    workdir: &std::path::Path,
+    gnuconfig: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut updated = Vec::new();
+    let mut dirs = vec![workdir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ty) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if ty.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let name = entry.file_name();
+            if !ty.is_file() || (name != "config.guess" && name != "config.sub") {
+                continue;
+            }
+            let tmp = tmp_sibling(&path);
+            if std::fs::copy(gnuconfig.join(&name), &tmp).is_ok()
+                && std::fs::rename(&tmp, &path).is_ok()
+            {
+                updated.push(path);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+    updated.sort();
+    updated
+}
+
+fn tmp_sibling(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".em-tmp.{}", std::process::id()));
+    path.with_file_name(name)
+}
+
 /// Whether `flag` appears in `text` at a word boundary
 ///
 /// Matches portage's word-boundary guard: `flag` must be followed by a
@@ -231,4 +334,72 @@ fn contains_flag(text: &str, flag: &str) -> bool {
         rest = &rest[pos + 1..];
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gnuconfig_replaces_regular_files_at_any_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gnuconfig = tmp.path().join("gnuconfig");
+        std::fs::create_dir(&gnuconfig).unwrap();
+        std::fs::write(gnuconfig.join("config.guess"), "new guess").unwrap();
+        std::fs::write(gnuconfig.join("config.sub"), "new sub").unwrap();
+        let work = tmp.path().join("work");
+        let deep = work.join("pkg-1/build-aux");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("config.sub"), "old").unwrap();
+        std::fs::write(work.join("pkg-1/config.guess.in"), "untouched").unwrap();
+        std::os::unix::fs::symlink("elsewhere", work.join("pkg-1/config.guess")).unwrap();
+
+        let updated = refresh_gnuconfig(&work, &gnuconfig);
+
+        assert_eq!(updated, vec![deep.join("config.sub")]);
+        assert_eq!(
+            std::fs::read_to_string(deep.join("config.sub")).unwrap(),
+            "new sub"
+        );
+        assert!(
+            work.join("pkg-1/config.guess").is_symlink(),
+            "symlinks are left alone"
+        );
+        assert_eq!(
+            std::fs::read_dir(&deep).unwrap().count(),
+            1,
+            "no temp file left"
+        );
+    }
+
+    #[test]
+    fn config_shell_rewrites_only_a_bin_sh_shebang_and_keeps_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let configure = tmp.path().join("configure");
+        std::fs::write(&configure, "#! /bin/sh -e\necho hi\n").unwrap();
+        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&configure)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        rewrite_sh_shebang(&configure, "/bin/bash").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&configure).unwrap(),
+            "#!/bin/bash -e\necho hi\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&configure).unwrap().modified().unwrap(),
+            mtime
+        );
+
+        std::fs::write(&configure, "#!/bin/sharp\n").unwrap();
+        rewrite_sh_shebang(&configure, "/bin/bash").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&configure).unwrap(),
+            "#!/bin/sharp\n"
+        );
+    }
 }
