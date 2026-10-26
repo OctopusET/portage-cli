@@ -94,7 +94,21 @@ pub(crate) async fn acquire_flock(path: std::path::PathBuf, label: &str) -> Opti
 /// A POSIX record lock never conflicts within one process, so it only excludes
 /// other processes (`emerge`, another `em`); take it under the merge lock.
 pub(crate) struct VdbLock {
-    _file: std::fs::File,
+    file: std::fs::File,
+    path: camino::Utf8PathBuf,
+}
+
+impl Drop for VdbLock {
+    // Unlinked while still held, so a waiter blocked on this inode sees it orphaned and reopens.
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(held), Ok(now)) = (self.file.metadata(), std::fs::metadata(&self.path))
+            && held.nlink() == 1
+            && (now.dev(), now.ino()) == (held.dev(), held.ino())
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// The lock `vardbapi.lock` takes: an exclusive `fcntl` lock on
@@ -102,7 +116,8 @@ pub(crate) struct VdbLock {
 pub(crate) async fn lock_vdb(vdb_root: &Utf8Path) -> anyhow::Result<VdbLock> {
     let path = vdb_lockfile(vdb_root);
     std::fs::create_dir_all(vdb_root.as_std_path())?;
-    acquire_noting(path.clone().into_std_path_buf(), "VDB lock", |path| {
+    let held_path = path.clone();
+    acquire_noting(path.clone().into_std_path_buf(), "VDB lock", move |path| {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         loop {
             let file = std::fs::OpenOptions::new()
@@ -119,7 +134,10 @@ pub(crate) async fn lock_vdb(vdb_root: &Utf8Path) -> anyhow::Result<VdbLock> {
             if let Ok(now) = std::fs::metadata(path)
                 && (now.dev(), now.ino()) == (held.dev(), held.ino())
             {
-                return Some(VdbLock { _file: file });
+                return Some(VdbLock {
+                    file,
+                    path: held_path,
+                });
             }
         }
     })
@@ -275,7 +293,14 @@ mod tests {
         let held = lock_vdb(&vdb).await.unwrap();
         assert!(probe(), "another process must see the lock held");
         drop(held);
-        assert!(!probe(), "dropping the guard must release the lock");
+        assert!(
+            !lockfile.exists(),
+            "dropping the guard must remove the lockfile"
+        );
+
+        let again = lock_vdb(&vdb).await.unwrap();
+        assert!(probe(), "the lock must be retaken after removal");
+        drop(again);
     }
 
     // The stamp is what a waiter reports, so pin that it is written only by
