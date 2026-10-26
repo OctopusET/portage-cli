@@ -1,6 +1,7 @@
 //! Post-`src_install` image processing, mirroring portage's ecompress and
 //! estrip steps: documentation under the `docompress` inclusion list is
-//! compressed (PMS 12.3.9) and ELF objects are stripped unless excluded via
+//! compressed (PMS 12.3.9), library modes are fixed as portage's install QA
+//! does, and ELF objects are stripped unless excluded via
 //! `dostrip`/`RESTRICT=strip`/`FEATURES=nostrip` (PMS 12.3.10).
 //!
 //! Both passes shell out, to `${PORTAGE_COMPRESS}` and `${STRIP}`, rather
@@ -162,6 +163,8 @@ pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<Pos
         })
         .collect();
 
+    fix_library_modes(&entries)?;
+
     // -- ecompress -----------------------------------------------------
     let suffix = compress_suffix(&cfg.compress_cmd);
     let in_compress_scope = |installed: &Utf8Path| {
@@ -289,6 +292,44 @@ pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<Pos
     Ok(stats)
 }
 
+/// Shared libraries directly in a library directory are made executable, static archives and
+/// libtool files are not, as portage's install QA does
+fn fix_library_modes(entries: &[(Utf8PathBuf, Utf8PathBuf)]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for (installed, on_disk) in entries {
+        let (Some(dir), Some(name)) = (installed.parent(), installed.file_name()) else {
+            continue;
+        };
+        let in_lib_dir = dir.file_name().is_some_and(|d| d.starts_with("lib"))
+            && match dir.parent().map(Utf8Path::as_str) {
+                Some("/" | "/usr") => true,
+                Some(p) => p.starts_with("/opt/") && p.matches('/').count() == 2,
+                None => false,
+            };
+        if !in_lib_dir {
+            continue;
+        }
+        let exec = if name.ends_with(".so") || name.contains(".so.") {
+            true
+        } else if name.ends_with(".a") || name.ends_with(".la") {
+            false
+        } else {
+            continue;
+        };
+        let meta = std::fs::symlink_metadata(on_disk.as_std_path())?;
+        if !meta.is_file() {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        let want = if exec { mode | 0o111 } else { mode & !0o111 };
+        if want != mode {
+            std::fs::set_permissions(on_disk.as_std_path(), std::fs::Permissions::from_mode(want))
+                .with_context(|| format!("chmod {installed}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// True for ET_EXEC/ET_DYN ELF objects (shared libraries and executables)
 /// Relocatable objects (.o, .ko) are left alone: `--strip-unneeded` on those
 /// can drop relocation symbols they still need.
@@ -335,6 +376,34 @@ mod tests {
             strip_exclude: vec![],
             strip_cmd: "strip".into(),
             path: None,
+        }
+    }
+
+    #[test]
+    fn library_modes_follow_the_file_kind_in_library_dirs_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let files = [
+            ("usr/lib64/libfoo.so.1.2", 0o644, 0o755),
+            ("usr/lib64/libfoo.a", 0o755, 0o644),
+            ("opt/x/lib/libbar.so", 0o644, 0o755),
+            ("usr/lib64/sub/libbaz.so", 0o644, 0o644),
+            ("usr/share/lib.so", 0o644, 0o644),
+        ];
+        for (rel, mode, _) in files {
+            let path = image.join(rel);
+            write(&path, b"x");
+            std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        }
+        fix_library_modes(&walk(&image).unwrap()).unwrap();
+        for (rel, _, want) in files {
+            let mode = std::fs::metadata(image.join(rel).as_std_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, want, "{rel}");
         }
     }
 
