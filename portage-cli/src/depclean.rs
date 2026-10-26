@@ -129,7 +129,7 @@ fn unresolved_deps(
 
 /// [`unresolved_deps`] that block the clean: none for a targeted clean, which portage lets
 /// proceed over missing dependencies (`allow_missing_deps`).
-fn blocking_unresolved(
+pub(crate) fn blocking_unresolved(
     targeted: bool,
     installed: &[InstalledPackage],
     cleanlist: &[InstalledPackage],
@@ -139,6 +139,25 @@ fn blocking_unresolved(
         return Vec::new();
     }
     unresolved_deps(installed, cleanlist, with_idepend)
+}
+
+/// Report `unresolved` (from [`blocking_unresolved`]) and fail `action` when there is any; a
+/// prune also points at `--nodeps`.
+pub(crate) fn bail_on_unresolved(unresolved: &[(String, Cpv)], action: &str) -> Result<()> {
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    crate::style::error_line!(
+        "Dependencies could not be completely resolved due to the following required \
+         packages not being installed:"
+    );
+    for (dep, parent) in unresolved {
+        crate::style::ewarn_sub_bullet!("{dep} pulled in by: {parent}");
+    }
+    if action == "prune" {
+        crate::style::error_line!("If you would like to ignore dependencies then use --nodeps.");
+    }
+    bail!("{action}: installed packages have unsatisfied dependencies; update @world first");
 }
 
 /// Flatten a (already USE-evaluated) `DepEntry` tree into concrete atoms, dropping blockers
@@ -245,11 +264,13 @@ fn compute_cleanlist(
         .collect()
 }
 
-/// The `candidates` of a `-P`/`--prune` that no other installed package still needs: every
-/// installed package but the candidates is protected, as portage's prune does.
+/// The `candidates` of a `-P`/`--prune` that neither `seed_atoms` (see [`targeted_seed`]) nor
+/// another installed package still needs: every installed package but the candidates is
+/// protected, as portage's prune does.
 pub(crate) fn prune_candidates(
     installed: &[InstalledPackage],
     candidates: &[InstalledPackage],
+    seed_atoms: &[Dep],
     exclude_atoms: &[Dep],
     with_bdeps: bool,
 ) -> Vec<InstalledPackage> {
@@ -260,7 +281,7 @@ pub(crate) fn prune_candidates(
     if targets.is_empty() {
         return Vec::new();
     }
-    compute_cleanlist(installed, &[], exclude_atoms, &targets, with_bdeps)
+    compute_cleanlist(installed, seed_atoms, exclude_atoms, &targets, with_bdeps)
 }
 
 /// Safe removal order within `cleanlist`: a dependent (something in
@@ -328,9 +349,9 @@ fn removal_order(cleanlist: &[InstalledPackage], with_bdeps: bool) -> Vec<Instal
         .collect()
 }
 
-/// The required-set seed of a targeted depclean: `@system` plus the sets `world_sets` names,
-/// without the `world` file atoms, so a selected target is removable (and then deselected).
-fn targeted_seed(
+/// The required-set seed of a targeted depclean or a prune: `@system` plus the sets
+/// `world_sets` names, without the `world` file atoms, so a selected target is removable.
+pub(crate) fn targeted_seed(
     config_root: Option<&camino::Utf8Path>,
     root: &camino::Utf8Path,
 ) -> Result<Vec<Dep>> {
@@ -396,16 +417,7 @@ pub async fn run_with_targets(
         &cleanlist,
         root == "/",
     );
-    if !unresolved.is_empty() {
-        crate::style::error_line!(
-            "Dependencies could not be completely resolved due to the following required \
-             packages not being installed:"
-        );
-        for (dep, parent) in &unresolved {
-            crate::style::ewarn_sub_bullet!("{dep} pulled in by: {parent}");
-        }
-        bail!("depclean: installed packages have unsatisfied dependencies; update @world first");
-    }
+    bail_on_unresolved(&unresolved, "depclean")?;
     let cleanlist = removal_order(&cleanlist, with_bdeps);
 
     if cleanlist.is_empty() {
@@ -542,12 +554,14 @@ mod tests {
             .filter(|p| p.cpv().to_string() == "dev-libs/lib-1")
             .cloned()
             .collect();
-        assert_eq!(prune_candidates(&installed, &old, &[], false).len(), 1);
+        assert_eq!(prune_candidates(&installed, &old, &[], &[], false).len(), 1);
+        let seed = vec![Dep::parse("dev-libs/lib:1").unwrap()];
+        assert!(prune_candidates(&installed, &old, &seed, &[], false).is_empty());
 
         write_fake_package(&vdb_root, "app-misc", "app-1", "dev-libs/lib:1", "");
         let installed: Vec<InstalledPackage> =
             open_vdb(tmp.path()).packages().into_iter().collect();
-        assert!(prune_candidates(&installed, &old, &[], false).is_empty());
+        assert!(prune_candidates(&installed, &old, &[], &[], false).is_empty());
     }
 
     #[test]

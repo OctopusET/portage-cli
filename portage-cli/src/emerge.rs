@@ -1184,10 +1184,13 @@ async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     if !cli.mode().nodeps {
         let merge_flags = cli.merge_flags();
         let exclude = parse_atoms_strict(&merge_flags.exclude)?;
+        let roots = cli.roots();
+        let seed = crate::depclean::targeted_seed(roots.config(), roots.merge_root())?;
         let removable: std::collections::HashSet<portage_atom::Cpv> =
             crate::depclean::prune_candidates(
                 &installed,
                 &matched,
+                &seed,
                 &exclude,
                 merge_flags.depclean_bdeps(),
             )
