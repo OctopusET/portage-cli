@@ -187,12 +187,18 @@ fn inst_owner_install_opts<SE: brush_core::ShellExtensions>(
     }
 }
 
-/// Raise the shared die flag with `msg` and return exit status 1, matching the
-/// bash helpers' `|| die "..."`.
+/// Report a helper failure and return exit status 1, raising the shared die
+/// flag only when the helper may die (PMS 12.3.1: EAPI 4+, outside `nonfatal`).
 fn raise_die<SE: brush_core::ShellExtensions>(
     context: &brush_core::ExecutionContext<'_, SE>,
     msg: &str,
 ) -> brush_core::ExecutionResult {
+    let var = |name: &str| context.shell.env_str(name).unwrap_or_default();
+    let eapi: u32 = var("EAPI").parse().unwrap_or(0);
+    if eapi < 4 || var("PORTAGE_NONFATAL") == "1" {
+        let _ = writeln!(context.params.stderr(context.shell), "!!! {msg}");
+        return brush_core::ExecutionResult::new(1);
+    }
     if let Some(flag) = context.shell.builtin_state::<DieFlag>() {
         flag.raise(msg);
     }

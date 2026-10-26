@@ -546,6 +546,46 @@ async fn nonfatal_false_does_not_abort_the_phase() {
 }
 
 #[tokio::test]
+async fn nonfatal_install_helper_and_eapply_return_failure() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let patch = dir.path().join("bad.patch");
+    std::fs::write(&patch, "--- a/nope\n+++ b/nope\n@@ -1 +1 @@\n-0\n+1\n").unwrap();
+    let ebdir = repo_path.join("cat/pkg");
+    std::fs::create_dir_all(&ebdir).unwrap();
+    std::fs::write(
+        ebdir.join("pkg-1.ebuild"),
+        format!(
+            "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${{WORKDIR}}\"\n\
+             pkg_setup() {{ nonfatal dosym onlyone; export EM_DOSYM=$?; \
+             nonfatal eapply '{}'; export EM_EAPPLY=$?; }}\n",
+            patch.display()
+        ),
+    )
+    .unwrap();
+
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    let ebuild =
+        Ebuild::from_path(camino::Utf8Path::from_path(&ebdir.join("pkg-1.ebuild")).unwrap())
+            .unwrap();
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+        .await
+        .expect("nonfatal helpers must not abort the phase");
+    assert_eq!(shell.get_var("EM_DOSYM").as_deref(), Some("1"));
+    assert_eq!(shell.get_var("EM_EAPPLY").as_deref(), Some("1"));
+}
+
+#[tokio::test]
 async fn einstall_enforces_eapi_ban_and_requires_a_makefile() {
     let dir = tempdir().unwrap();
     let repo_path = dir.path().join("repo");

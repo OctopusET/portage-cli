@@ -75,7 +75,10 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapplyCommand {
             (events, result)
         })
         .await
-        .unwrap_or_else(|e| (Vec::new(), Err(format!("eapply: task panicked: {e}"))));
+        .unwrap_or_else(|e| {
+            let msg = format!("eapply: task panicked: {e}");
+            (Vec::new(), Err(Failure { msg, patch: false }))
+        });
 
         let source_info = brush_core::SourceInfo::from("eapply");
         for event in events {
@@ -102,9 +105,18 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EapplyCommand {
             }
         }
 
-        if let Err(msg) = result {
-            let msg = die(msg);
-            let _ = writeln!(context.params.stderr(shell), "die: {msg}");
+        if let Err(failure) = result {
+            // A failed patch is `die -n`: under `nonfatal` it only returns failure.
+            if failure.patch && shell.env_str("PORTAGE_NONFATAL").as_deref() == Some("1") {
+                let _ = writeln!(
+                    context.params.stderr(shell),
+                    "die (nonfatal): {}",
+                    failure.msg
+                );
+            } else {
+                let msg = die(failure.msg);
+                let _ = writeln!(context.params.stderr(shell), "die: {msg}");
+            }
             return Ok(brush_core::ExecutionResult::new(1));
         }
 
@@ -149,18 +161,28 @@ enum Event {
     PatchOutput(String),
 }
 
+/// Why [`apply_all`] stopped
+#[derive(Debug)]
+struct Failure {
+    msg: String,
+    /// A patch failed to apply, rather than an operand being unusable
+    patch: bool,
+}
+
 fn apply_all(
     operands: &[String],
     options: &[String],
     cwd: &std::path::Path,
     env_vars: &[(String, String)],
     events: &mut Vec<Event>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
+    let fatal = |msg: String| Failure { msg, patch: false };
+    let patch = |msg: String| Failure { msg, patch: true };
     for operand in operands {
         let path = cwd.join(operand);
         if path.is_dir() {
             let mut patches: Vec<std::path::PathBuf> = std::fs::read_dir(&path)
-                .map_err(|e| format!("eapply: {operand}: {e}"))?
+                .map_err(|e| fatal(format!("eapply: {operand}: {e}")))?
                 .filter_map(Result::ok)
                 .map(|e| e.path())
                 .filter(|p| {
@@ -171,19 +193,21 @@ fn apply_all(
             patches.sort();
 
             if patches.is_empty() {
-                return Err(format!("No *.{{patch,diff}} files in directory {operand}"));
+                return Err(fatal(format!(
+                    "No *.{{patch,diff}} files in directory {operand}"
+                )));
             }
             events.push(Event::ApplyingFrom(operand.clone()));
-            for patch in &patches {
+            for file in &patches {
                 // Display label matches bash's `$f` (`"${path}"/*`, relative
                 // to cwd, never absolutized) — not the absolute path used
                 // for the actual file I/O below.
-                let name = patch.file_name().unwrap_or_default().to_string_lossy();
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
                 let label = format!("{operand}/{name}");
-                apply_one(patch, &label, options, env_vars, cwd, events)?;
+                apply_one(file, &label, options, env_vars, cwd, events).map_err(patch)?;
             }
         } else {
-            apply_one(&path, operand, options, env_vars, cwd, events)?;
+            apply_one(&path, operand, options, env_vars, cwd, events).map_err(patch)?;
         }
     }
     Ok(())
@@ -383,7 +407,8 @@ mod tests {
         let mut events = Vec::new();
         let err =
             apply_all(&["patches".to_string()], &[], dir.path(), &[], &mut events).unwrap_err();
-        assert_eq!(err, "No *.{patch,diff} files in directory patches");
+        assert_eq!(err.msg, "No *.{patch,diff} files in directory patches");
+        assert!(!err.patch, "an empty directory is a plain die, not die -n");
     }
 
     #[test]
@@ -405,7 +430,8 @@ mod tests {
             &mut events,
         )
         .unwrap_err();
-        assert_eq!(err, "eapply: patch failed: file.patch");
+        assert_eq!(err.msg, "eapply: patch failed: file.patch");
+        assert!(err.patch, "a failed patch honours nonfatal");
         assert!(!patch_outputs(&events).is_empty());
     }
 }
