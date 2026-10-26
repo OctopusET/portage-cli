@@ -65,9 +65,9 @@ fn main() {
 
     // Complex dependency
     println!("8. Complex dependency:");
-    let dep = Dep::parse(">=dev-lang/rust-1.75.0:0/1.75[llvm_targets_AMDGPU]::gentoo")
+    let dep = Dep::parse(">=dev-lang/rust-1.75.0:0/1.75::gentoo[llvm_targets_AMDGPU]")
         .expect("Failed to parse complex dep");
-    println!("   Input: >=dev-lang/rust-1.75.0:0/1.75[llvm_targets_AMDGPU]::gentoo");
+    println!("   Input: >=dev-lang/rust-1.75.0:0/1.75::gentoo[llvm_targets_AMDGPU]");
     println!("   Has version: {}", dep.version.is_some());
     println!("   Has slot: {}", dep.slot_dep.is_some());
     println!("   Has USE: {}", dep.use_deps.is_some());
