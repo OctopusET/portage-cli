@@ -10,7 +10,7 @@ use portage_atom::{Cpv, Dep, Slot};
 #[derive(Debug, Clone)]
 pub(crate) enum AtomPattern {
     /// A PMS atom
-    Atom(Dep),
+    Atom(Box<Dep>),
     /// A category and name that may hold `*`
     Glob {
         category: String,
@@ -30,7 +30,7 @@ impl AtomPattern {
         let operator = name.starts_with(['<', '>', '=', '~', '!']);
         if operator || (name.contains('/') && !name.contains('*')) {
             let dep = Dep::parse(word).with_context(|| format!("invalid atom '{word}'"))?;
-            return Ok(Self::Atom(dep));
+            return Ok(Self::Atom(Box::new(dep)));
         }
         let (category, package) = name.split_once('/').unwrap_or(("*", name));
         let valid = |part: &str| {
