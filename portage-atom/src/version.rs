@@ -538,20 +538,6 @@ impl Version {
         Ordering::Equal
     }
 
-    /// Version with suffixes and revision removed.
-    ///
-    /// Numeric components and the letter stay.
-    pub fn without_suffix(&self) -> Self {
-        Version {
-            numbers: self.numbers.clone(),
-            digits: self.digits.clone(),
-            letter: self.letter,
-            suffixes: Vec::new(),
-            revision: Revision::default(),
-            raw: None,
-        }
-    }
-
     /// Format the version portion (numbers, letter, suffixes, revision,
     /// glob) without the operator
     ///
