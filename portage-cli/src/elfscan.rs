@@ -251,9 +251,6 @@ fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<(ElfInfo
     let (machine_name, category) = arch(machine, is_64);
 
     let segments = header.program_headers(endian, data).ok()?;
-    let has_interp = segments
-        .iter()
-        .any(|ph| ph.p_type(endian) == elf::PT_INTERP);
     let mut pie_flag = false;
     let dynamic = segments
         .iter()
@@ -304,8 +301,9 @@ fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<(ElfInfo
             _ => {}
         }
     }
-    // file(1)'s "shared object" test, which portage uses to infer an implicit soname.
-    let shared_object = header.e_type(endian) == elf::ET_DYN && !has_interp && !pie_flag;
+    // file(1)'s "shared object" test, which portage uses to infer an implicit soname;
+    // file(1) keys PIE on DF_1_PIE only, so an ET_DYN with PT_INTERP (libc.so.6) still counts.
+    let shared_object = header.e_type(endian) == elf::ET_DYN && !pie_flag;
     let info = ElfInfo {
         machine: machine_name,
         category,
@@ -465,8 +463,8 @@ mod tests {
         assert!(scan_file(&p).is_none());
     }
 
-    /// Minimal x86_64 ELF with one `DT_NEEDED`, optional `DT_SONAME` and `PT_INTERP`.
-    fn mini_elf(e_type: u16, interp: bool, soname: Option<&str>) -> Vec<u8> {
+    /// Minimal x86_64 ELF with one `DT_NEEDED`, optional `DT_SONAME`, `PT_INTERP` and `DF_1_PIE`.
+    fn mini_elf(e_type: u16, interp: bool, pie: bool, soname: Option<&str>) -> Vec<u8> {
         let mut strtab = b"\0libc.so.6\0".to_vec();
         let soname_off = soname.map(|s| {
             let off = strtab.len() as u64;
@@ -480,6 +478,9 @@ mod tests {
         let mut dyns = vec![(5u64, str_off), (10, strtab.len() as u64), (1, 1)];
         if let Some(off) = soname_off {
             dyns.push((14, off));
+        }
+        if pie {
+            dyns.push((0x6fff_fffb, 0x0800_0000));
         }
         dyns.push((0, 0));
         let total = dyn_off + 16 * dyns.len() as u64;
@@ -523,24 +524,29 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lib = tmp.path().join("usr/lib64");
         std::fs::create_dir_all(&lib).unwrap();
-        std::fs::write(lib.join("plugin.so"), mini_elf(3, false, None)).unwrap();
+        std::fs::write(lib.join("plugin.so"), mini_elf(3, false, false, None)).unwrap();
         std::fs::write(
             lib.join("libnamed.so"),
-            mini_elf(3, false, Some("libnamed.so.1")),
+            mini_elf(3, false, false, Some("libnamed.so.1")),
         )
         .unwrap();
-        std::fs::write(lib.join("pie"), mini_elf(3, true, None)).unwrap();
+        std::fs::write(lib.join("libinterp.so"), mini_elf(3, true, false, None)).unwrap();
+        std::fs::write(lib.join("pie"), mini_elf(3, true, true, None)).unwrap();
 
         let scan = scan_image(Utf8Path::from_path(tmp.path()).unwrap());
         assert_eq!(
             scan.needed_elf2,
             [
+                "X86_64;/usr/lib64/libinterp.so;libinterp.so;;libc.so.6;x86_64",
                 "X86_64;/usr/lib64/libnamed.so;libnamed.so.1;;libc.so.6;x86_64",
                 "X86_64;/usr/lib64/pie;;;libc.so.6;x86_64",
                 "X86_64;/usr/lib64/plugin.so;plugin.so;;libc.so.6;x86_64",
             ]
         );
-        assert_eq!(scan.provides, ["x86_64: libnamed.so.1 plugin.so"]);
+        assert_eq!(
+            scan.provides,
+            ["x86_64: libinterp.so libnamed.so.1 plugin.so"]
+        );
     }
 
     #[test]
