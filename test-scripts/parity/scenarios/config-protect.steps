@@ -1,0 +1,6 @@
+# Reinstall over an edited config, then over an untouched one (config-protect-if-modified).
+T -1 --nodeps app-misc/screen
+! echo '# local edit' >> /etc/screenrc
+! touch /etc/screen-untouched-marker
+T -1 --nodeps app-misc/screen
+T -1 --nodeps app-misc/screen

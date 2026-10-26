@@ -1,0 +1,5 @@
+# Unmerge after editing a protected config and replacing an owned binary.
+T -1 --nodeps app-misc/screen
+! echo '# local edit' >> /etc/screenrc
+! echo x > /usr/share/screen/utf8encodings/01 || true
+T -C app-misc/screen

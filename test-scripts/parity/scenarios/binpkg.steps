@@ -1,0 +1,5 @@
+# Build a binpkg, then reinstall from it.
+T -1 --nodeps -b app-misc/screen
+! ls -lR /var/cache/binpkgs | sed 's/ [A-Z][a-z][a-z] .* / /' > /root/binpkgs.txt
+T -C app-misc/screen
+T -1 --nodeps -K app-misc/screen
