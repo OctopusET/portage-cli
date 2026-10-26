@@ -1678,7 +1678,7 @@ impl PackageSetup {
             &flags("LDFLAGS"),
             &flags("RUSTFLAGS"),
         );
-        let index = match settings.as_deref() {
+        let mut index = match settings.as_deref() {
             Some(s) => crate::binpkg::index_config(s, config_root.unwrap_or(Utf8Path::new("/"))),
             None => {
                 let mut index = portage_binpkg::IndexConfig::default();
@@ -1686,6 +1686,14 @@ impl PackageSetup {
                 index
             }
         };
+        if buildpkg && let Some(listed) = index.header.get_mut("FEATURES") {
+            let mut words: Vec<&str> = listed.split_whitespace().collect();
+            if !words.contains(&"buildpkg") {
+                words.push("buildpkg");
+                words.sort_unstable();
+                *listed = words.join(" ");
+            }
+        }
 
         Ok(Self {
             ebuild,
