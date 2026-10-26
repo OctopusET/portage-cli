@@ -3,7 +3,8 @@
 # same dependency layer, then diff what each left on disk.
 #
 # Layout under PARITY_DIR/merge/<slug>/: deps/ (emerge --onlydeps, shared
-# lower layer), emerge/ and em/ (one upper each, logs in *.log).
+# lower layer), emerge/ and em/ (one upper each, logs in *.log). deps/ and a
+# successful emerge/ are kept for the next run; em/ is always redone.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 P=${PARITY_DIR:-$HOME/.cache/em-parity}
@@ -20,15 +21,16 @@ if [[ ! -e $R/deps.ok ]]; then
 	touch "$R/deps.ok"
 fi
 
-LOWER=$R/deps/u "$here/sb.sh" "$R/emerge" "emerge -1 --nodeps --nospinner --color=n $atom" \
-	>"$R/emerge.log" 2>&1 &
-LOWER=$R/deps/u "$here/sb.sh" "$R/em" "em --color=never -1 --nodeps $* $atom" \
-	>"$R/em.log" 2>&1 &
+if [[ -d $R/em ]]; then
+	unshare --user --map-root-user --map-auto -- find "$R/em" -delete
+fi
 rc=0
-wait %1 || rc=1
-wait %2 || rc=$((rc | 2))
-((rc & 1)) && echo "emerge failed: $R/emerge.log" >&2
-((rc & 2)) && echo "em failed: $R/em.log" >&2
+if [[ ! -e $R/emerge.ok ]]; then
+	LOWER=$R/deps/u "$here/sb.sh" "$R/emerge" "emerge -1 --nodeps --nospinner --color=n $atom" \
+		>"$R/emerge.log" 2>&1 && touch "$R/emerge.ok" || { rc=1; echo "emerge failed: $R/emerge.log" >&2; }
+fi
+LOWER=$R/deps/u "$here/sb.sh" "$R/em" "em --color=never -1 --nodeps $* $atom" \
+	>"$R/em.log" 2>&1 || { rc=$((rc | 2)); echo "em failed: $R/em.log" >&2; }
 unshare --user --map-root-user --map-auto -- \
 	python3 -I "$here/treediff.py" "$R/emerge/u" "$R/em/u" | tee "$R/diff.txt"
 exit "$rc"
