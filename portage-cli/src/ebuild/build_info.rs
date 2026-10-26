@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::{Cpv, Dep, Slot, SlotDep, SlotOperator, UseDep, UseDepKind};
 use portage_metadata::Eapi;
 use portage_repo::EbuildEnv;
@@ -69,6 +70,53 @@ pub(super) fn take_recorded(env: &mut EbuildEnv, metadata: &BTreeMap<String, Str
     for (key, field) in fields {
         *field = metadata.get(key).filter(|v| !v.is_empty()).cloned();
     }
+}
+
+/// Where `SIZE` waits between `src_install` and the merge, as portage's `build-info/SIZE`
+fn size_file(work_root: &Utf8Path) -> Utf8PathBuf {
+    work_root.join("build-info/SIZE")
+}
+
+/// Record the `SIZE` of the image as `src_install` left it, before strip and compression
+///
+/// As portage counts it: regular files, a hardlinked inode once.
+pub(super) fn record_size(work_root: &Utf8Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut seen = HashSet::new();
+    let size = image_size(work_root.join("image").as_std_path(), &mut seen);
+    let file = size_file(work_root);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+    }
+    std::fs::write(&file, format!("{size}\n")).with_context(|| format!("writing {file}"))
+}
+
+/// The `SIZE` [`record_size`] wrote for this build, if any
+pub(super) fn recorded_size(work_root: &Utf8Path) -> Option<u64> {
+    std::fs::read_to_string(size_file(work_root))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn image_size(dir: &std::path::Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut size = 0;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            size += image_size(&entry.path(), seen);
+        } else if meta.is_file() && seen.insert((meta.dev(), meta.ino())) {
+            size += meta.len();
+        }
+    }
+    size
 }
 
 /// Append `>=<libc>` to `RDEPEND` of a package that links anything (has `NEEDED.ELF.2`)

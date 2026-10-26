@@ -68,6 +68,7 @@ pub(crate) async fn build_binpkg_standalone(
         rewrite_d_symlinks(&env),
         Walk::Scan { digests: true },
     )?;
+    let size = build_info::recorded_size(work_root).unwrap_or(size);
 
     let scratch_vdb_root = work_root.join("temp/buildpkgonly-vdb");
     let vdb = open_or_create_vdb(&scratch_vdb_root)?;

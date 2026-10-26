@@ -1761,6 +1761,7 @@ impl PackageSetup {
                 // up, and everything downstream (preinst, CONTENTS, qmerge) sees
                 // the final image.
                 if *phase == RunPhase::INSTALL {
+                    build_info::record_size(&work_root)?;
                     post_process_after_install(&shell, &work_root, &features)?;
                     // The package holds the image as src_install left it: a binary
                     // install runs pkg_preinst itself, on the installing system.
@@ -2990,6 +2991,12 @@ async fn run_merge(
     if let Err(e) = memory.store() {
         crate::style::warn_line!("could not update the config memory file: {e}");
     }
+    // SIZE is what src_install installed; the merged image is stripped and compressed.
+    let recorded = match binpkg_metadata {
+        Some(metadata) => metadata.get("SIZE").and_then(|s| s.trim().parse().ok()),
+        None => build_info::recorded_size(work_root),
+    };
+    let size = recorded.unwrap_or(size);
 
     let preserve_is_local = merge_state.is_none();
     let mut local_preserve =
@@ -5616,6 +5623,43 @@ mod tests {
         };
         assert!(contents("root").contains("/usr/share/probe"));
         assert_eq!(contents("root"), contents("root2"));
+    }
+
+    #[tokio::test]
+    async fn size_counts_the_image_before_compression_and_hardlinks_once() {
+        if pkgdir_is_redirected() {
+            return;
+        }
+        let probe = Probe::new();
+        let ebuild = probe.ebuild(
+            "probe",
+            "1",
+            "src_install() { dodir /usr/share/doc/${PF} /usr/share/probe; \
+             printf '%01000d' 0 > \"${ED}/usr/share/doc/${PF}/notes\" || die; \
+             printf '%0100d' 0 > \"${ED}/usr/share/probe/a\" || die; \
+             ln \"${ED}/usr/share/probe/a\" \"${ED}/usr/share/probe/b\" || die; }\n",
+        );
+        probe
+            .run_group(&ebuild, PhaseGroup::Full, "root", None)
+            .await
+            .unwrap();
+        let package = probe.package("root").unwrap();
+        fs::create_dir_all(probe.path("root2")).unwrap();
+        probe
+            .run_group(&ebuild, PhaseGroup::BinpkgMerge, "root2", Some(&package))
+            .await
+            .unwrap();
+
+        for root in ["root", "root2"] {
+            let vdb = probe.path(root).join("var/db/pkg/app-misc/probe-1");
+            let contents = fs::read_to_string(vdb.join("CONTENTS")).unwrap();
+            assert!(contents.contains("notes.bz2"), "{contents}");
+            assert_eq!(
+                fs::read_to_string(vdb.join("SIZE")).unwrap(),
+                "1100\n",
+                "{root}"
+            );
+        }
     }
 
     #[tokio::test]
