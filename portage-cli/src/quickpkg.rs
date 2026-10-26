@@ -15,6 +15,7 @@ use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, Vdb};
 
 use crate::binpkg::{read_make_conf_var, resolve_pkgdir};
 use crate::cli::Cli;
+use crate::ebuild::ConfigProtect;
 use crate::emerge::expand_sets;
 use crate::vdb::{find_packages, open_cli_vdb};
 
@@ -52,8 +53,8 @@ async fn run_inner(globals: &Cli, opts: &QuickpkgOpts) -> Result<()> {
         .into_iter()
         .map(|t| t.atom)
         .collect();
-    let protect = ConfigProtectLists::load(globals).await;
     let settings = crate::settings::load(globals).await?;
+    let protect = ConfigProtect::from_settings(settings.as_deref().unwrap_or(&Default::default()));
     let multi_instance = crate::settings::has_feature(
         crate::settings::features(settings.as_deref()),
         "binpkg-multi-instance",
@@ -198,7 +199,7 @@ fn package_one(
     pkg: &InstalledPackage,
     merge_root: &Utf8Path,
     pkgdir: &Utf8Path,
-    protect: &ConfigProtectLists,
+    protect: &ConfigProtect,
     include_config: bool,
     include_unmodified_config: bool,
     multi_instance: bool,
@@ -254,7 +255,7 @@ fn package_one(
 fn stage_image(
     contents: &[ContentsEntry],
     merge_root: &Utf8Path,
-    protect: &ConfigProtectLists,
+    protect: &ConfigProtect,
     include_config: bool,
     include_unmodified_config: bool,
     image_dir: &std::path::Path,
@@ -296,7 +297,7 @@ fn stage_image(
 
 fn should_exclude_config(
     entry: &ContentsEntry,
-    protect: &ConfigProtectLists,
+    protect: &ConfigProtect,
     include_config: bool,
     include_unmodified_config: bool,
     merge_root: &Utf8Path,
@@ -458,50 +459,6 @@ fn warn_bindist(pkg: &InstalledPackage) {
     }
 }
 
-/// CONFIG_PROTECT / CONFIG_PROTECT_MASK for quickpkg (no ebuild shell needed).
-/// Same longest-prefix-wins, real-Portage-not-PMS-13.3.3 semantics as
-/// `ebuild::ConfigProtect` — see that type's doc comment.
-struct ConfigProtectLists {
-    protect: Vec<String>,
-    mask: Vec<String>,
-}
-
-impl ConfigProtectLists {
-    async fn load(globals: &Cli) -> Self {
-        let mut protect = read_list(globals, "CONFIG_PROTECT").await;
-        if !protect.iter().any(|p| p == "/etc") {
-            protect.push("/etc".to_string());
-        }
-        Self {
-            protect,
-            mask: read_list(globals, "CONFIG_PROTECT_MASK").await,
-        }
-    }
-
-    fn is_protected(&self, obj: &Utf8Path) -> bool {
-        let obj = obj.as_str();
-        longest_match(&self.protect, obj) > longest_match(&self.mask, obj)
-    }
-}
-
-async fn read_list(globals: &Cli, var: &str) -> Vec<String> {
-    read_make_conf_var(globals, var)
-        .await
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(|s| s.trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-fn longest_match(list: &[String], obj: &str) -> usize {
-    list.iter()
-        .filter(|p| obj == p.as_str() || obj.starts_with(&format!("{p}/")))
-        .map(String::len)
-        .max()
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,10 +502,7 @@ mod tests {
         let pkg = vdb.packages().into_iter().next().unwrap();
         let merge_root = Utf8PathBuf::from_path_buf(root).unwrap();
         let pkgdir_u = Utf8PathBuf::from_path_buf(pkgdir).unwrap();
-        let protect = ConfigProtectLists {
-            protect: vec!["/etc".into()],
-            mask: vec![],
-        };
+        let protect = ConfigProtect::for_test(&["/etc"], &[]);
 
         let (out, size, excluded) =
             package_one(&pkg, &merge_root, &pkgdir_u, &protect, false, false, true).unwrap();
@@ -586,10 +540,7 @@ mod tests {
         let contents = ContentsEntry::parse(
             "dir /etc\nobj /etc/foo.conf 0 0\ndir /var\ndir /var/lib\ndir /var/lib/foo\n",
         );
-        let protect = ConfigProtectLists {
-            protect: vec!["/etc".into()],
-            mask: vec![],
-        };
+        let protect = ConfigProtect::for_test(&["/etc"], &[]);
         let image = tmp.path().join("image");
         let excluded = stage_image(&contents, &root, &protect, false, false, &image).unwrap();
 
@@ -609,10 +560,7 @@ mod tests {
 
     #[test]
     fn config_protect_excludes_etc_obj_by_default() {
-        let protect = ConfigProtectLists {
-            protect: vec!["/etc".into()],
-            mask: vec![],
-        };
+        let protect = ConfigProtect::for_test(&["/etc"], &[]);
         let entry = ContentsEntry {
             kind: ContentsKind::Obj,
             path: Utf8PathBuf::from("/etc/foo.conf"),
@@ -623,5 +571,53 @@ mod tests {
         let root = Utf8Path::new("/");
         assert!(should_exclude_config(&entry, &protect, false, false, root));
         assert!(!should_exclude_config(&entry, &protect, true, false, root));
+    }
+
+    #[tokio::test]
+    async fn config_protect_from_a_profile_layer_excludes_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("metadata")).unwrap();
+        std::fs::write(dir.path().join("metadata/layout.conf"), "").unwrap();
+        let profile = dir.path().join("profiles/test");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("make.defaults"),
+            "CONFIG_PROTECT=\"/usr/share/config\"\n",
+        )
+        .unwrap();
+        let repo = portage_repo::Repository::builder()
+            .in_memory_cache()
+            .open(dir.path())
+            .unwrap();
+        let stack = portage_repo::ProfileStack::build(profile.clone()).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let settings = portage_repo::Settings::evaluate(
+            &mut shell,
+            portage_repo::SettingsSources {
+                stack: &stack,
+                env_d: None,
+                globals: None,
+                confs: &[],
+                env: &portage_repo::Environment::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let entry = ContentsEntry {
+            kind: ContentsKind::Obj,
+            path: Utf8PathBuf::from("/usr/share/config/foo.conf"),
+            md5: None,
+            mtime: Some(0),
+            target: None,
+        };
+        let protect = ConfigProtect::from_settings(&settings);
+        assert!(should_exclude_config(
+            &entry,
+            &protect,
+            false,
+            false,
+            Utf8Path::new("/")
+        ));
     }
 }
