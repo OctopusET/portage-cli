@@ -124,6 +124,8 @@ impl fmt::Display for ExtendedAtom {
 }
 
 /// The atom of a user `package.*` line: a PMS [`Dep`] or an [`ExtendedAtom`]
+// `Dep` is the dominant variant; boxing it would allocate per config line for no memory win.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConfigAtom {
     /// A PMS atom

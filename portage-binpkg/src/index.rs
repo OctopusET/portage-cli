@@ -214,14 +214,21 @@ impl BinpkgIndex {
         desired_chost: &str,
         desired_build_env_key: &str,
     ) -> Option<PathBuf> {
-        self.find_reusable_entry(cpv, desired_use, desired_chost, desired_build_env_key)
-            .map(|(path, _)| path)
+        self.find_reusable_entry(
+            cpv,
+            build_id,
+            desired_use,
+            desired_chost,
+            desired_build_env_key,
+        )
+        .map(|(path, _)| path)
     }
 
     /// [`Self::find_reusable`], with the index entry the container came from
     pub fn find_reusable_entry(
         &self,
         cpv: &str,
+        build_id: Option<u64>,
         desired_use: &[String],
         desired_chost: &str,
         desired_build_env_key: &str,

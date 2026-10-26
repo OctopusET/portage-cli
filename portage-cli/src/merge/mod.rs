@@ -2274,6 +2274,7 @@ mod pretend_tests {
             bdepend: Vec::new(),
             reinstall: false,
             interactive: false,
+            build_id: None,
             pretend: defines_pretend,
         }
     }
