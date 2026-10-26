@@ -81,6 +81,10 @@ pub struct Dep {
     /// for comparison". Only valid with `op = Some(Equal)`.
     #[cfg_attr(feature = "builder", builder(default))]
     pub glob: bool,
+    /// Binary package build id (`=cat/pkg-1.0-r1-3`), only with `op = Some(Equal)` and no glob
+    ///
+    /// Selects the binary package whose `BUILD_ID` it names; no ebuild has one.
+    pub build_id: Option<u64>,
     /// Optional slot dependency (the portion after `:`)
     ///
     /// See [PMS 8.3.3].
@@ -117,7 +121,7 @@ impl Dep {
     /// `None` sub-slot means *unrecorded*, so a sub-slot constraint is only
     /// enforced when both sides carry one.
     ///
-    /// USE-dep brackets, blockers, and `::repo` are *not* evaluated here —
+    /// USE-dep brackets, blockers, `::repo` and the build id are *not* evaluated here —
     /// this answers the `has_version`-style question "does a matching
     /// version exist", per [PMS 8.3.1]/[8.3.3].
     ///
@@ -159,6 +163,7 @@ impl Dep {
             op: None,
             version: None,
             glob: false,
+            build_id: None,
             slot_dep: None,
             use_deps: None,
             repo: None,
@@ -239,6 +244,10 @@ impl fmt::Display for Dep {
             }
         }
 
+        if let Some(build_id) = self.build_id {
+            write!(f, "-{build_id}")?;
+        }
+
         if let Some(slot) = &self.slot_dep {
             write!(f, ":{}", slot)?;
         }
@@ -288,6 +297,30 @@ fn parse_repo(input: &mut &str) -> ModalResult<Interned<DefaultInterner>> {
         .parse_next(input)
 }
 
+/// `cat/pkg-<ver>-<build id>`, the build id an integer without a leading zero
+fn parse_cpv_build_id(input: &mut &str) -> ModalResult<(Cpv, u64)> {
+    use crate::cpn::parse_category;
+    use crate::parsers::parse_ident_with_dot_star;
+    use winnow::combinator::fail;
+
+    let checkpoint = *input;
+    let token = (parse_category, '/', parse_ident_with_dot_star)
+        .take()
+        .parse_next(input)?;
+    let parsed = token.rsplit_once('-').and_then(|(cpv, id)| {
+        let canonical =
+            id.bytes().all(|b| b.is_ascii_digit()) && !(id.len() > 1 && id.starts_with('0'));
+        Some((Cpv::parse(cpv).ok()?, canonical.then(|| id.parse().ok())??))
+    });
+    match parsed {
+        Some(parsed) => Ok(parsed),
+        None => {
+            *input = checkpoint;
+            fail.parse_next(input)
+        }
+    }
+}
+
 /// Parse full dependency atom
 ///
 /// Handles: [!|!!][op]cat/pkg[-ver][:slot][::repo][use]
@@ -299,15 +332,22 @@ pub(crate) fn parse_dep(input: &mut &str) -> ModalResult<Dep> {
 
     let operator = opt(parse_operator).parse_next(input)?;
 
-    let (cpn, version, glob) = if operator.is_some() {
+    let build_id = if operator == Some(Operator::Equal) {
+        opt(parse_cpv_build_id).parse_next(input)?
+    } else {
+        None
+    };
+    let (cpn, version, glob, build_id) = if let Some((cpv, id)) = build_id {
+        (cpv.cpn, Some(cpv.version), false, Some(id))
+    } else if operator.is_some() {
         let (cpv, glob) = cut_err(parse_cpv_with_glob)
             .context(StrContext::Label("versioned atom"))
             .parse_next(input)?;
-        (cpv.cpn, Some(cpv.version), glob)
+        (cpv.cpn, Some(cpv.version), glob, None)
     } else {
         // A version needs an operator (PMS 8.3.1); without one, `cat/pkg-1` is a package name, and
         // `parse_package` rejects it for ending in a version.
-        (parse_cpn.parse_next(input)?, None, false)
+        (parse_cpn.parse_next(input)?, None, false, None)
     };
 
     if let Some(op) = operator {
@@ -331,6 +371,7 @@ pub(crate) fn parse_dep(input: &mut &str) -> ModalResult<Dep> {
         op: operator,
         version,
         glob,
+        build_id,
         slot_dep,
         use_deps,
         repo,
@@ -437,6 +478,26 @@ mod tests {
         assert_eq!(dep.use_deps.as_ref().unwrap().len(), 1);
         assert_eq!(dep.to_string(), "cat/pkg:1::gentoo[foo]");
         assert!(Dep::parse("cat/pkg[foo]::gentoo").is_err());
+    }
+
+    #[test]
+    fn build_id_follows_the_version_of_an_equal_atom() {
+        let dep = Dep::parse("=cat/pkg-1.0-r1-3").unwrap();
+        assert_eq!(dep.build_id, Some(3));
+        assert_eq!(dep.version.as_ref().unwrap().to_string(), "1.0-r1");
+        assert_eq!(dep.to_string(), "=cat/pkg-1.0-r1-3");
+        let dep = Dep::parse("=app-misc/foo-1-30:0::gentoo").unwrap();
+        assert_eq!((dep.package(), dep.build_id), ("foo", Some(30)));
+        assert_eq!(dep.to_string(), "=app-misc/foo-1-30:0::gentoo");
+        assert_eq!(Dep::parse("=cat/pkg2-3").unwrap().build_id, None);
+        for atom in [
+            "=cat/pkg-1.0-03",
+            ">=cat/pkg-1.0-3",
+            "=cat/pkg-1.0-3*",
+            "cat/pkg-1.0-3",
+        ] {
+            assert!(Dep::parse(atom).is_err(), "{atom}");
+        }
     }
 
     #[test]
