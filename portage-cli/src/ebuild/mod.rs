@@ -3273,6 +3273,8 @@ fn walk_image_with(
                 pass.dir(entry)?;
             } else if entry.meta.is_file() {
                 pass.file(entry)?;
+            } else {
+                pass.special(entry)?;
             }
         }
     }
@@ -3400,6 +3402,33 @@ impl ImagePass<'_> {
             preserve_owner(&write_path, meta);
         }
         self.record(ContentsKind::Sym, entry, None, Some(target));
+        Ok(())
+    }
+
+    /// A FIFO, device node or socket; like portage, an existing live path is left alone
+    fn special(&mut self, entry: ImageEntry) -> Result<()> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let dest = &entry.dest_path;
+        if self.merging() && std::fs::symlink_metadata(dest.as_std_path()).is_err() {
+            let mode = entry.meta.mode();
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                dest.as_std_path(),
+                rustix::fs::FileType::from_raw_mode(mode),
+                rustix::fs::Mode::from_raw_mode(mode),
+                entry.meta.rdev(),
+            )
+            .with_context(|| format!("mknod {dest}"))?;
+            preserve_owner(dest, &entry.meta);
+            std::fs::set_permissions(dest.as_std_path(), entry.meta.permissions())
+                .with_context(|| format!("chmod {dest}"))?;
+        }
+        let kind = if entry.meta.file_type().is_fifo() {
+            ContentsKind::Fifo
+        } else {
+            ContentsKind::Dev
+        };
+        self.record(kind, entry, None, None);
         Ok(())
     }
 
@@ -5383,6 +5412,43 @@ mod tests {
         // The image mode is applied after copy; the read-only 0555 dest was
         // replaced, so the new content is readable.
         assert!(contents.iter().any(|e| e.path == "/usr/bin/bug"));
+    }
+
+    #[test]
+    fn walk_image_merges_fifos() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(image.join("run").as_std_path()).unwrap();
+        fs::create_dir_all(root.as_std_path()).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            image.join("run/pipe").as_std_path(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o620),
+            0,
+        )
+        .unwrap();
+
+        let WalkResult { contents, .. } = walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Merge,
+        )
+        .unwrap();
+
+        let meta = fs::symlink_metadata(root.join("run/pipe").as_std_path()).unwrap();
+        assert!(meta.file_type().is_fifo());
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o620);
+        assert!(
+            contents
+                .iter()
+                .any(|e| e.kind == ContentsKind::Fifo && e.path == "/run/pipe")
+        );
     }
 
     #[test]
