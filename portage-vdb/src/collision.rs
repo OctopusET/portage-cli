@@ -256,9 +256,8 @@ impl OwnershipIndex {
         self.stamp = VdbStamp::capture(vdb);
     }
 
-    /// Find all existing owners of the object and symlink paths in `planned`,
-    /// except the packages in `exclude`.
-    pub fn find_collisions(&self, planned: &[ContentsEntry], exclude: &[Cpv]) -> Vec<Collision> {
+    /// Find all existing owners of the object and symlink paths in `planned`.
+    pub fn find_collisions(&self, planned: &[ContentsEntry]) -> Vec<Collision> {
         let mut seen = HashSet::new();
         let target_paths: Vec<&Utf8Path> = planned
             .iter()
@@ -278,9 +277,6 @@ impl OwnershipIndex {
                 continue;
             };
             for owner in self.path_owners[id].iter() {
-                if exclude.contains(owner.cpv()) {
-                    continue;
-                }
                 collisions.push(Collision {
                     path: path.to_path_buf(),
                     owner: owner.as_ref().clone(),
@@ -329,20 +325,14 @@ impl OwnershipIndex {
 }
 
 impl Vdb {
-    /// Check `planned` CONTENTS for files already owned by another package
+    /// Check `planned` CONTENTS for files already owned by an installed package
     ///
     /// Only `obj` and `sym` entries are checked — directories are legitimately
-    /// shared between packages and are never considered collisions.
-    ///
-    /// `exclude` lists the packages whose files the merge may take over: the
-    /// slot occupant it replaces and the packages it blocks.
+    /// shared between packages and are never considered collisions. Every
+    /// owner is returned; the caller decides which of them the merge replaces.
     ///
     /// Returns a list of collisions.  An empty vec means the install is clean.
-    pub fn find_collisions(
-        &self,
-        planned: &[ContentsEntry],
-        exclude: &[Cpv],
-    ) -> Result<Vec<Collision>> {
+    pub fn find_collisions(&self, planned: &[ContentsEntry]) -> Result<Vec<Collision>> {
         let target_paths: HashSet<&Utf8Path> = planned
             .iter()
             .filter(|entry| matches!(entry.kind, ContentsKind::Obj | ContentsKind::Sym))
@@ -354,9 +344,6 @@ impl Vdb {
 
         let mut collisions = Vec::new();
         for pkg in self.packages() {
-            if exclude.contains(pkg.cpv()) {
-                continue;
-            }
             let raw = match pkg.contents_raw() {
                 Ok(Some(raw)) => raw,
                 Ok(None) => continue,
@@ -468,7 +455,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let vdb = open_vdb(tmp.path());
         let planned = vec![obj_entry("/usr/bin/foo")];
-        let collisions = vdb.find_collisions(&planned, &[]).unwrap();
+        let collisions = vdb.find_collisions(&planned).unwrap();
         assert!(collisions.is_empty());
     }
 
@@ -482,7 +469,7 @@ mod tests {
             .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/bar")];
-        let collisions = vdb.find_collisions(&planned, &[]).unwrap();
+        let collisions = vdb.find_collisions(&planned).unwrap();
         assert!(collisions.is_empty());
     }
 
@@ -496,7 +483,7 @@ mod tests {
             .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/shared")];
-        let collisions = vdb.find_collisions(&planned, &[]).unwrap();
+        let collisions = vdb.find_collisions(&planned).unwrap();
         assert_eq!(collisions.len(), 1);
         assert_eq!(collisions[0].path.as_str(), "/usr/bin/shared");
         assert_eq!(collisions[0].owner.cpv().to_string(), "app-misc/foo-1.0");
@@ -515,7 +502,7 @@ mod tests {
         .unwrap();
 
         let planned = vec![sym_entry("/usr/lib/libfoo.so", "libfoo.so.2")];
-        let collisions = vdb.find_collisions(&planned, &[]).unwrap();
+        let collisions = vdb.find_collisions(&planned).unwrap();
         assert_eq!(collisions.len(), 1);
     }
 
@@ -528,11 +515,11 @@ mod tests {
             .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/foo")];
-        assert!(!vdb.find_collisions(&planned, &[]).unwrap().is_empty());
+        assert!(!vdb.find_collisions(&planned).unwrap().is_empty());
         assert!(
             !OwnershipIndex::build(&vdb)
                 .unwrap()
-                .find_collisions(&planned, &[])
+                .find_collisions(&planned)
                 .is_empty()
         );
     }
@@ -553,7 +540,7 @@ mod tests {
         assert!(
             OwnershipIndex::build(&vdb)
                 .unwrap()
-                .find_collisions(&planned, &[])
+                .find_collisions(&planned)
                 .is_empty()
         );
     }
@@ -569,50 +556,8 @@ mod tests {
 
         // Same directory in planned install — should not collide.
         let planned = vec![dir_entry("/usr/share/doc"), obj_entry("/usr/share/doc/bar")];
-        let collisions = vdb.find_collisions(&planned, &[]).unwrap();
+        let collisions = vdb.find_collisions(&planned).unwrap();
         assert!(collisions.is_empty());
-    }
-
-    #[test]
-    fn exclude_skips_same_package() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vdb = open_vdb(tmp.path());
-
-        let cpv = Cpv::parse("app-misc/foo-1.0").unwrap();
-        vdb.register(&simple_spec(cpv.clone(), vec![obj_entry("/usr/bin/foo")]))
-            .unwrap();
-
-        // Re-merging the same CPV: with exclude it's clean, without it collides.
-        let planned = vec![obj_entry("/usr/bin/foo")];
-        assert!(
-            vdb.find_collisions(&planned, std::slice::from_ref(&cpv))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(!vdb.find_collisions(&planned, &[]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn find_collisions_skips_every_excluded_owner() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vdb = open_vdb(tmp.path());
-        let cpvs = ["app-misc/old-1", "app-misc/blocked-1", "app-misc/other-1"]
-            .map(|c| Cpv::parse(c).unwrap());
-        for cpv in &cpvs {
-            vdb.register(&simple_spec(cpv.clone(), vec![obj_entry("/usr/bin/x")]))
-                .unwrap();
-        }
-        let planned = vec![obj_entry("/usr/bin/x")];
-        let exclude = &cpvs[..2];
-
-        let scanned = vdb.find_collisions(&planned, exclude).unwrap();
-        let indexed = OwnershipIndex::build(&vdb)
-            .unwrap()
-            .find_collisions(&planned, exclude);
-        for collisions in [scanned, indexed] {
-            assert_eq!(collisions.len(), 1);
-            assert_eq!(collisions[0].owner.cpv(), &cpvs[2]);
-        }
     }
 
     #[test]
@@ -646,29 +591,29 @@ mod tests {
             .unwrap();
 
         let mut index = OwnershipIndex::build(&vdb).unwrap();
-        assert_eq!(index.find_collisions(&first_contents, &[]).len(), 1);
+        assert_eq!(index.find_collisions(&first_contents).len(), 1);
 
         let second_contents = vec![obj_entry(path)];
         let second_cpv = Cpv::parse("app-misc/second-1.0").unwrap();
         let second = vdb
             .register(&simple_spec(second_cpv, second_contents.clone()))
             .unwrap();
-        assert_eq!(index.find_collisions(&second_contents, &[]).len(), 1);
+        assert_eq!(index.find_collisions(&second_contents).len(), 1);
         assert!(!index.is_current(&vdb));
         assert_eq!(
             OwnershipIndex::build(&vdb)
                 .unwrap()
-                .find_collisions(&second_contents, &[])
+                .find_collisions(&second_contents)
                 .len(),
             2
         );
         index.add_package(&second, &second_contents);
         index.refresh(&vdb);
         assert!(index.is_current(&vdb));
-        assert_eq!(index.find_collisions(&second_contents, &[]).len(), 2);
+        assert_eq!(index.find_collisions(&second_contents).len(), 2);
 
         index.remove_package(first.cpv());
-        let collisions = index.find_collisions(&second_contents, &[]);
+        let collisions = index.find_collisions(&second_contents);
         assert_eq!(collisions.len(), 1);
         assert_eq!(collisions[0].owner.cpv(), second.cpv());
     }
@@ -687,7 +632,7 @@ mod tests {
         assert!(
             OwnershipIndex::build(&vdb)
                 .unwrap()
-                .find_collisions(&contents, &[])
+                .find_collisions(&contents)
                 .is_empty()
         );
     }
@@ -705,7 +650,7 @@ mod tests {
             .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/x"), obj_entry("/usr/bin/y")];
-        let collisions = vdb.find_collisions(&planned, &[]).unwrap();
+        let collisions = vdb.find_collisions(&planned).unwrap();
         assert_eq!(collisions.len(), 2);
     }
 }

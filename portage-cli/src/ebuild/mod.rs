@@ -2629,30 +2629,127 @@ fn installed_blockers(vdb: &Vdb, env: &EbuildEnv, cpv: &Cpv) -> Vec<InstalledPac
         .collect()
 }
 
-/// Refuse the merge when an installed package other than those in `exclude` owns one of
-/// `planned`'s paths
+/// What a merge into `root` counts as a file collision, and whether one aborts it
+struct CollisionRules<'a> {
+    root: &'a Utf8Path,
+    protect: &'a ConfigProtect,
+    /// `COLLISION_IGNORE`
+    ignore: Vec<glob::Pattern>,
+    /// FEATURES=collision-protect: any existing file the merge does not replace aborts it
+    collision_protect: bool,
+    /// FEATURES=protect-owned: a file another installed package owns aborts it
+    protect_owned: bool,
+}
+
+impl<'a> CollisionRules<'a> {
+    fn from_shell(
+        shell: &portage_repo::EbuildShell,
+        root: &'a Utf8Path,
+        protect: &'a ConfigProtect,
+    ) -> Self {
+        let features = shell.get_var("FEATURES").unwrap_or_default();
+        let has = |f: &str| features.split_whitespace().any(|w| w == f);
+        Self {
+            root,
+            protect,
+            ignore: collision_ignore_patterns(
+                &shell.get_var("COLLISION_IGNORE").unwrap_or_default(),
+                root,
+            ),
+            collision_protect: has("collision-protect"),
+            protect_owned: has("protect-owned"),
+        }
+    }
+}
+
+/// Parse `COLLISION_IGNORE`; an entry naming a directory under `root` covers everything in it
+fn collision_ignore_patterns(value: &str, root: &Utf8Path) -> Vec<glob::Pattern> {
+    value
+        .split_whitespace()
+        .filter_map(|p| {
+            let dir = safe_dest_under(root, Utf8Path::new(p)).is_ok_and(|d| d.is_dir());
+            let p = if dir {
+                format!("{}/*", p.trim_end_matches('/'))
+            } else {
+                p.to_owned()
+            };
+            glob::Pattern::new(&p).ok()
+        })
+        .collect()
+}
+
+/// Check `planned` against what is on disk, as portage's collision-protect pass does
+///
+/// A path collides when it exists, is not config-protected or in `COLLISION_IGNORE`, and no
+/// package in `mine` (the slot occupant and the packages the merge blocks) owns it. Whether
+/// that aborts the merge follows FEATURES; otherwise it is only reported.
 fn check_collisions(
     planned: &[ContentsEntry],
     vdb: &Vdb,
     index: Option<&OwnershipIndex>,
-    exclude: &[Cpv],
+    mine: &[Cpv],
+    rules: &CollisionRules<'_>,
 ) -> Result<()> {
-    let collisions = match index {
-        Some(index) => index.find_collisions(planned, exclude),
-        None => vdb
-            .find_collisions(planned, exclude)
-            .context("collision check failed")?,
-    };
-    if collisions.is_empty() {
+    let on_disk: Vec<ContentsEntry> = planned
+        .iter()
+        .filter(|e| matches!(e.kind, ContentsKind::Obj | ContentsKind::Sym))
+        .filter(|e| {
+            !rules.protect.is_protected(&e.path)
+                && !rules.ignore.iter().any(|p| p.matches(e.path.as_str()))
+        })
+        .filter(|e| {
+            safe_dest_under(rules.root, &e.path)
+                .is_ok_and(|d| std::fs::symlink_metadata(d.as_std_path()).is_ok())
+        })
+        .cloned()
+        .collect();
+    if on_disk.is_empty() {
         return Ok(());
     }
-    for c in &collisions {
-        crate::style::warn_line!("collision: {} is already owned by {}", c.path, c.owner);
+    let found = match index {
+        Some(index) => index.find_collisions(&on_disk),
+        None => vdb
+            .find_collisions(&on_disk)
+            .context("collision check failed")?,
+    };
+    let mut owners: HashMap<&Utf8Path, Vec<&InstalledPackage>> = HashMap::new();
+    for c in &found {
+        owners.entry(c.path.as_path()).or_default().push(&c.owner);
     }
-    bail!(
-        "{} file collision(s) detected — aborting merge",
-        collisions.len()
-    );
+    let mut owned = vec![];
+    let mut unowned = vec![];
+    for e in &on_disk {
+        match owners.get(e.path.as_path()) {
+            Some(o) if o.iter().any(|p| mine.contains(p.cpv())) => {}
+            Some(o) => owned.push((&e.path, o)),
+            None => unowned.push(&e.path),
+        }
+    }
+    if !unowned.is_empty() {
+        // A preserved library is in no CONTENTS; the merge takes it over.
+        let preserved: HashSet<Utf8PathBuf> =
+            preserve_libs::PreservedLibsRegistry::load(rules.root)
+                .all_paths()
+                .collect();
+        unowned.retain(|p| !preserved.contains(*p));
+    }
+    if owned.is_empty() && unowned.is_empty() {
+        return Ok(());
+    }
+    for (path, o) in &owned {
+        for owner in o.iter() {
+            crate::style::warn_line!("collision: {path} is already owned by {owner}");
+        }
+    }
+    for path in &unowned {
+        crate::style::warn_line!("collision: {path} exists and no installed package owns it");
+    }
+    let count = owned.len() + unowned.len();
+    if rules.collision_protect || (rules.protect_owned && !owned.is_empty()) {
+        bail!("{count} file collision(s) detected; aborting merge");
+    }
+    crate::style::warn_line!("merging despite {count} file collision(s)");
+    Ok(())
 }
 
 /// Record the merged package in the VDB, with its ebuild and its environment
@@ -2846,7 +2943,7 @@ async fn run_merge(
         );
     }
     let victims = installed_blockers(&vdb, &env, ebuild.cpv());
-    let exclude: Vec<Cpv> = old_pkg
+    let mine: Vec<Cpv> = old_pkg
         .iter()
         .chain(&victims)
         .map(|p| p.cpv().clone())
@@ -2856,7 +2953,14 @@ async fn run_merge(
     } else {
         None
     };
-    check_collisions(&planned, &vdb, ownership_index.as_ref(), &exclude)?;
+    let collision_rules = CollisionRules::from_shell(shell, root, &cp);
+    check_collisions(
+        &planned,
+        &vdb,
+        ownership_index.as_ref(),
+        &mine,
+        &collision_rules,
+    )?;
 
     shell
         .run_phase(
@@ -4850,6 +4954,8 @@ mod tests {
         dir: tempfile::TempDir,
         /// Whole-group runs treat their root as an in-place prefix (`--local`)
         prefixed: bool,
+        /// Run in each shell of [`Self::run`] before its phases, as the settings would seed it
+        setup: &'static str,
     }
 
     impl Probe {
@@ -4857,6 +4963,7 @@ mod tests {
             let probe = Self {
                 dir: tempfile::tempdir().unwrap(),
                 prefixed: false,
+                setup: "",
             };
             let repo = probe.path("repo");
             fs::create_dir_all(repo.join("metadata")).unwrap();
@@ -4932,6 +5039,7 @@ mod tests {
             crate::settings::seed_build_shell(&mut shell, None)
                 .await
                 .unwrap();
+            shell.run_string(self.setup).await.unwrap();
             // A removal on this shell starts from here, as `run_group` does.
             shell.save_profile_session();
             let pf = format!("{}-{}", ebuild.name(), ebuild.version());
@@ -5369,7 +5477,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_collision_aborts_the_merge_with_the_other_owner_intact() {
-        let probe = Probe::new();
+        let probe = Probe {
+            setup: "export FEATURES=protect-owned",
+            ..Probe::new()
+        };
         let owner = probe.ebuild("owner", "1", INSTALLS_A_FILE);
         let intruder = probe.ebuild(
             "intruder",
@@ -6639,6 +6750,75 @@ mod tests {
             protect: ConfigProtect::for_test(&["/etc"], &[]),
             orphans,
         }
+    }
+
+    #[test]
+    fn check_collisions_skips_missing_protected_and_ignored_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        for p in [
+            "etc/conf",
+            "lib/modules/m.ko",
+            "usr/bin/real",
+            "usr/bin/stray",
+        ] {
+            fs::create_dir_all(root.join(p).parent().unwrap().as_std_path()).unwrap();
+            fs::write(root.join(p).as_std_path(), b"x").unwrap();
+        }
+        let owned = [
+            "/usr/share/gone",
+            "/etc/conf",
+            "/lib/modules/m.ko",
+            "/usr/bin/real",
+        ];
+        let entry = |p: &str| ContentsEntry {
+            kind: ContentsKind::Obj,
+            path: p.into(),
+            md5: Some("0".into()),
+            mtime: Some(0),
+            target: None,
+        };
+        let vdb = open_or_create_vdb(&root.join("var/db/pkg")).unwrap();
+        let env = EbuildEnv {
+            eapi: "8".into(),
+            slot: "0".into(),
+            ..Default::default()
+        };
+        let owner = Cpv::parse("app-misc/owner-1").unwrap();
+        let contents = owned.map(entry).to_vec();
+        vdb.register(&merge_spec_from_env(
+            env,
+            owner.clone(),
+            contents,
+            Default::default(),
+            0,
+            0,
+            1,
+        ))
+        .unwrap();
+        let protect = ConfigProtect::for_test(&["/etc"], &[]);
+        let rules = |collision_protect, protect_owned| CollisionRules {
+            root: &root,
+            protect: &protect,
+            ignore: collision_ignore_patterns("/lib/modules", &root),
+            collision_protect,
+            protect_owned,
+        };
+        let check = |planned: &[&str], mine: &[Cpv], rules: CollisionRules<'_>| {
+            let planned: Vec<_> = planned.iter().map(|p| entry(p)).collect();
+            check_collisions(&planned, &vdb, None, mine, &rules).is_ok()
+        };
+
+        assert!(check(&owned[..3], &[], rules(false, true)));
+        assert!(!check(&owned, &[], rules(false, true)));
+        assert!(check(&owned, &[], rules(false, false)));
+        assert!(check(
+            &owned,
+            std::slice::from_ref(&owner),
+            rules(false, true)
+        ));
+        assert!(check(&["/usr/bin/stray"], &[], rules(false, true)));
+        assert!(!check(&["/usr/bin/stray"], &[], rules(true, false)));
     }
 
     #[test]

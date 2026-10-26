@@ -156,6 +156,7 @@ pub(crate) async fn load(cli: &Cli) -> Result<Option<Arc<Settings>>> {
 /// em's own merge, fetch and elog decisions read them, as Portage's do, so the environment
 /// counts here although it does not otherwise reach builds.
 const SEEDED: &[&str] = &[
+    "COLLISION_IGNORE",
     "CONFIG_PROTECT",
     "CONFIG_PROTECT_MASK",
     "FEATURES",
@@ -176,6 +177,7 @@ const HONOURED_FEATURES: &[&str] = &[
     "binpkg-signing",
     "buildpkg",
     "buildpkg-live",
+    "collision-protect",
     "config-protect-if-modified",
     "digest",
     "distlocks",
