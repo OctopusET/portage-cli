@@ -4,8 +4,8 @@
 //! rather than guessed from behavior.
 //!
 //! The real algorithm: seed a "required" set from `@world` (`@system` and the selected sets
-//! when atoms are given), walk every requirement's *installed* `RDEPEND`/`PDEPEND` (`DEPEND`/`BDEPEND`
-//! excluded by default — build-time-only, the classic thing depclean
+//! when atoms are given), walk every requirement's *installed* `RDEPEND`/`IDEPEND`/`PDEPEND`
+//! (`DEPEND`/`BDEPEND` excluded by default — build-time-only, the classic thing depclean
 //! clears out) transitively over what's actually installed, and anything
 //! installed but never reached is removal-eligible. When atoms are given
 //! on the command line, every *other* installed package is folded into
@@ -36,7 +36,7 @@ use crate::cli;
 use crate::emerge::parse_atoms_strict;
 use crate::vdb::open_cli_vdb;
 
-/// Evaluate `pkg`'s own `RDEPEND`/`PDEPEND` (+ `DEPEND`/`BDEPEND` under
+/// Evaluate `pkg`'s own `RDEPEND`/`IDEPEND`/`PDEPEND` (+ `DEPEND`/`BDEPEND` under
 /// `with_bdeps`) against its own recorded `USE`, returning concrete,
 /// non-blocker atoms. `UseConditional`s are resolved by
 /// `DepEntry::evaluate_use`, matching the convention
@@ -51,6 +51,9 @@ fn own_atoms(pkg: &InstalledPackage, with_bdeps: bool) -> Vec<Dep> {
 
     let mut entries = Vec::new();
     if let Ok(Some(e)) = pkg.rdepend() {
+        entries.extend(e);
+    }
+    if let Ok(Some(e)) = pkg.idepend() {
         entries.extend(e);
     }
     if let Ok(Some(e)) = pkg.pdepend() {
@@ -348,6 +351,24 @@ mod tests {
 
         assert_eq!(cleanlist.len(), 1);
         assert_eq!(cleanlist[0].cpv().cpn.to_string(), "dev-libs/orphan");
+    }
+
+    #[test]
+    fn idepend_keeps_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "app-misc", "topapp-1.0", "", "");
+        std::fs::write(
+            vdb_root.join("app-misc/topapp-1.0/IDEPEND"),
+            "dev-util/tool",
+        )
+        .unwrap();
+        write_fake_package(&vdb_root, "dev-util", "tool-1.0", "", "");
+
+        let vdb = open_vdb(tmp.path());
+        let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
+        let world = vec![Dep::parse("app-misc/topapp").unwrap()];
+        assert!(compute_cleanlist(&installed, &world, &[], &[], false).is_empty());
     }
 
     #[test]
