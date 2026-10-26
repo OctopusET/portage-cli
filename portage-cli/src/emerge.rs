@@ -993,24 +993,31 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if mode.resume {
         return resume_atoms(cli).await;
     }
+    let before = if cli.pretend() {
+        None
+    } else {
+        vdb_generation(cli)
+    };
     // emerge -C: remove the matching installed packages directly, no
     // dependency graph at all. Checked first: -C together with -s/-S makes
     // no sense, and real emerge treats -C as its own action too.
     if mode.unmerge {
-        return unmerge_atoms(cli, &atoms).await;
+        let result = unmerge_atoms(cli, &atoms).await;
+        return after_removal(cli, before, result).await;
     }
     // emerge --depclean / -c: the safe alternative to -C, walking the
     // installed dependency graph first.
     if mode.depclean {
-        let merge_flags = cli.merge_flags();
-        return crate::depclean::run_with_targets(cli, &atoms, &merge_flags).await;
+        let result = depclean_targets(cli, &atoms).await;
+        return after_removal(cli, before, result).await;
     }
     if mode.config {
         return config_atoms(cli, &atoms).await;
     }
     // emerge -P/--prune: like -C, but only the non-highest-version matches.
     if mode.prune {
-        return prune_atoms(cli, &atoms).await;
+        let result = prune_atoms(cli, &atoms).await;
+        return after_removal(cli, before, result).await;
     }
     // emerge -W/--deselect: world-file-only, no removal at all.
     if mode.deselect == Some(cli::YesNo::Y) {
@@ -1025,7 +1032,6 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         crate::style::error_line!("no atoms or applet specified. Use --help for usage.");
         std::process::exit(1);
     }
-    let before = vdb_generation(cli);
     let result = emerge_atoms(
         cli,
         &atoms,
@@ -1057,6 +1063,37 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     result
 }
 
+/// `-c`/`--depclean` with its `@set` targets expanded, dropping those sets from world after a
+/// real removal; sets with no member at all are an error, never an unrestricted depclean
+async fn depclean_targets(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
+    let targets = depclean_target_atoms(atoms, expand_sets(atoms, &cli.roots()))?;
+    crate::depclean::run_with_targets(cli, &targets, &cli.merge_flags()).await?;
+    deselect_removed_sets(cli, atoms)
+}
+
+/// The `expanded` atoms of the `-c` command line `atoms`, failing when targets expand to none
+fn depclean_target_atoms(atoms: &[String], expanded: Vec<TargetAtom>) -> Result<Vec<String>> {
+    if !atoms.is_empty() && expanded.is_empty() {
+        bail!("depclean: {} named no packages", atoms.join(" "));
+    }
+    Ok(expanded.into_iter().map(|t| t.atom).collect())
+}
+
+/// A removal's `result`, after portage's end-of-run notices when it was real and went ahead
+async fn after_removal(
+    cli: &cli::Cli,
+    before: Option<(usize, u64)>,
+    result: Result<()>,
+) -> Result<()> {
+    let declined = result
+        .as_ref()
+        .is_err_and(|e| e.downcast_ref::<error::Declined>().is_some());
+    if !cli.pretend() && !declined {
+        post_emerge(cli, before).await;
+    }
+    result
+}
+
 /// The installed set's count and highest COUNTER, which any merge or removal changes
 fn vdb_generation(cli: &cli::Cli) -> Option<(usize, u64)> {
     let pkgs: Vec<_> = open_cli_vdb(cli).ok()?.packages().into_iter().collect();
@@ -1068,13 +1105,14 @@ fn vdb_generation(cli: &cli::Cli) -> Option<(usize, u64)> {
 /// installed set, then unread news (also after `--pretend`, as GLEP 42 asks)
 async fn post_emerge(cli: &cli::Cli, before: Option<(usize, u64)>) {
     let changed = !cli.pretend() && vdb_generation(cli) != before;
-    if !changed && !cli.pretend() {
+    let (config_notice, news_notice) = notices_due(cli.merge_flags().json, cli.pretend(), changed);
+    if !config_notice && !news_notice {
         return;
     }
     let Ok(Some(settings)) = crate::settings::load(cli).await else {
         return;
     };
-    if changed {
+    if config_notice {
         let protect = ebuild::ConfigProtect::from_settings(&settings);
         let notices = crate::etc::pending_notices(cli.roots().merge_root(), &protect);
         let mut out = anstream::stdout();
@@ -1096,12 +1134,21 @@ async fn post_emerge(cli: &cli::Cli, before: Option<(usize, u64)>) {
     let news = settings
         .get("FEATURES")
         .is_some_and(|f| f.split_whitespace().any(|w| w == "news"));
-    if news {
+    if news_notice && news {
         match crate::news::unread_counts(cli) {
             Ok(counts) => crate::news::print_notification(&counts),
             Err(e) => tracing::debug!("news: {e:#}"),
         }
     }
+}
+
+/// Which end-of-run notices are due, (config files, news): none under `--json`, whose stdout is
+/// the JSON document alone
+fn notices_due(json: bool, pretend: bool, changed: bool) -> (bool, bool) {
+    if json {
+        return (false, false);
+    }
+    (changed, changed || pretend)
 }
 
 /// `-r`/`--resume`: replay the last saved merge (`maint::resume`)
@@ -2429,6 +2476,30 @@ mod tests {
         );
         let both = pick(&["dev-lang/python-3.12.1", "dev-lang/python-3.13.1"]);
         assert_eq!(system_warning_cps(&both, &vdb, &system).len(), 1);
+    }
+
+    #[test]
+    fn json_suppresses_end_of_run_notices() {
+        assert_eq!(notices_due(true, true, false), (false, false));
+        assert_eq!(notices_due(true, false, true), (false, false));
+        assert_eq!(notices_due(false, true, false), (false, true));
+        assert_eq!(notices_due(false, false, true), (true, true));
+        assert_eq!(notices_due(false, false, false), (false, false));
+    }
+
+    #[test]
+    fn depclean_of_an_empty_set_is_not_an_unrestricted_depclean() {
+        let set = vec!["@empty".to_string()];
+        assert!(depclean_target_atoms(&set, Vec::new()).is_err());
+        assert!(depclean_target_atoms(&[], Vec::new()).unwrap().is_empty());
+        let member = TargetAtom {
+            atom: "app-misc/foo".to_string(),
+            origin: TargetOrigin::Set("empty".to_string()),
+        };
+        assert_eq!(
+            depclean_target_atoms(&set, vec![member]).unwrap(),
+            ["app-misc/foo"]
+        );
     }
 
     #[test]
