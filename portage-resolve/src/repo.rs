@@ -24,6 +24,8 @@ pub enum FilterReason {
     Properties(Vec<String>),
     /// One or more `RESTRICT` tokens not in ACCEPT_RESTRICT
     Restrict(Vec<String>),
+    /// A dependency field failed to parse, with Portage's `FIELD: error` summary
+    Invalid(String),
 }
 
 impl FilterReason {
@@ -1342,7 +1344,9 @@ impl Adapter<'_> {
             .versions
             .get(&cpn)?
             .iter()
-            .filter(|(cpv, cache)| self.version_accepted(cpv, cache))
+            .filter(|(cpv, cache)| {
+                self.version_accepted(cpv, cache) && !deps_invalid(&cache.metadata)
+            })
             .max_by(|a, b| a.0.version.cmp(&b.0.version))
             .map(|(cpv, cache)| (cpv, cache))
     }
@@ -1563,7 +1567,8 @@ impl PackageRepository for Adapter<'_> {
                 entries
                     .iter()
                     .filter(|(cpv, cache)| {
-                        self.autounmask_widen || self.version_accepted(cpv, cache)
+                        (self.autounmask_widen || self.version_accepted(cpv, cache))
+                            && !deps_invalid(&cache.metadata)
                     })
                     .map(|(cpv, cache)| {
                         let iuse = cache.metadata.iuse.iter().map(Interned::from).collect();
@@ -1602,21 +1607,11 @@ impl PackageRepository for Adapter<'_> {
                             meta.iuse.iter().map(Interned::from).collect();
                         let iuse_defaults =
                             crate::effective_use::enabled_iuse_defaults_from_metadata(meta);
-                        let deps = package_deps_from_metadata(meta);
-                        // Portage masks such a version as invalid instead of reading the field as empty.
-                        if [
-                            &meta.depend,
-                            &meta.rdepend,
-                            &meta.bdepend,
-                            &meta.pdepend,
-                            &meta.idepend,
-                        ]
-                        .iter()
-                        .any(|f| f.parse_failed())
-                        {
+                        if deps_invalid(meta) {
                             tracing::debug!("{cpv}: invalid: {}", meta.parse_failure_summary());
                             return None;
                         }
+                        let deps = package_deps_from_metadata(meta);
                         // Translate the parsed metadata grammar into the solver's
                         // interned-flag fact vocabulary (the crate stays free of
                         // portage-metadata). Dormant until Level-C consumes it.
@@ -1924,6 +1919,24 @@ fn version_accepted_uncached(
         && restrict_ok_for(cpv, meta, policy, effective)
 }
 
+/// Whether a dependency field of `meta` failed to parse, which Portage masks as `invalid`
+///
+/// Forces the lazy dependency fields, so it runs only on versions the caller already narrowed to.
+fn deps_invalid(meta: &portage_metadata::EbuildMetadata) -> bool {
+    [
+        &meta.depend,
+        &meta.rdepend,
+        &meta.bdepend,
+        &meta.pdepend,
+        &meta.idepend,
+    ]
+    .iter()
+    .any(|f| {
+        f.list();
+        f.parse_failed()
+    })
+}
+
 /// Map a dep atom to a `PortagePackage` for the solver
 pub fn target_package(
     data: &RepoData,
@@ -1945,6 +1958,7 @@ pub fn target_package(
         .filter(|(cpv, cache)| {
             dep.matches_cpv(cpv, Some(&cache.metadata.slot))
                 && version_accepted_for(policy, cpv, cache, repo_name_of(data, cpv))
+                && !deps_invalid(&cache.metadata)
         })
         .max_by(|a, b| a.0.version.cmp(&b.0.version))
         .map(|(_, cache)| cache.metadata.slot.slot);
@@ -2006,6 +2020,7 @@ pub fn filter_reason_text(reasons: &[FilterReason]) -> String {
             FilterReason::License(l) => format!("{} license(s)", l.join(" ")),
             FilterReason::Properties(p) => format!("{} propert(y/ies)", p.join(" ")),
             FilterReason::Restrict(r) => format!("{} restriction(s)", r.join(" ")),
+            FilterReason::Invalid(why) => format!("invalid: {why}"),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -2110,6 +2125,9 @@ pub fn filter_reasons_for(
             if !needed.is_empty() {
                 reasons.push(FilterReason::Restrict(needed));
             }
+        }
+        if deps_invalid(meta) {
+            reasons.push(FilterReason::Invalid(meta.parse_failure_summary()));
         }
 
         if !reasons.is_empty() {
@@ -4314,7 +4332,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_with_a_malformed_dep_field_is_not_a_candidate() {
+    fn a_version_with_a_malformed_dep_field_is_masked_invalid() {
         let data = repo_with_many(&[
             (
                 "app-misc/thing-1.0",
@@ -4322,7 +4340,7 @@ mod tests {
             ),
             (
                 "app-misc/thing-2.0",
-                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nRDEPEND=|| (\n",
+                "EAPI=8\nSLOT=2\nKEYWORDS=amd64\nDESCRIPTION=t\nRDEPEND=|| (\n",
             ),
         ]);
         let arch = Arch::intern("amd64");
@@ -4355,6 +4373,23 @@ mod tests {
             .map(|(c, _)| c.version.to_string())
             .collect();
         assert_eq!(versions, ["1.0"]);
+        let policy = adapter.policy();
+        let dep = Dep::parse("app-misc/thing").unwrap();
+        assert_eq!(
+            target_package(&data, &dep, &policy),
+            portage_atom_pubgrub::PortagePackage::slotted(cpn, Interned::intern("0"))
+        );
+        let dep = Dep::parse("app-misc/thing:2").unwrap();
+        let reasons = filter_reasons_for_atom(
+            &data,
+            &dep,
+            &portage_atom_pubgrub::PortageVersionSet::any(),
+            &policy,
+        );
+        assert!(
+            matches!(reasons.as_slice(), [c] if matches!(c.reasons.as_slice(),
+                [FilterReason::Invalid(why)] if why.starts_with("RDEPEND: ")))
+        );
     }
 
     // Widened candidate supply: unaccepted versions stay visible tagged

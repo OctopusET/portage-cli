@@ -545,6 +545,7 @@ fn masked_by(reasons: &[FilterReason]) -> String {
             FilterReason::License(l) => format!("{} license(s)", l.join(" ")),
             FilterReason::Properties(p) => format!("{} propert(y/ies)", p.join(" ")),
             FilterReason::Restrict(r) => format!("{} restriction(s)", r.join(" ")),
+            FilterReason::Invalid(why) => format!("invalid: {why}"),
         })
         .collect();
     parts.join(", ")
