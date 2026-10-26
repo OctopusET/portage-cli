@@ -1456,10 +1456,8 @@ fn deselect_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     if pretend {
         return Ok(());
     }
-    if cli.merge_flags().ask && !confirm_action("remove these packages from your world favorites")?
-    {
-        println!(">>> Quitting.");
-        return Ok(());
+    if cli.merge_flags().ask {
+        confirm_action("remove these packages from your world favorites")?;
     }
     maint::world::remove_lines(root, &lines)?;
     Ok(())
