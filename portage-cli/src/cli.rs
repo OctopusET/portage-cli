@@ -159,7 +159,7 @@ pub fn parse_cli_or_exit() -> Validated {
         std::process::exit(0);
     }
     let args = attach_yes_no_values(args);
-    let parsed = Cli::parse_from(&args).and_then(|cli| {
+    let parsed = parse_emerge_yn(&args).and_then(|cli| {
         let defaults = match &cli.applet {
             Some(Applet::Emerge(a)) if !a.ignore_default_opts => {
                 let config_root = cli
@@ -176,13 +176,21 @@ pub fn parse_cli_or_exit() -> Validated {
         if defaults.is_empty() {
             Ok(cli)
         } else {
-            Cli::parse_from(with_default_opts(args, defaults))
+            Cli::parse_from(normalize_optional_yn(with_default_opts(args, defaults)))
         }
     });
     match parsed.and_then(Validated::try_from) {
         Ok(validated) => validated,
         Err(error) => std::process::exit(winnow_args::report(&error, "em")),
     }
+}
+
+/// `args` parsed with emerge's optional `y`/`n` switch values folded, when that makes an emerge
+fn parse_emerge_yn(args: &[OsString]) -> Result<Cli, winnow_args::Error> {
+    Cli::parse_from(normalize_optional_yn(args.to_vec()))
+        .ok()
+        .filter(|cli| matches!(cli.applet, Some(Applet::Emerge(_))))
+        .map_or_else(|| Cli::parse_from(args), Ok)
 }
 
 /// `EMERGE_DEFAULT_OPTS`, the environment's value `env` or else `config_root`'s make.conf one,
@@ -217,7 +225,7 @@ fn make_conf_default_opts(config_root: &camino::Utf8Path) -> Option<String> {
 /// are warned about and dropped, since emerge has options em lacks
 fn known_default_opts(words: Vec<OsString>) -> Vec<OsString> {
     let mut groups: Vec<Vec<OsString>> = Vec::new();
-    for word in words {
+    for word in normalize_optional_yn(words) {
         match groups.last_mut() {
             Some(group) if !word.to_string_lossy().starts_with('-') => group.push(word),
             _ => groups.push(vec![word]),
@@ -242,6 +250,85 @@ fn with_default_opts(mut args: Vec<OsString>, defaults: Vec<OsString>) -> Vec<Os
     let at = usize::from(args.first().is_some_and(|a| a == "emerge"));
     args.splice(at..at, defaults);
     args
+}
+
+/// Emerge's switches that take an optional `y`/`n` value, with their short letter.
+const OPTIONAL_YN: &[(&str, Option<char>)] = &[
+    ("--alert", Some('A')),
+    ("--ask", Some('a')),
+    ("--autounmask", None),
+    ("--autounmask-continue", None),
+    ("--autounmask-only", None),
+    ("--autounmask-keep-keywords", None),
+    ("--autounmask-keep-masks", None),
+    ("--autounmask-unrestricted-atoms", None),
+    ("--autounmask-write", None),
+    ("--binpkg-changed-deps", None),
+    ("--binpkg-respect-use", None),
+    ("--buildpkg", Some('b')),
+    ("--changed-deps", None),
+    ("--changed-slot", None),
+    ("--complete-graph", None),
+    ("--deselect", Some('W')),
+    ("--fail-clean", None),
+    ("--fuzzy-search", None),
+    ("--getbinpkg", Some('g')),
+    ("--getbinpkgonly", Some('G')),
+    ("--keep-going", None),
+    ("--quiet", Some('q')),
+    ("--quiet-build", None),
+    ("--read-news", None),
+    ("--select", Some('w')),
+    ("--selective", None),
+    ("--usepkg", Some('k')),
+    ("--usepkgonly", Some('K')),
+    ("--verbose", Some('v')),
+    ("--with-test-deps", None),
+];
+
+/// `words` with emerge's optional `y`/`n` switch values folded away: `--ask y` is `--ask`, and
+/// `--ask n` drops that switch and every earlier one. A switch em takes as `--name=y|n` gets
+/// its value attached.
+fn normalize_optional_yn(words: Vec<OsString>) -> Vec<OsString> {
+    let mut out: Vec<OsString> = Vec::with_capacity(words.len());
+    let mut words = words.into_iter().peekable();
+    while let Some(word) = words.next() {
+        let text = word.to_string_lossy().into_owned();
+        let (name, attached) = match text.split_once('=') {
+            Some((name, value)) if name.starts_with("--") => {
+                (name.to_owned(), Some(value.to_owned()))
+            }
+            _ => (text.clone(), None),
+        };
+        let Some(&(long, short)) = OPTIONAL_YN.iter().find(|(long, short)| {
+            *long == name || short.is_some_and(|c| attached.is_none() && name == format!("-{c}"))
+        }) else {
+            out.push(word);
+            continue;
+        };
+        let value = match attached {
+            Some(v) => Some(v),
+            None => words
+                .next_if(|w| matches!(w.to_str(), Some("y" | "n" | "True")))
+                .map(|w| w.to_string_lossy().into_owned()),
+        };
+        let valued = merge_flags::DETACHED_YES_NO.contains(&long);
+        match value.as_deref() {
+            Some("y" | "True") if valued => out.push(format!("{long}=y").into()),
+            Some("n") if valued => out.push(format!("{long}=n").into()),
+            None if valued => out.push(word),
+            None | Some("y" | "True") => out.push(name.into()),
+            Some("n") => out.retain(|w| !is_switch(w, long, short)),
+            Some(_) => out.push(word),
+        }
+    }
+    out
+}
+
+/// Whether `word` is the switch `long` or `-short`
+fn is_switch(word: &OsString, long: &str, short: Option<char>) -> bool {
+    let Some(w) = word.to_str() else { return false };
+    w == long || short.is_some_and(|c| w == format!("-{c}"))
 }
 
 /// A leading flag before any subcommand name routes into `emerge` (the
@@ -805,6 +892,34 @@ mod tests {
                 "a/b"
             ])),
             os(&["--jobs", "4", "-X", "a/b"])
+        );
+    }
+
+    #[test]
+    fn optional_yn_values_are_folded_not_taken_as_targets() {
+        let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let defaults = known_default_opts(os(&[
+            "--ask",
+            "y",
+            "--keep-going",
+            "n",
+            "--with-bdeps",
+            "y",
+        ]));
+        assert_eq!(defaults, os(&["--ask", "--with-bdeps", "y"]));
+        let cli = Cli::parse_from(normalize_optional_yn(with_default_opts(
+            os(&["emerge", "-a", "n", "foo"]),
+            defaults,
+        )))
+        .unwrap();
+        assert!(!cli.merge_flags().ask);
+        let Some(Applet::Emerge(a)) = cli.applet else {
+            panic!("not emerge");
+        };
+        assert_eq!(a.atoms, ["foo"]);
+        assert_eq!(
+            normalize_optional_yn(os(&["--buildpkg=y", "-k", "True", "-b", "n", "-j", "4"])),
+            os(&["--buildpkg=y", "-k", "--buildpkg=n", "-j", "4"])
         );
     }
 

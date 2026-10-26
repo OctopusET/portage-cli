@@ -269,7 +269,7 @@ fn saved_switch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<YesNo>,
 }
 
 /// Long options whose `y`/`n` value may also be the next word, as in emerge's `--buildpkg n`
-const DETACHED_YES_NO: [&str; 4] = [
+pub(super) const DETACHED_YES_NO: [&str; 4] = [
     "--buildpkg",
     "--getbinpkg",
     "--binpkg-respect-use",
