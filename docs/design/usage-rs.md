@@ -342,8 +342,9 @@ are a `try_into` reject, not bound-and-ignored.
 | `em toolchain --help` | toolchain help |
 | `em --version` | version, not emerge |
 | `em --info` | `info::run` (see `--info` below) |
-| `em --info use` | **use** (info does not steal a named applet) |
-| `em --info firefox` | spike-lock; see `--info` below |
+| `em --info use` | info, plus how package `use` was built (`--info` commits the line to emerge) |
+| `em --info firefox` | info, plus how `firefox` was built |
+
 | `em` | root help, exit 2 (`arg_required_else_help`) |
 | `em -p` | “no atoms or applet specified” (or emerge empty-atom equivalent) |
 

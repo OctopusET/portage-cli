@@ -113,6 +113,29 @@ struct RepoInfo {
     priority: Option<i64>,
 }
 
+/// Portage's per-package `--info` variables, shown when the build used a value other than the
+/// current one
+const PACKAGE_VARS: &[&str] = &["CHOST", "CFLAGS", "CXXFLAGS", "FEATURES", "LDFLAGS"];
+
+/// One `USE`-shaped variable of a package's build: `USE` itself or a USE_EXPAND group
+#[derive(Serialize, Debug, PartialEq)]
+struct UseGroup {
+    name: String,
+    /// Enabled flags, then `-`-prefixed disabled ones, each run sorted
+    flags: Vec<String>,
+}
+
+/// What an installed package was built with (`emerge --info <atom>`'s Package Settings)
+#[derive(Serialize)]
+struct PackageSettings {
+    cpv: String,
+    repo: String,
+    use_flags: Vec<UseGroup>,
+    vars: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unset: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct BinaryRepoInfo {
     name: String,
@@ -181,10 +204,116 @@ struct Info {
     vars: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unset: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<PackageSettings>,
+}
+
+/// The installed packages `atoms` name, failing after a warning for each atom naming none
+fn installed_matches(
+    vdb: &portage_vdb::Vdb,
+    atoms: &[String],
+) -> Result<Vec<portage_vdb::InstalledPackage>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    let mut missing = false;
+    for atom in atoms {
+        let pkgs = crate::vdb::find_packages(vdb, atom);
+        if pkgs.is_empty() {
+            crate::style::warn_line!("there are no installed packages to satisfy \"{atom}\"");
+            missing = true;
+        }
+        found.extend(pkgs.into_iter().filter(|p| seen.insert(p.cpv().clone())));
+    }
+    if missing {
+        return Err(crate::error::NoValidAtoms.into());
+    }
+    Ok(found)
+}
+
+/// `pkg`'s build settings: its USE by group (skipping `hidden` groups and the `arch` flag), and
+/// each of [`PACKAGE_VARS`] whose recorded value differs from `current`'s
+fn package_settings(
+    pkg: &portage_vdb::InstalledPackage,
+    current: impl Fn(&str) -> Option<String>,
+    expand: &UseExpand,
+    hidden: &[String],
+    arch: Option<&str>,
+) -> Result<PackageSettings> {
+    let enabled: Vec<String> = pkg
+        .use_flags()?
+        .iter()
+        .map(|f| f.to_string())
+        .filter(|f| Some(f.as_str()) != arch)
+        .collect();
+    let iuse: Vec<String> = pkg.iuse()?.iter().map(|f| f.name().to_string()).collect();
+    let mut groups: BTreeMap<&str, (Vec<&str>, Vec<&str>)> = BTreeMap::new();
+    groups.entry("global").or_default();
+    for flag in &enabled {
+        let (group, value) = expand.split(flag);
+        groups.entry(group).or_default().0.push(value);
+    }
+    for flag in iuse.iter().filter(|f| !enabled.contains(f)) {
+        let (group, value) = expand.split(flag);
+        groups.entry(group).or_default().1.push(value);
+    }
+    let mut use_flags = Vec::new();
+    for (group, (mut on, mut off)) in groups {
+        let name = if group == "global" {
+            "USE".to_string()
+        } else {
+            group.to_uppercase()
+        };
+        if hidden.iter().any(|h| h.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        on.sort_unstable();
+        off.sort_unstable();
+        let flags = on
+            .iter()
+            .map(|f| f.to_string())
+            .chain(off.iter().map(|f| format!("-{f}")))
+            .collect();
+        let entry = UseGroup { name, flags };
+        if entry.name == "USE" {
+            use_flags.insert(0, entry);
+        } else {
+            use_flags.push(entry);
+        }
+    }
+
+    let mut vars = BTreeMap::new();
+    let mut unset = Vec::new();
+    for &name in PACKAGE_VARS {
+        match pkg.field(name)? {
+            None => unset.push(name.to_string()),
+            Some(v) => {
+                let now = current(name).unwrap_or_default();
+                if !v.split_whitespace().eq(now.split_whitespace()) {
+                    vars.insert(name.to_string(), v);
+                }
+            }
+        }
+    }
+    let repo = pkg
+        .repository()?
+        .map_or_else(|| "<unknown repository>".to_string(), |r| r.to_string());
+    Ok(PackageSettings {
+        cpv: pkg.cpv().to_string(),
+        repo,
+        use_flags,
+        vars,
+        unset,
+    })
 }
 
 pub(crate) async fn run(cli: &Cli) -> Result<()> {
     let roots = cli.roots();
+    let atoms = cli.atoms();
+    let installed = if atoms.is_empty() {
+        Vec::new()
+    } else {
+        installed_matches(&crate::vdb::open_cli_vdb(cli)?, &atoms)?
+    };
     let repo = crate::crossdev::main_repo(cli)?;
     let loaded = crate::settings::load(cli).await?;
     let has_profile = loaded.is_some();
@@ -302,6 +431,17 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
     }
     vars.extend(var("PORTAGE_CONFIGROOT").map(|v| ("PORTAGE_CONFIGROOT".to_string(), v)));
 
+    let hidden: Vec<String> = var("USE_EXPAND_HIDDEN")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let arch = var("ARCH");
+    let packages = installed
+        .iter()
+        .map(|pkg| package_settings(pkg, &var, &expand, &hidden, arch.as_deref()))
+        .collect::<Result<Vec<_>>>()?;
+
     let info = Info {
         em_version: env!("CARGO_PKG_VERSION").to_string(),
         profile,
@@ -317,6 +457,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
         use_flags,
         vars,
         unset,
+        packages,
     };
 
     if cli.merge_flags().json {
@@ -486,6 +627,32 @@ fn print_text(info: &Info) -> Result<()> {
     }
     if !info.unset.is_empty() {
         writeln!(out, "{C_DIM}Unset:{C_DIM:#}  {}", info.unset.join(", "))?;
+    }
+
+    if !info.packages.is_empty() {
+        let title = "Package Settings";
+        writeln!(out, "\n{}", "=".repeat(65))?;
+        writeln!(out, "{title:>40}")?;
+        writeln!(out, "{}", "=".repeat(65))?;
+    }
+    for pkg in &info.packages {
+        writeln!(
+            out,
+            "\n{C_PKG}{}::{}{C_PKG:#} was built with the following:",
+            pkg.cpv, pkg.repo
+        )?;
+        let groups: Vec<String> = pkg
+            .use_flags
+            .iter()
+            .map(|g| format!("{}=\"{}\"", g.name, colorize_flags(&g.flags)))
+            .collect();
+        writeln!(out, "{}", groups.join(" "))?;
+        for (name, value) in &pkg.vars {
+            writeln!(out, "{name}=\"{value}\"")?;
+        }
+        if !pkg.unset.is_empty() {
+            writeln!(out, "Unset: {}", pkg.unset.join(", "))?;
+        }
     }
 
     Ok(())
@@ -721,6 +888,66 @@ mod tests {
         std::fs::create_dir_all(root.join("var/db/pkg")).unwrap();
         std::fs::write(root.join("etc/portage/sets/myuserset"), "app-shells/bash\n").unwrap();
         (tmp, root)
+    }
+
+    #[test]
+    fn package_settings_shows_use_groups_and_the_flags_that_changed() {
+        let (_tmp, root) = scratch_root();
+        let dir = root.join("var/db/pkg/app-misc/foo-1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, text) in [
+            ("SLOT", "0"),
+            ("EAPI", "8"),
+            ("repository", "gentoo"),
+            ("USE", "amd64 ssl video_cards_amdgpu abi_x86_64"),
+            (
+                "IUSE",
+                "ssl gtk video_cards_amdgpu video_cards_intel abi_x86_64",
+            ),
+            ("CFLAGS", "-O2  -pipe"),
+            ("CXXFLAGS", "-O3"),
+            ("CHOST", "x86_64-pc-linux-gnu"),
+        ] {
+            std::fs::write(dir.join(file), text).unwrap();
+        }
+        let vdb = portage_vdb::Vdb::open(root.join("var/db/pkg")).unwrap();
+        let pkgs = installed_matches(&vdb, &["foo".to_string()]).unwrap();
+        assert!(installed_matches(&vdb, &["foo".to_string(), "bar".to_string()]).is_err());
+        let current = |name: &str| match name {
+            "CFLAGS" => Some("-O2 -pipe".to_string()),
+            "CXXFLAGS" => Some("-O2 -pipe".to_string()),
+            _ => None,
+        };
+        let expand = UseExpand::from_var("VIDEO_CARDS ABI_X86");
+        let got = package_settings(
+            &pkgs[0],
+            current,
+            &expand,
+            &["ABI_X86".to_string()],
+            Some("amd64"),
+        )
+        .unwrap();
+        assert_eq!(got.cpv, "app-misc/foo-1.0");
+        assert_eq!(got.repo, "gentoo");
+        let group = |name: &str, flags: &[&str]| UseGroup {
+            name: name.to_string(),
+            flags: flags.iter().map(|f| f.to_string()).collect(),
+        };
+        assert_eq!(
+            got.use_flags,
+            [
+                group("USE", &["ssl", "-gtk"]),
+                group("VIDEO_CARDS", &["amdgpu", "-intel"])
+            ]
+        );
+        assert_eq!(
+            got.vars.into_iter().collect::<Vec<_>>(),
+            [
+                ("CHOST".to_string(), "x86_64-pc-linux-gnu".to_string()),
+                ("CXXFLAGS".to_string(), "-O3".to_string())
+            ]
+        );
+        assert_eq!(got.unset, ["FEATURES", "LDFLAGS"]);
     }
 
     #[test]

@@ -77,10 +77,10 @@ pub struct EmergeModeArgs {
     #[arg(short = 'r', long)]
     pub resume: bool,
 
-    /// Print system/build info (`emerge --info` workalike). Takes no atoms.
+    /// Print system/build info (`emerge --info` workalike), and how each installed atom was built
     #[arg(
         long,
-        long_help = "`emerge --info` workalike. Takes no atoms. Print system/build info: profile, CHOST/CFLAGS/FEATURES/USE (with USE_EXPAND groups like VIDEO_CARDS broken out), ACCEPT_KEYWORDS/ACCEPT_LICENSE, and configured repositories. Combine with `--json` for structured output, or `-v` to also list every known `@name` set and its resolved atoms (neither has a real-emerge equivalent)."
+        long_help = "`emerge --info` workalike. Print system/build info: profile, CHOST/CFLAGS/FEATURES/USE (with USE_EXPAND groups like VIDEO_CARDS broken out), ACCEPT_KEYWORDS/ACCEPT_LICENSE, and configured repositories. Each atom given adds the USE and the CHOST/CFLAGS/CXXFLAGS/FEATURES/LDFLAGS its installed versions were built with, where those differ from today's. Combine with `--json` for structured output, or `-v` to also list every known `@name` set and its resolved atoms (neither has a real-emerge equivalent)."
     )]
     pub info: bool,
 }

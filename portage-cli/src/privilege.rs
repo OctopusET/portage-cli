@@ -114,10 +114,10 @@ pub(crate) fn will_build(cli: &Cli) -> bool {
         None | Some(Applet::Emerge(_)) => {
             let mode = cli.mode();
             // Removals mutate the root even though they skip the merge
-            // engine entirely; search/deselect never touch it.
+            // engine entirely; search/info never touch it.
             mode.unmerge
                 || mode.depclean
-                || (!cli.atoms().is_empty() && !mode.search && !mode.searchdesc)
+                || (!cli.atoms().is_empty() && !mode.search && !mode.searchdesc && !mode.info)
         }
         Some(
             Applet::Ebuild(_)
@@ -730,6 +730,13 @@ mod hakoniwa {
 #[cfg(all(test, feature = "hakoniwa", target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_with_atoms_builds_nothing() {
+        let parse = |argv: &[&str]| <Cli as winnow_args::Args>::parse_from(argv.to_vec()).unwrap();
+        assert!(!will_build(&parse(&["em", "--info", "app-misc/foo"])));
+        assert!(will_build(&parse(&["em", "app-misc/foo"])));
+    }
 
     #[test]
     fn userns_knob_zero_means_unavailable() {

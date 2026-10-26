@@ -781,6 +781,11 @@ time, where emerge fails the resolve.
 The `-p` status column never shows `g` (remote binary package): the preview
 does not query binhosts.
 
+`em --info <atom>` prints each installed match's build settings but never runs
+its `pkg_info()` phase, marks no forced USE flags, and fails on an atom with no
+installed version where emerge would fall back to an ebuild's `pkg_info()`.
+
+
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
 condensation + lexicographic Kahn) and the `:slot` suffix on autounmask
