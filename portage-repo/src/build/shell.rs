@@ -2278,7 +2278,17 @@ impl EbuildShell {
             return Ok(());
         }
 
-        self.call_phase_function(func_name).await
+        // Not PMS: portage runs a bashrc-defined `pre_<phase>`/`post_<phase>` around the phase.
+        let pre = format!("pre_{func_name}");
+        if self.shell.funcs().get(&pre).is_some() {
+            self.call_phase_function(&pre).await?;
+        }
+        self.call_phase_function(func_name).await?;
+        let post = format!("post_{func_name}");
+        if self.shell.funcs().get(&post).is_some() {
+            self.call_phase_function(&post).await?;
+        }
+        Ok(())
     }
 
     /// Whether an EAPI 4+ source phase may run in `WORKDIR` without `S`:

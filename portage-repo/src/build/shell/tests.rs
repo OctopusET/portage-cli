@@ -271,6 +271,50 @@ async fn bashrc_files_are_sourced_during_a_phase() {
     );
 }
 
+#[tokio::test]
+async fn bashrc_pre_and_post_phase_hooks_wrap_the_phase() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let ebdir = repo_path.join("cat/pkg");
+    std::fs::create_dir_all(&ebdir).unwrap();
+    std::fs::write(
+        ebdir.join("pkg-1.ebuild"),
+        "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${WORKDIR}\"\n\
+         pkg_setup() { EM_ORDER+=\" phase\"; }\n",
+    )
+    .unwrap();
+    let bashrc = dir.path().join("bashrc");
+    std::fs::write(
+        &bashrc,
+        "pre_pkg_setup() { EM_ORDER+=\" pre\"; }\npost_pkg_setup() { EM_ORDER+=\" post\"; }\n",
+    )
+    .unwrap();
+
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell.set_bashrc_files(vec![Utf8PathBuf::from_path_buf(bashrc).unwrap()]);
+    let ebuild =
+        Ebuild::from_path(camino::Utf8Path::from_path(&ebdir.join("pkg-1.ebuild")).unwrap())
+            .unwrap();
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        shell.get_var("EM_ORDER").as_deref(),
+        Some(" pre phase post")
+    );
+}
+
 // A phase must never reach the caller's stdin: brush's `read`/`mapfile`
 // put whatever fd 0 names into non-canonical mode with echo off, so an
 // ebuild `read` on an inherited terminal corrupts the console it borrowed.
