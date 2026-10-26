@@ -1682,13 +1682,8 @@ impl PackageSetup {
                 index
             }
         };
-        if buildpkg && let Some(listed) = index.header.get_mut("FEATURES") {
-            let mut words: Vec<&str> = listed.split_whitespace().collect();
-            if !words.contains(&"buildpkg") {
-                words.push("buildpkg");
-                words.sort_unstable();
-                *listed = words.join(" ");
-            }
+        if buildpkg {
+            list_buildpkg(&mut index);
         }
 
         Ok(Self {
@@ -1957,16 +1952,31 @@ impl PackageSetup {
 /// Add `feature` to the shell's `FEATURES`, keeping the list sorted
 async fn add_feature(shell: &mut portage_repo::EbuildShell, feature: &str) -> Result<()> {
     let current = shell.get_var("FEATURES").unwrap_or_default();
-    let mut features: Vec<&str> = current.split_whitespace().collect();
-    if features.contains(&feature) {
+    if current.split_whitespace().any(|f| f == feature) {
         return Ok(());
     }
-    features.push(feature);
-    features.sort_unstable();
     shell
-        .run_string(&format!("FEATURES='{}'", features.join(" ")))
+        .run_string(&format!("FEATURES='{}'", with_feature(&current, feature)))
         .await
         .with_context(|| format!("adding {feature} to FEATURES"))
+}
+
+/// `list` with `feature` added, its words sorted
+fn with_feature(list: &str, feature: &str) -> String {
+    let mut words: Vec<&str> = list.split_whitespace().collect();
+    if !words.contains(&feature) {
+        words.push(feature);
+        words.sort_unstable();
+    }
+    words.join(" ")
+}
+
+/// List `buildpkg` in the index header's `FEATURES` under `-b`, as Portage's own `--buildpkg`
+/// puts it into FEATURES
+fn list_buildpkg(index: &mut portage_binpkg::IndexConfig) {
+    if let Some(listed) = index.header.get_mut("FEATURES") {
+        *listed = with_feature(listed, "buildpkg");
+    }
 }
 
 /// Whether `--buildpkg` packages this ebuild: not a `PROPERTIES=live` one, unless
@@ -4994,6 +5004,19 @@ mod tests {
             default_work_base(Some(Utf8Path::new("/p")), portage_tmpdir(Some(&conf))),
             "/p/var/tmp/portage"
         );
+    }
+
+    #[test]
+    fn buildpkg_joins_the_index_features_in_sorted_place() {
+        let mut index = portage_binpkg::IndexConfig::default();
+        list_buildpkg(&mut index);
+        assert_eq!(index.header.get("FEATURES"), None);
+        index
+            .header
+            .insert("FEATURES".to_owned(), "binpkg-logs sandbox".to_owned());
+        list_buildpkg(&mut index);
+        list_buildpkg(&mut index);
+        assert_eq!(index.header["FEATURES"], "binpkg-logs buildpkg sandbox");
     }
 
     #[test]
