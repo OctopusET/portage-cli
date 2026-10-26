@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 
-use super::{info_line, warn_line};
+use super::{Verify, info_line, warn_line};
 
 /// Portage's built-in options when `PORTAGE_RSYNC_OPTS` is empty or unset
 const DEFAULT_OPTS: &[&str] = &[
@@ -105,6 +105,38 @@ pub(super) fn sync(path: &Utf8Path, uri: &str, opts: &[String], quiet: bool) -> 
     }
     // Without --itemize-changes we cannot know no-op; treat success as maybe-changed.
     Ok(true)
+}
+
+/// Verify the tree against its OpenPGP-signed Manifests (GLEP 74) with gemato
+pub(super) fn verify(path: &Utf8Path, verify: &Verify, quiet: bool) -> Result<()> {
+    let mut cmd = Command::new("gemato");
+    cmd.args(["verify", "--require-signed-manifest"]);
+    if let Some(key) = &verify.key {
+        if !quiet {
+            info_line(&format!("Using keys from {key}"));
+        }
+        cmd.arg("--openpgp-key").arg(key);
+    }
+    if let Some(keyserver) = &verify.keyserver {
+        cmd.arg("--keyserver").arg(keyserver);
+    }
+    if let Some(jobs) = verify.jobs {
+        cmd.arg(format!("--jobs={jobs}"));
+    }
+    if quiet {
+        cmd.arg("--quiet");
+    } else {
+        info_line(&format!("Verifying {path}"));
+    }
+    cmd.arg(path);
+    match cmd.status() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("unable to verify: gemato is required for sync-rsync-verify-metamanifest")
+        }
+        Err(e) => Err(e).context("spawning gemato"),
+        Ok(st) if !st.success() => bail!("Manifest verification failed ({st})"),
+        Ok(_) => Ok(()),
+    }
 }
 
 fn ensure_trailing_slash(s: &str) -> String {

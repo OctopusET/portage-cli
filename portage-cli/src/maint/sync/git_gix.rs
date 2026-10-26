@@ -52,7 +52,7 @@ use camino::Utf8Path;
 use crate::gix_ext;
 use crate::gix_ext::{ProgressSession, ResetGuard};
 
-use super::{GitBackend, info_line, warn_line};
+use super::{GitBackend, Verify, info_line, warn_line};
 
 pub(super) struct GixBackend;
 
@@ -69,7 +69,17 @@ impl GitBackend for GixBackend {
         }
     }
 
-    fn sync(&self, path: &Utf8Path, uri: &str, volatile: bool, quiet: bool) -> Result<bool> {
+    fn sync(
+        &self,
+        path: &Utf8Path,
+        uri: &str,
+        volatile: bool,
+        quiet: bool,
+        verify: Option<&Verify>,
+    ) -> Result<bool> {
+        if verify.is_some() {
+            anyhow::bail!("sync-git-verify-commit-signature is not supported by the gix backend");
+        }
         git_sync(path, uri, volatile, quiet)
     }
 }
@@ -346,7 +356,7 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         let changed = GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert!(changed);
         assert_eq!(
@@ -373,12 +383,12 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .unwrap();
         advance_remote(&f, "two\n");
 
         let changed = GixBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .expect("volatile re-sync over a shallow history must not fail");
         assert!(changed);
         assert_eq!(
@@ -401,13 +411,13 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .unwrap();
         advance_remote(&f, "two\n");
         std::fs::write(f.overlay.join("a.txt"), "local edit\n").unwrap();
 
         let err = GixBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .unwrap_err();
         assert!(
             err.to_string().contains("uncommitted changes"),
@@ -434,7 +444,7 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         advance_remote(&f, "two\n");
 
@@ -444,7 +454,7 @@ mod tests {
         std::fs::write(f.overlay.join("stale-dir/nested/x"), "x\n").unwrap();
 
         let changed = GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert!(changed);
         assert_eq!(
@@ -468,10 +478,10 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         let changed = GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert!(!changed, "no upstream change: sync must report unchanged");
     }
@@ -496,7 +506,7 @@ mod tests {
 
         advance_remote(&f, "two\n");
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .unwrap();
 
         assert!(
@@ -521,7 +531,7 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
 
         let mirror = f._tmp.path().join("mirror.git");
@@ -538,7 +548,7 @@ mod tests {
         let mirror_uri = format!("file://{}", mirror.display());
 
         GixBackend
-            .sync(&f.overlay, &mirror_uri, false, true)
+            .sync(&f.overlay, &mirror_uri, false, true, None)
             .unwrap();
 
         let repo = gix::open(f.overlay.as_std_path()).unwrap();
@@ -570,7 +580,7 @@ mod tests {
         crate::test_support::set_test_git_identity();
         let f = fixture();
         GixBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
 
         let config = f.overlay.join(".git/config");

@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 
-use super::{GitBackend, info_line, warn_line};
+use super::{GitBackend, Verify, info_line, warn_line};
 
 pub(super) struct GitCmdBackend;
 
@@ -49,14 +49,131 @@ impl GitBackend for GitCmdBackend {
         }
     }
 
-    fn sync(&self, path: &Utf8Path, uri: &str, volatile: bool, quiet: bool) -> Result<bool> {
+    fn sync(
+        &self,
+        path: &Utf8Path,
+        uri: &str,
+        volatile: bool,
+        quiet: bool,
+        verify: Option<&Verify>,
+    ) -> Result<bool> {
         if path.join(".git").is_dir() {
-            git_update(path.as_std_path(), uri, volatile, quiet)
+            git_update(path.as_std_path(), uri, volatile, quiet, verify)
         } else {
             git_clone(path, uri, quiet)?;
+            if let Some(verify) = verify {
+                verify_commit(path.as_std_path(), "HEAD", verify, quiet)?;
+            }
             Ok(true)
         }
     }
+}
+
+/// Check `rev`'s signature: a good one passes, a valid but untrusted one passes with a warning
+fn verify_commit(path: &Path, rev: &str, verify: &Verify, quiet: bool) -> Result<()> {
+    if let Some(key) = &verify.key
+        && !quiet
+    {
+        info_line(&format!("Using keys from {key}"));
+    }
+    let keyring = verify.key.as_deref().map(keyring).transpose()?;
+    let mut cmd = Command::new("git");
+    cmd.current_dir(path)
+        .env("GIT_CEILING_DIRECTORIES", ceiling_string(path))
+        .args(["-c", "log.showsignature=0", "log", "-n1"])
+        .args(["--pretty=format:%G?%n%GF", rev])
+        .stderr(Stdio::null());
+    if let Some(home) = &keyring {
+        cmd.env("GNUPGHOME", home.path());
+    }
+    let out = cmd.output().context("spawning git log")?;
+    if !out.status.success() {
+        bail!("git log {rev} failed with {}", out.status);
+    }
+    let out = String::from_utf8_lossy(&out.stdout);
+    let mut lines = out.lines();
+    let status = lines.next().unwrap_or_default().trim();
+    let signer = lines.next().unwrap_or_default().trim();
+    match signature_problem(status) {
+        None if status == "U" => warn_line(&format!(
+            "Top commit signature is valid but not trusted (git revision: {rev}, signing key: {signer})"
+        )),
+        None if !quiet => info_line("Trusted signature found on top commit"),
+        None => {}
+        Some(why) if signer.is_empty() => bail!("no valid signature found on {rev}: {why}"),
+        Some(why) => bail!("no valid signature found on {rev}: {why} (key {signer})"),
+    }
+    Ok(())
+}
+
+/// Why git's `%G?` signature status fails verification; `None` for good (`G`) or untrusted (`U`)
+fn signature_problem(status: &str) -> Option<&'static str> {
+    Some(match status {
+        "G" | "U" => return None,
+        "B" => "bad signature",
+        "X" => "expired signature",
+        "Y" => "expired key",
+        "R" => "revoked key",
+        "E" => "unable to verify signature (missing key?)",
+        "N" => "no signature",
+        _ => "unknown issue",
+    })
+}
+
+/// A throwaway GnuPG home holding only `key`'s keys, each ultimately trusted
+fn keyring(key: &Utf8Path) -> Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    // gpg warns about a home other users can read
+    let home = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .context("creating a GnuPG home")?;
+    let gpg = |args: &[&std::ffi::OsStr]| {
+        let out = Command::new("gpg")
+            .arg("--batch")
+            .arg("--homedir")
+            .arg(home.path())
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .context("spawning gpg")?;
+        if !out.status.success() {
+            bail!("gpg {args:?} failed with {}", out.status);
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    gpg(&["--quiet".as_ref(), "--import".as_ref(), key.as_ref()])
+        .with_context(|| format!("importing {key}"))?;
+    let listing = gpg(&["--with-colons".as_ref(), "--list-keys".as_ref()])?;
+    let trust = home.path().join("ownertrust");
+    std::fs::write(&trust, ownertrust(&listing)).context("writing ownertrust")?;
+    gpg(&[
+        "--quiet".as_ref(),
+        "--import-ownertrust".as_ref(),
+        trust.as_ref(),
+    ])?;
+    Ok(home)
+}
+
+/// `--import-ownertrust` lines marking every primary key of a `--with-colons` listing ultimate
+fn ownertrust(listing: &str) -> String {
+    let mut out = String::new();
+    let mut primary = false;
+    for line in listing.lines() {
+        let mut fields = line.split(':');
+        match fields.next() {
+            Some("pub") => primary = true,
+            Some("fpr") if primary => {
+                if let Some(fpr) = fields.nth(8) {
+                    out.push_str(&format!("{fpr}:6:\n"));
+                }
+                primary = false;
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn git_clone(path: &Utf8Path, uri: &str, quiet: bool) -> Result<()> {
@@ -81,7 +198,13 @@ fn git_clone(path: &Utf8Path, uri: &str, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn git_update(path: &Path, uri: &str, volatile: bool, quiet: bool) -> Result<bool> {
+fn git_update(
+    path: &Path,
+    uri: &str,
+    volatile: bool,
+    quiet: bool,
+    verify: Option<&Verify>,
+) -> Result<bool> {
     let path_s = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("repo path is not valid UTF-8"))?;
@@ -156,6 +279,9 @@ fn git_update(path: &Path, uri: &str, volatile: bool, quiet: bool) -> Result<boo
     let tip = rev_parse(path, "@{upstream}")
         .or_else(|_| rev_parse(path, "FETCH_HEAD"))
         .context("resolving upstream tip after fetch")?;
+    if let Some(verify) = verify {
+        verify_commit(path, &tip, verify, quiet)?;
+    }
     let head = rev_parse(path, "HEAD").context("resolving HEAD after fetch")?;
 
     if head == tip {
@@ -303,6 +429,27 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
 
+    #[test]
+    fn untrusted_signature_passes_missing_one_fails() {
+        assert_eq!(signature_problem("G"), None);
+        assert_eq!(signature_problem("U"), None);
+        assert_eq!(signature_problem("N"), Some("no signature"));
+        assert_eq!(signature_problem(""), Some("unknown issue"));
+    }
+
+    #[test]
+    fn ownertrust_covers_primary_keys_not_subkeys() {
+        let listing = "tru::1:0:0:0:0:0\n\
+            pub:-:255:22:89DDD1A1179F55E6:1792980729:::-:::scSC:::::ed25519:::0:\n\
+            fpr:::::::::AAAA:\n\
+            uid:-::::1792980729::673F::T <t@e>::::::::::0:\n\
+            sub:-:255:18:1111:1792980729::::::e:::::cv25519::\n\
+            fpr:::::::::BBBB:\n\
+            pub:-:255:22:2222:1792980729:::-:::scSC:::::ed25519:::0:\n\
+            fpr:::::::::CCCC:\n";
+        assert_eq!(ownertrust(listing), "AAAA:6:\nCCCC:6:\n");
+    }
+
     fn git(cwd: &std::path::Path, args: &[&str]) {
         let st = Command::new("git")
             .args(args)
@@ -377,7 +524,7 @@ mod tests {
         let _path = crate::test_support::path_lock();
         let f = fixture();
         let changed = GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert!(changed);
         assert_eq!(
@@ -396,12 +543,12 @@ mod tests {
         let _path = crate::test_support::path_lock();
         let f = fixture();
         GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .unwrap();
         advance_remote(&f, "two\n");
 
         let changed = GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .expect("volatile re-sync over a shallow history must not fail");
         assert!(changed);
         assert_eq!(
@@ -415,7 +562,7 @@ mod tests {
         let _path = crate::test_support::path_lock();
         let f = fixture();
         GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         advance_remote(&f, "two\n");
         // A file a prior shallow sync could plausibly have left behind,
@@ -424,7 +571,7 @@ mod tests {
         std::fs::write(f.overlay.join("orphan.txt"), "stale\n").unwrap();
 
         let changed = GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert!(changed);
         assert_eq!(
@@ -439,10 +586,10 @@ mod tests {
         let _path = crate::test_support::path_lock();
         let f = fixture();
         GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         let changed = GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert!(!changed, "no upstream change: sync must report unchanged");
     }
@@ -464,7 +611,7 @@ mod tests {
 
         advance_remote(&f, "two\n");
         GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, true, true)
+            .sync(&f.overlay, &f.remote_uri, true, true, None)
             .unwrap();
 
         assert!(
@@ -482,7 +629,7 @@ mod tests {
         let _path = crate::test_support::path_lock();
         let f = fixture();
         GitCmdBackend
-            .sync(&f.overlay, &f.remote_uri, false, true)
+            .sync(&f.overlay, &f.remote_uri, false, true, None)
             .unwrap();
         assert_eq!(
             remote_url(f.overlay.as_std_path(), "origin").unwrap(),
@@ -505,7 +652,7 @@ mod tests {
         let mirror_uri = format!("file://{}", mirror.display());
 
         GitCmdBackend
-            .sync(&f.overlay, &mirror_uri, false, true)
+            .sync(&f.overlay, &mirror_uri, false, true, None)
             .unwrap();
         assert_eq!(
             remote_url(f.overlay.as_std_path(), "origin").unwrap(),

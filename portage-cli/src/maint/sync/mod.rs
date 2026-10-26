@@ -188,14 +188,58 @@ async fn sync_one(entry: &RepoEntry, globals: &Cli) -> Result<SyncOutcome> {
     let quiet = globals.quiet();
     let path_c = path.clone();
     let uri = sync_uri.to_string();
+    let verify = Verify::requested(entry, kind);
     let changed = tokio::task::spawn_blocking(move || match kind {
-        SyncKind::Git => git_sync(&path_c, &uri, volatile, quiet),
-        SyncKind::Rsync => rsync_cmd::sync(&path_c, &uri, &rsync_opts, quiet),
+        SyncKind::Git => git_sync(&path_c, &uri, volatile, quiet, verify.as_ref()),
+        SyncKind::Rsync => {
+            let changed = rsync_cmd::sync(&path_c, &uri, &rsync_opts, quiet)?;
+            if let Some(verify) = &verify {
+                rsync_cmd::verify(&path_c, verify, quiet)?;
+            }
+            Ok(changed)
+        }
     })
     .await
     .context("sync task join")??;
 
     Ok(SyncOutcome::Synced { changed })
+}
+
+/// OpenPGP verification of a synced tree, from the repo's `sync-openpgp-*` keys
+pub(super) struct Verify {
+    /// `sync-openpgp-key-path`: the only keys trusted; the user's own keyring when unset
+    pub key: Option<Utf8PathBuf>,
+    /// `sync-openpgp-keyserver`, for refreshing `key`
+    pub keyserver: Option<String>,
+    /// `sync-rsync-verify-jobs`; `None` lets the verifier pick
+    pub jobs: Option<u32>,
+}
+
+impl Verify {
+    /// Some when the repo turns on `sync-rsync-verify-metamanifest` or
+    /// `sync-git-verify-commit-signature` for its sync-type
+    fn requested(entry: &RepoEntry, kind: SyncKind) -> Option<Self> {
+        let switch = match kind {
+            SyncKind::Git => "sync-git-verify-commit-signature",
+            SyncKind::Rsync => "sync-rsync-verify-metamanifest",
+        };
+        let opt = |name| {
+            entry
+                .sync_options
+                .get(name)
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+        };
+        opt(switch)
+            .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "yes" | "true"))
+            .then(|| Self {
+                key: opt("sync-openpgp-key-path").map(Utf8PathBuf::from),
+                keyserver: opt("sync-openpgp-keyserver").map(String::from),
+                jobs: opt("sync-rsync-verify-jobs")
+                    .and_then(|v| v.parse().ok())
+                    .filter(|&n| n > 0),
+            })
+    }
 }
 
 async fn rsync_options(entry: &RepoEntry, globals: &Cli) -> Result<Vec<String>> {
@@ -244,14 +288,20 @@ fn git_pretend(path: &Utf8Path, uri: &str, volatile: bool) -> String {
     }
 }
 
-fn git_sync(path: &Utf8Path, uri: &str, volatile: bool, quiet: bool) -> Result<bool> {
+fn git_sync(
+    path: &Utf8Path,
+    uri: &str,
+    volatile: bool,
+    quiet: bool,
+    verify: Option<&Verify>,
+) -> Result<bool> {
     #[cfg(feature = "sync-gix")]
     {
-        git_gix::GixBackend.sync(path, uri, volatile, quiet)
+        git_gix::GixBackend.sync(path, uri, volatile, quiet, verify)
     }
     #[cfg(not(feature = "sync-gix"))]
     {
-        git_cmd::GitCmdBackend.sync(path, uri, volatile, quiet)
+        git_cmd::GitCmdBackend.sync(path, uri, volatile, quiet, verify)
     }
 }
 
@@ -331,7 +381,15 @@ fn error_repo(name: &str, msg: &str) {
 /// Shared trait for git backends (command vs gix)
 pub(super) trait GitBackend {
     fn pretend(&self, path: &Utf8Path, uri: &str, volatile: bool) -> String;
-    fn sync(&self, path: &Utf8Path, uri: &str, volatile: bool, quiet: bool) -> Result<bool>;
+    /// Sync, then when `verify` is set reject an unsigned or badly signed tip
+    fn sync(
+        &self,
+        path: &Utf8Path,
+        uri: &str,
+        volatile: bool,
+        quiet: bool,
+        verify: Option<&Verify>,
+    ) -> Result<bool>;
 }
 
 #[cfg(test)]
@@ -374,6 +432,23 @@ location = /var/db/repos/nosync
         let selected = select_repos(&rc, &[]).unwrap();
         let names: Vec<_> = selected.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["gentoo"]);
+    }
+
+    #[test]
+    fn verify_follows_the_sync_types_own_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("repos.conf");
+        write(
+            &conf,
+            "[gentoo]\nlocation = /a\nsync-rsync-verify-metamanifest = yes\n\
+             sync-openpgp-key-path = /k.asc\nsync-rsync-verify-jobs = 0\n",
+        );
+        let rc = ReposConf::load_from(&[&conf]).unwrap();
+        let entry = &rc.repos()[0];
+        assert!(Verify::requested(entry, SyncKind::Git).is_none());
+        let v = Verify::requested(entry, SyncKind::Rsync).unwrap();
+        assert_eq!(v.key.as_deref(), Some(Utf8Path::new("/k.asc")));
+        assert_eq!(v.jobs, None);
     }
 
     #[test]
