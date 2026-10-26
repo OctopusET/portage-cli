@@ -829,7 +829,7 @@ async fn service_helpers_keep_the_callers_destination_and_options() {
                 "{INSTALL_HELPERS}\n\
                  export EAPI={eapi} D={d} ED={d} T={d}; cd {src}; \
                  insinto /usr/share/foo; insopts -m0600; exeinto /opt/bin; exeopts -m0700; \
-                 doconfd x; newconfd x x2; doinitd svc; doins y; doexe z; \
+                 doconfd x; newconfd x x2; doinitd svc; newinitd svc svc2; doins y; doexe z; \
                  [[ ${{INSDESTTREE}} == /usr/share/foo && ${{EXEDESTTREE}} == /opt/bin ]] \
                    || die 'destination leaked'",
                 d = d.display(),
@@ -853,6 +853,11 @@ async fn service_helpers_keep_the_callers_destination_and_options() {
             mode(d.join("etc/conf.d/x2")),
             confd_mode,
             "EAPI {eapi} newconfd"
+        );
+        assert_eq!(
+            mode(d.join("etc/init.d/svc2")),
+            initd_mode,
+            "EAPI {eapi} newinitd"
         );
     }
 }
@@ -3071,6 +3076,12 @@ async fn use_outside_iuse_effective_dies_only_from_eapi_5() {
         } else {
             res.unwrap();
             assert_eq!(shell.get_var("EM_RC").as_deref(), Some("1"));
+            let log = std::fs::read_to_string(work.join("temp/logging/setup")).unwrap();
+            assert!(
+                log.lines()
+                    .any(|l| l.starts_with("QA QA Notice: USE Flag 'bogus' not in IUSE for")),
+                "{log}"
+            );
         }
     }
 }
