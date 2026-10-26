@@ -203,11 +203,12 @@ impl DependencyProvider for PortageDependencyProvider {
                 .iter()
                 .map(|&ver| {
                     data.versions.get(ver).is_some_and(|vd| {
-                        if let Dependencies::Available(ref cs) = vd.merged {
-                            cs.iter().any(|(pkg, _)| self.installed.contains_key(pkg))
-                        } else {
-                            false
-                        }
+                        let Dependencies::Available(ref cs) = vd.merged else {
+                            return false;
+                        };
+                        let mut real = cs.iter().filter(|(pkg, _)| !pkg.is_virtual()).peekable();
+                        real.peek().is_some()
+                            && real.all(|(pkg, _)| self.installed.contains_key(pkg))
                     })
                 })
                 .collect();

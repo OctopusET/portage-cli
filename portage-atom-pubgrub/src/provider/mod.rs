@@ -1288,28 +1288,34 @@ impl PortageDependencyProvider {
         out
     }
 
-    /// Returns true if the deps of `vd` transitively reach any installed CPN,
-    /// descending up to `depth` levels through `__internal__/*` virtual packages
+    /// Returns true if every dep of `vd` reaches an installed CPN, a nested
+    /// `Choice`/`SlotChoice` through any of its branches, up to `depth` levels deep
+    ///
+    /// Other virtual deps are not counted; a branch with nothing counted is false.
     pub(crate) fn deps_reach_installed(&self, vd: &VersionData, depth: u8) -> bool {
         let Dependencies::Available(ref constraints) = vd.merged else {
             return false;
         };
+        let mut counted = false;
         for (dep_pkg, _) in constraints.iter() {
-            if dep_pkg.is_virtual() {
-                if depth > 0
-                    && let Some(dep_data) = self.packages.get(dep_pkg)
-                {
-                    for dep_vd in dep_data.versions.values() {
-                        if self.deps_reach_installed(dep_vd, depth - 1) {
-                            return true;
-                        }
-                    }
+            let reached = match dep_pkg {
+                PortagePackage::Choice { .. } | PortagePackage::SlotChoice { .. } => {
+                    depth > 0
+                        && self.packages.get(dep_pkg).is_some_and(|d| {
+                            d.versions
+                                .values()
+                                .any(|dep_vd| self.deps_reach_installed(dep_vd, depth - 1))
+                        })
                 }
-            } else if self.installed_cpns.contains(dep_pkg.cpn()) {
-                return true;
+                p if p.is_virtual() => continue,
+                p => self.installed_cpns.contains(p.cpn()),
+            };
+            if !reached {
+                return false;
             }
+            counted = true;
         }
-        false
+        counted
     }
 
     /// Newest installed version reachable one level out of a single version's

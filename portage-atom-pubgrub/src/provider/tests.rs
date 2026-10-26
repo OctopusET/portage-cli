@@ -1259,6 +1259,46 @@ fn or_branch_satisfied_only_by_owner_is_demoted() {
     assert!(solution.get(&bootstrap).is_none(), "go installed");
 }
 
+// `|| ( ( a b ) c )` with a and c installed: only c's branch is fully installed.
+#[test]
+fn or_group_installed_branch_needs_every_atom_installed() {
+    let mut repo = InMemoryRepository::new();
+    for cpv in ["dev-libs/a-3", "dev-libs/b-1", "dev-libs/c-1"] {
+        repo.add_version(
+            portage_atom::Cpv::parse(cpv).unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+    }
+    repo.add_version(
+        portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        PackageDeps {
+            depend: (DepEntry::parse("|| ( ( dev-libs/a dev-libs/b ) dev-libs/c )").unwrap())
+                .into(),
+            ..empty_deps()
+        },
+    );
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let mut provider = PortageDependencyProvider::new(repo);
+    for (cpn, ver) in [("dev-libs/a", "3"), ("dev-libs/c", "1")] {
+        provider.add_installed(InstalledPackage {
+            package: pkg(cpn),
+            version: Version::parse(ver).unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+    }
+    let solution = provider
+        .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
+        .unwrap();
+    assert!(solution.get(&pkg("dev-libs/c")).is_some());
+    assert!(solution.get(&pkg("dev-libs/b")).is_none());
+}
+
 #[test]
 fn or_group_no_preference_when_both_installed() {
     // || ( A B ) where both A and B are installed — solver falls through to
