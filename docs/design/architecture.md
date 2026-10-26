@@ -648,6 +648,9 @@ Other operators keep the build id but ignore it (`>=cat/pkg-1.0-3` is `>=cat/pkg
 portage does. A `=` build-id atom in a `package.*` or `package.env` file is dropped with a
 warning: it matches only a binary package, and em applies that configuration to ebuilds.
 
+**SRC_URI ending in `/`.** A URI whose last path component is empty, with no `-> name`, is a
+metadata parse error, so em drops the ebuild. Portage keeps it visible and fails only when fetching.
+
 PMS 8.3.2: hard blocker conflicts (`PlannedCoexistence`, strong `StillNeeded`)
 fail with exit 1 after classify. `WouldUnmerge` victims are unmerged on a real
 merge — strong `!!` before the merge loop, weak `!` after. `-p` still exits 0.
