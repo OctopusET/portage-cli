@@ -5,6 +5,10 @@ Source-audit items are in [[portage-parity-audit]]. Status: open unless marked d
 
 ## Resolve (`resolve-sweep.sh`)
 
+Whole tree (19616 targets, frozen 2026-10-26 tree, after `9984edea`): both succeed 10493 (same 5618,
+order 4790, display 40, set 45), one side fails 254 (em only: 156 pre-flight, mostly the `||`
+causes below; 19 USE changes), both fail 8869.
+
 Sample of 491 targets (every 40th cp), `-pv`, after `e4713b74`: both succeed 272 (same 144,
 order 113, display 8, set 3), one side fails 4, both fail 219 (mostly REQUIRED_USE/USE changes
 needed under the default profile).
