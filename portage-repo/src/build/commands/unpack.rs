@@ -7,7 +7,7 @@ use brush_core::builtins;
 /// Extracts one or more archives into the current directory (`$S`).
 /// Archives named without a path separator are looked up in `$DISTDIR`.
 /// Dispatches to the appropriate extraction tool based on file extension.
-/// Extension matching is case-insensitive for EAPI ≤ 5, case-sensitive for EAPI ≥ 6.
+/// Extension matching is case-sensitive for EAPI ≤ 5, case-insensitive for EAPI ≥ 6.
 ///
 /// See [PMS 12.3.11](https://projects.gentoo.org/pms/9/pms.html#unpack).
 #[derive(winnow_args::Args)]
@@ -168,17 +168,22 @@ fn unpack_archive(src: &std::path::Path, cwd: &std::path::Path, eapi: u32) -> Re
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let case_sensitive = eapi >= 6;
-    let ext = |suffix: &str| -> bool {
-        if case_sensitive {
-            name.ends_with(suffix)
-        } else {
-            name.to_lowercase().ends_with(&suffix.to_lowercase())
-        }
+    // PMS: suffixes match case-sensitively before EAPI 6, case-insensitively from it.
+    let case_insensitive = eapi >= 6;
+    let lower = name.to_lowercase();
+    let ext = |suffixes: &[&str]| -> bool {
+        suffixes.iter().any(|s| {
+            if case_insensitive {
+                lower.ends_with(&s.to_lowercase())
+            } else {
+                name.ends_with(s)
+            }
+        })
     };
 
     let src_s = src.to_string_lossy().into_owned();
     let stem = src.file_stem().unwrap_or_default();
+    let piped = |prog: &str, args: &[&str]| unpack_piped(prog, args, &cwd.join(stem), cwd);
 
     // Check .tar.* compound extensions before single-extension forms.
     // `--no-same-owner` must come *after* the old-style combined mode
@@ -187,52 +192,51 @@ fn unpack_archive(src: &std::path::Path, cwd: &std::path::Path, eapi: u32) -> Re
     // it, tar stops treating it as old-style short options at all and reads
     // it as a plain (non-option) filename, dying with "You must specify one
     // of the '-Acdtrux'... options".
-    if ext(".tar.gz") || ext(".tgz") || ext(".tar.Z") {
+    if ext(&[".tar.gz", ".tgz", ".tar.Z"]) {
         unpack_cmd("tar", &["xzf", &src_s, "--no-same-owner"], cwd)
-    } else if ext(".tar.bz2") || ext(".tbz2") || ext(".tbz") {
+    } else if ext(&[".tar.bz2", ".tbz2", ".tar.bz", ".tbz"]) {
         unpack_cmd("tar", &["xjf", &src_s, "--no-same-owner"], cwd)
-    } else if ext(".tar.xz") || ext(".txz") {
+    } else if ext(&[".tar.xz"]) || (eapi >= 6 && ext(&[".txz"])) {
         if eapi < 3 {
             return Err(format!(".tar.xz not supported in EAPI {eapi}"));
         }
         unpack_cmd("tar", &["xJf", &src_s, "--no-same-owner"], cwd)
-    } else if ext(".tar.zst") {
+    } else if ext(&[".tar.zst"]) {
         unpack_cmd("tar", &["--zstd", "-xf", &src_s, "--no-same-owner"], cwd)
-    } else if ext(".tar.lz") {
+    } else if ext(&[".tar.lz"]) {
         unpack_cmd("tar", &["--lzip", "-xf", &src_s, "--no-same-owner"], cwd)
-    } else if ext(".tar.lzma") {
+    } else if ext(&[".tar.lzma"]) {
         unpack_cmd("tar", &["--lzma", "-xf", &src_s, "--no-same-owner"], cwd)
-    } else if ext(".zip") {
+    } else if ext(&[".tar"]) {
+        unpack_cmd("tar", &["xf", &src_s, "--no-same-owner"], cwd)
+    } else if ext(&[".zip", ".ZIP", ".jar"]) {
         unpack_cmd("unzip", &["-qo", &src_s], cwd)
-    } else if ext(".gz") || ext(".Z") {
-        unpack_piped("gzip", &["-d", "-c", &src_s], &cwd.join(stem), cwd)
-    } else if ext(".bz2") {
-        unpack_piped("bzip2", &["-d", "-c", &src_s], &cwd.join(stem), cwd)
-    } else if ext(".xz") {
+    } else if ext(&[".gz", ".Z", ".z"]) {
+        piped("gzip", &["-d", "-c", &src_s])
+    } else if ext(&[".bz2", ".bz"]) {
+        piped("bzip2", &["-d", "-c", &src_s])
+    } else if ext(&[".xz"]) {
         if eapi < 3 {
             return Err(format!(".xz not supported in EAPI {eapi}"));
         }
-        unpack_piped("xz", &["-d", "-c", &src_s], &cwd.join(stem), cwd)
-    } else if ext(".lzma") {
-        unpack_piped(
-            "xz",
-            &["--format=lzma", "-d", "-c", &src_s],
-            &cwd.join(stem),
-            cwd,
-        )
-    } else if ext(".zst") {
-        unpack_piped("zstd", &["-d", "-c", &src_s], &cwd.join(stem), cwd)
-    } else if ext(".7z") {
+        piped("xz", &["-d", "-c", &src_s])
+    } else if ext(&[".lzma"]) {
+        piped("xz", &["--format=lzma", "-d", "-c", &src_s])
+    } else if ext(&[".zst"]) {
+        piped("zstd", &["-d", "-c", &src_s])
+    } else if ext(&[".a", ".deb"]) {
+        unpack_cmd("ar", &["x", &src_s], cwd)
+    } else if ext(&[".7z", ".7Z"]) {
         if eapi > 7 {
             return Err(format!(".7z not supported in EAPI {eapi}"));
         }
-        unpack_cmd("7z", &["x", &src_s], cwd)
-    } else if ext(".rar") {
+        unpack_cmd("7z", &["x", "-y", &src_s], cwd)
+    } else if ext(&[".rar", ".RAR"]) {
         if eapi > 7 {
             return Err(format!(".rar not supported in EAPI {eapi}"));
         }
-        unpack_cmd("unrar", &["x", &src_s], cwd)
-    } else if ext(".lha") || ext(".lzh") {
+        unpack_cmd("unrar", &["x", "-idq", "-o+", &src_s], cwd)
+    } else if ext(&[".lha", ".LHa", ".LHA", ".lzh"]) {
         if eapi > 7 {
             return Err(format!(".lha/.lzh not supported in EAPI {eapi}"));
         }
@@ -309,6 +313,53 @@ mod tests {
         // proving the no-op path above is specific to unknown suffixes).
         let result = unpack_archive(&archive, tmp.path(), 8);
         assert!(result.is_err() || result != Ok(0));
+    }
+
+    #[test]
+    fn suffix_case_sensitivity_follows_eapi() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upper = tmp.path().join("missing.TAR");
+        assert_eq!(
+            unpack_archive(&upper, tmp.path(), 5),
+            Ok(0),
+            "EAPI 5 skips .TAR"
+        );
+        assert_ne!(
+            unpack_archive(&upper, tmp.path(), 6),
+            Ok(0),
+            "EAPI 6 unpacks .TAR"
+        );
+        let zip = tmp.path().join("missing.ZIP");
+        assert_ne!(
+            unpack_archive(&zip, tmp.path(), 5),
+            Ok(0),
+            ".ZIP is listed for EAPI 5"
+        );
+    }
+
+    #[test]
+    fn plain_tar_is_extracted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("hello"), b"hi").unwrap();
+        let archive = tmp.path().join("a.tar");
+        let ok = std::process::Command::new("tar")
+            .args([
+                "cf",
+                archive.to_str().unwrap(),
+                "-C",
+                src.to_str().unwrap(),
+                "hello",
+            ])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        assert_eq!(unpack_archive(&archive, &out, 8), Ok(0));
+        assert_eq!(std::fs::read(out.join("hello")).unwrap(), b"hi");
     }
 
     // Regression test for the riscv64 stage3 shakeout: `dev-python/installer`'s
