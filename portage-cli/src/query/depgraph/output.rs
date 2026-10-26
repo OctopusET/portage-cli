@@ -929,6 +929,64 @@ fn installed_versions_col(
     )
 }
 
+/// The `-v` old-version column: each version with `:slot[/subslot]` where portage's
+/// `convert_myoldbest` shows it (always for a new slot, else once any side is not `0/0`) and
+/// `::repo`
+fn verbose_old_col(
+    tag: &str,
+    old_ver: Option<&Version>,
+    cpn: &Cpn,
+    entries: &[super::installed::VdbEntry],
+    new_slot: Option<(&str, &str)>,
+) -> Option<String> {
+    fn slots(e: &super::installed::VdbEntry) -> (&str, &str) {
+        let slot = e.slot.as_ref().map_or("0", |s| s.as_str());
+        (slot, e.subslot.as_ref().map_or(slot, |s| s.as_str()))
+    }
+    let mut olds: Vec<_> = entries
+        .iter()
+        .filter(|e| e.cpn == *cpn)
+        .filter(|e| match tag {
+            "U" | "D" => old_ver == Some(&e.version),
+            "NS" => true,
+            _ => false,
+        })
+        .collect();
+    if olds.is_empty() {
+        return None;
+    }
+    olds.sort_by(|a, b| a.version.cmp(&b.version));
+    let nonzero = olds
+        .iter()
+        .map(|e| slots(e))
+        .chain(new_slot)
+        .any(|s| s != ("0", "0"));
+    let keys: Vec<String> = olds
+        .iter()
+        .map(|e| {
+            let (slot, sub) = slots(e);
+            let mut key = e.version.to_string();
+            if tag == "NS" {
+                key += &format!(":{slot}");
+                if sub != slot {
+                    key += &format!("/{sub}");
+                }
+            } else if nonzero {
+                key += &format!(":{slot}");
+                let new_sub_differs = new_slot.is_some_and(|(ns, nsub)| slot == ns && sub != nsub);
+                if sub != slot || new_sub_differs {
+                    key += &format!("/{sub}");
+                }
+            }
+            if let Some(repo) = e.repo {
+                key += &format!("::{repo}");
+            }
+            key
+        })
+        .collect();
+    Some(keys.join(", "))
+}
+
 /// Per-flag comparison inputs for [`flag_token`]: the slice of "old build"
 /// state (current/old IUSE membership, old USE membership, newness) plus
 /// whether the flag is force/masked, which together decide the token's marker
@@ -1620,10 +1678,25 @@ fn format_plan_parts(
     // installed_versions` for NS) and `convert_myoldbest`'s `[v1, v2, ...]`
     // join, painted bold blue. Reinstalls (R) and first installs (N) get no
     // column.
-    let old = match tag {
-        "U" | "D" => old_ver.map(|v| v.to_string()),
-        "NS" => installed_versions_col(cpn, installed),
-        _ => None,
+    let old = if verbose >= 1 {
+        let new_slot = cache.map(|c| {
+            let slot = c.metadata.slot.slot.as_str();
+            (
+                slot,
+                c.metadata
+                    .slot
+                    .subslot
+                    .as_ref()
+                    .map_or(slot, |s| s.as_str()),
+            )
+        });
+        verbose_old_col(tag, old_ver, cpn, installed_entries, new_slot)
+    } else {
+        match tag {
+            "U" | "D" => old_ver.map(|v| v.to_string()),
+            "NS" => installed_versions_col(cpn, installed),
+            _ => None,
+        }
     }
     .map(|content| format!(" {C_OLDVERSION}[{content}]{C_OLDVERSION:#}"))
     .unwrap_or_default();

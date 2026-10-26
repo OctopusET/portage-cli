@@ -672,6 +672,8 @@ mod tests {
         VdbEntry {
             cpn: Cpn::try_new(cpn).expect("test cpn parses"),
             slot: Some(Interned::intern(slot)),
+            subslot: None,
+            repo: None,
             version: version.parse().expect("test version parses"),
             active_use: Vec::new(),
             iuse: Vec::new(),
@@ -860,6 +862,8 @@ mod tests {
         let resolvconf = VdbEntry {
             cpn: Cpn::try_new("virtual/resolvconf").expect("test cpn parses"),
             slot: Some(Interned::intern("0")),
+            subslot: None,
+            repo: None,
             version: "1.0".parse().expect("test version parses"),
             active_use: Vec::new(),
             iuse: Vec::new(),
