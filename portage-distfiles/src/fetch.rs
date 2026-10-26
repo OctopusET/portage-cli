@@ -427,7 +427,30 @@ impl Fetcher {
         verify_or_discard(manifest_entry, temp)
     }
 
+    /// [`Self::fetch_builtin_once`], tried [`BUILTIN_TRIES`] times while it fails on a transient network error
+    ///
+    /// A retry resumes the partial the failed try left behind.
     async fn fetch_builtin(
+        &self,
+        url: &str,
+        dest: &Utf8Path,
+        manifest_entry: Option<&ManifestEntry>,
+    ) -> Result<()> {
+        let mut tries = 1;
+        loop {
+            match self.fetch_builtin_once(url, dest, manifest_entry).await {
+                Err(Error::Network { source, .. })
+                    if tries < BUILTIN_TRIES && is_transient(&source) =>
+                {
+                    tracing::debug!("fetch: {url}: {source}, retrying");
+                    tries += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn fetch_builtin_once(
         &self,
         url: &str,
         dest: &Utf8Path,
@@ -577,6 +600,15 @@ impl Fetcher {
             })
         }
     }
+}
+
+/// Tries per URL for the builtin client, as make.globals' `wget -t 3`
+const BUILTIN_TRIES: usize = 3;
+
+/// Whether a request error is worth retrying: a timeout or a dropped connection, not a refused
+/// connection or an unresolvable host, which wget does not retry either
+fn is_transient(e: &reqwest::Error) -> bool {
+    e.is_timeout() || !(e.is_connect() || e.is_builder() || e.is_redirect())
 }
 
 /// Suffix of an in-progress download; portage uses the same one, so either tool resumes the other's partial
@@ -1174,6 +1206,76 @@ mod tests {
         assert!(lock_file.exists());
         drop(acquired);
         assert!(!lock_file.exists(), "the lock file is removed on release");
+    }
+
+    /// Serve `body` over HTTP, cutting the first response off halfway; returns the URL and connection count
+    fn flaky_server(
+        body: &'static [u8],
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{BufRead, Write};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/foo.tar.gz", listener.local_addr().unwrap());
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut range = None;
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        range = v.trim().trim_end_matches('-').parse::<usize>().ok();
+                    }
+                }
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                let head = |status: &str, len: usize| {
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+                    )
+                };
+                let _ = match (n, range) {
+                    (0, _) => stream
+                        .write_all(head("200 OK", body.len()).as_bytes())
+                        .and_then(|_| stream.write_all(&body[..body.len() / 2])),
+                    (_, Some(from)) => stream
+                        .write_all(head("206 Partial Content", body.len() - from).as_bytes())
+                        .and_then(|_| stream.write_all(&body[from..])),
+                    (_, None) => stream
+                        .write_all(head("200 OK", body.len()).as_bytes())
+                        .and_then(|_| stream.write_all(body)),
+                };
+            }
+        });
+        (url, count)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried_and_resumes_the_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        let body: &'static [u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let (url, count) = flaky_server(body);
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![dist_entry("foo.tar.gz", body)],
+        });
+        let df = Distfile {
+            filename: "foo.tar.gz".to_string(),
+            urls: vec![url],
+            restriction: None,
+        };
+        let status = Fetcher::new(distdir.clone(), FetchConfig::default())
+            .fetch_distfile_digests(&df, &digests)
+            .await
+            .unwrap();
+        assert_eq!(status, FetchStatus::Downloaded);
+        assert_eq!(std::fs::read(distdir.join("foo.tar.gz")).unwrap(), body);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
