@@ -74,6 +74,29 @@ pub async fn run(globals: &Cli, command: Option<&EtcCommand>, opts: &EtcOpts) ->
     }
 }
 
+/// Portage's end-of-merge notice for each protected directory of `merge_root` holding sidecars:
+/// the one file needing an update, or how many do
+pub(crate) fn pending_notices(
+    merge_root: &Utf8Path,
+    protect: &crate::ebuild::ConfigProtect,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for dir in protect.protected_dirs() {
+        let base = merge_root.join(dir.trim_start_matches('/'));
+        let mut found = Vec::new();
+        walk(&base, merge_root, protect, &mut found);
+        match found.as_slice() {
+            [] => {}
+            [one] => lines.push(format!("config file '{}' needs updating.", one.target)),
+            many => lines.push(format!(
+                "{} config files in '{base}' need updating.",
+                many.len()
+            )),
+        }
+    }
+    lines
+}
+
 /// Every `._cfgNNNN_<name>` under a protected directory of `merge_root`
 fn scan(merge_root: &Utf8Path, protect: &crate::ebuild::ConfigProtect) -> Vec<Pending> {
     let mut out = Vec::new();
@@ -588,6 +611,35 @@ mod tests {
             .map(|p| p.target.file_name().unwrap())
             .collect();
         assert_eq!(names, vec!["hosts"], "masked subdirectory must be skipped");
+    }
+
+    #[test]
+    fn notices_name_a_lone_file_and_count_several() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        for rel in ["etc", "usr/share/config"] {
+            std::fs::create_dir_all(root.join(rel).as_std_path()).unwrap();
+        }
+        for rel in [
+            "etc/._cfg0000_hosts",
+            "etc/._cfg0001_hosts",
+            "etc/._cfg0000_fstab",
+        ] {
+            std::fs::write(root.join(rel).as_std_path(), "new\n").unwrap();
+        }
+        std::fs::write(
+            root.join("usr/share/config/._cfg0000_a").as_std_path(),
+            "x\n",
+        )
+        .unwrap();
+        let protect = crate::ebuild::ConfigProtect::for_test(&["/etc", "/usr/share/config"], &[]);
+        assert_eq!(
+            pending_notices(root, &protect),
+            [
+                format!("3 config files in '{root}/etc' need updating."),
+                format!("config file '{root}/usr/share/config/a' needs updating."),
+            ]
+        );
     }
 
     // Parity with dispatch-conf's use-new (`os.rename`, no chmod): the

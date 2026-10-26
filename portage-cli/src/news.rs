@@ -281,6 +281,67 @@ fn collect_items(globals: &Cli, eroot: &Utf8Path, update: bool) -> Result<Vec<It
     Ok(items)
 }
 
+/// Each repository's unread news count, after promoting newly relevant items (Portage's
+/// `count_unread_news`)
+pub(crate) fn unread_counts(globals: &Cli) -> Result<Vec<(String, usize)>> {
+    let eroot = globals.outer_roots().merge_root().to_owned();
+    let repos_conf = globals
+        .outer_roots()
+        .repos_conf()
+        .context("reading repos.conf")?;
+    let repos: Vec<(String, Utf8PathBuf)> = repos_conf
+        .repos()
+        .iter()
+        .filter_map(|entry| {
+            let path = Utf8Path::from_path(entry.location.as_path()?)?;
+            Some((entry.name.to_string(), path.to_owned()))
+        })
+        .collect();
+    let ctx = RelevanceCtx::load(globals);
+    count_unread(&eroot, &repos, &ctx, &installed_packages(globals))
+}
+
+fn count_unread(
+    eroot: &Utf8Path,
+    repos: &[(String, Utf8PathBuf)],
+    ctx: &RelevanceCtx,
+    installed: &[(Cpv, portage_vdb::SlotName)],
+) -> Result<Vec<(String, usize)>> {
+    repos
+        .iter()
+        .map(|(name, path)| {
+            update_repo(eroot, name, path, ctx, installed)?;
+            Ok((
+                name.clone(),
+                read_line_set(&state_path(eroot, name, "unread")).len(),
+            ))
+        })
+        .collect()
+}
+
+/// Portage's end-of-run reminder of the repositories with unread news
+pub(crate) fn print_notification(counts: &[(String, usize)]) {
+    use std::io::Write as _;
+
+    use crate::style::{C_GOOD, C_WARN};
+    let pending: Vec<_> = counts.iter().filter(|(_, n)| *n > 0).collect();
+    if pending.is_empty() {
+        return;
+    }
+    let mut out = anstream::stdout();
+    let _ = writeln!(out);
+    for (repo, n) in pending {
+        let _ = writeln!(
+            out,
+            "{C_WARN} * IMPORTANT:{C_WARN:#} {n} news items need reading for repository '{repo}'."
+        );
+    }
+    let _ = writeln!(
+        out,
+        "{C_WARN} *{C_WARN:#} Use {C_GOOD}eselect news read{C_GOOD:#} to view new items.\n"
+    );
+}
+
 fn load_item(repo: &str, name: &str, repo_path: &Utf8Path, unread: bool) -> Item {
     let item_file = repo_news_dir(repo_path)
         .join(name)
@@ -485,6 +546,27 @@ mod tests {
             "expected an XDG state path, got {dir}"
         );
         assert_ne!(dir.as_str(), "/var/lib/gentoo/news");
+    }
+
+    #[test]
+    fn unread_counts_promote_a_relevant_item_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = Utf8Path::from_path(tmp.path()).unwrap();
+        let eroot = base.join("root");
+        let repo = base.join("repo");
+        let item = "2026-01-01-foo";
+        let dir = repo.join("metadata/news").join(item);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{item}.en.txt")), HEADER).unwrap();
+        let ctx = RelevanceCtx {
+            profile: None,
+            arch: "amd64".to_string(),
+        };
+        let repos = [("gentoo".to_string(), repo)];
+        let count = || count_unread(&eroot, &repos, &ctx, &[]).unwrap();
+        assert_eq!(count(), [("gentoo".to_string(), 1)]);
+        write_line_set(&state_path(&eroot, "gentoo", "unread"), &BTreeSet::new()).unwrap();
+        assert_eq!(count(), [("gentoo".to_string(), 0)], "read items stay read");
     }
 
     #[test]

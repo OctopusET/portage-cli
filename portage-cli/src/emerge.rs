@@ -1022,7 +1022,8 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         crate::style::error_line!("no atoms or applet specified. Use --help for usage.");
         std::process::exit(1);
     }
-    emerge_atoms(
+    let before = vdb_generation(cli);
+    let result = emerge_atoms(
         cli,
         &atoms,
         EmergeOpts {
@@ -1043,7 +1044,61 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
             pending_config: None,
         },
     )
-    .await
+    .await;
+    if !result
+        .as_ref()
+        .is_err_and(|e| e.downcast_ref::<error::Declined>().is_some())
+    {
+        post_emerge(cli, before).await;
+    }
+    result
+}
+
+/// The installed set's count and highest COUNTER, which any merge or removal changes
+fn vdb_generation(cli: &cli::Cli) -> Option<(usize, u64)> {
+    let pkgs: Vec<_> = open_cli_vdb(cli).ok()?.packages().into_iter().collect();
+    let counter = pkgs.iter().filter_map(|p| p.counter().ok().flatten()).max();
+    Some((pkgs.len(), counter.unwrap_or(0)))
+}
+
+/// Portage's end-of-run notices: pending config file updates after a run that changed the
+/// installed set, then unread news (also after `--pretend`, as GLEP 42 asks)
+async fn post_emerge(cli: &cli::Cli, before: Option<(usize, u64)>) {
+    let changed = !cli.pretend() && vdb_generation(cli) != before;
+    if !changed && !cli.pretend() {
+        return;
+    }
+    let Ok(Some(settings)) = crate::settings::load(cli).await else {
+        return;
+    };
+    if changed {
+        let protect = ebuild::ConfigProtect::from_settings(&settings);
+        let notices = crate::etc::pending_notices(cli.roots().merge_root(), &protect);
+        let mut out = anstream::stdout();
+        for line in &notices {
+            let _ = writeln!(
+                out,
+                "\n {C_WARN}* IMPORTANT:{C_WARN:#} {line}",
+                C_WARN = crate::style::C_WARN
+            );
+        }
+        if !notices.is_empty() {
+            let _ = writeln!(
+                out,
+                " * See the CONFIGURATION FILES and CONFIGURATION FILES UPDATE TOOLS\n \
+                 * sections of the emerge man page to learn how to update config files."
+            );
+        }
+    }
+    let news = settings
+        .get("FEATURES")
+        .is_some_and(|f| f.split_whitespace().any(|w| w == "news"));
+    if news {
+        match crate::news::unread_counts(cli) {
+            Ok(counts) => crate::news::print_notification(&counts),
+            Err(e) => tracing::debug!("news: {e:#}"),
+        }
+    }
 }
 
 /// `-r`/`--resume`: replay the last saved merge (`maint::resume`)
