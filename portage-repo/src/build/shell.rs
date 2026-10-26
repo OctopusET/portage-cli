@@ -1534,9 +1534,17 @@ impl EbuildShell {
         if let Some(message) = self.die_flag.take() {
             return Err(Error::Shell(format!("die: {message}")));
         }
-        // PMS 7.3.1: sourcing must leave EAPI as the head line set it; an unsupported value is
-        // left to the head-parsed EAPI, as portage does.
+        // PMS 7.3.1: sourcing must leave EAPI as the head line set it. Like portage, an
+        // unsupported sourced value masks the ebuild as that EAPI instead.
         let sourced_eapi = self.get_var("EAPI").unwrap_or_default();
+        if !sourced_eapi.is_empty() && sourced_eapi.parse::<Eapi>().is_err() {
+            return Ok(crate::source::SourcedEbuild {
+                metadata: portage_metadata::CacheEntry::unsupported_eapi(&sourced_eapi, None)
+                    .metadata,
+                eclasses: Vec::new(),
+                ebuild_md5,
+            });
+        }
         if sourced_eapi.is_empty() || sourced_eapi.parse::<Eapi>().is_ok_and(|e| e != eapi) {
             return Err(Error::Shell(format!(
                 "{}: EAPI '{sourced_eapi}' conflicts with '{eapi}' from the head of the ebuild",

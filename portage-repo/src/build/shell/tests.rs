@@ -2936,6 +2936,25 @@ async fn sourcing_that_reassigns_eapi_fails_metadata_generation() {
 }
 
 #[tokio::test]
+async fn sourcing_that_sets_an_unsupported_eapi_yields_its_stub() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    let path = write_minimal_ebuild(&repo_path, "app-misc", "later");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{text}EAPI=10\n")).unwrap();
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    let sourced = shell
+        .source_ebuild(&Ebuild::from_path(&path).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(sourced.metadata.unsupported_eapi(), Some("10"));
+}
+
+#[tokio::test]
 async fn unsupported_eapi_yields_a_stub_without_sourcing() {
     let dir = tempdir().unwrap();
     let repo_path = dir.path().join("repo");
