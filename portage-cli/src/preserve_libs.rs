@@ -167,6 +167,9 @@ impl PreservedLibsRegistry {
         // its own one-shot path since this load; the delta also leaves a
         // concurrent writer's removals and updates intact, which a plain
         // merge of `self.data` over the file would not.
+        if self.data == self.original {
+            return;
+        }
         let Some(mut disk) = Self::read(&self.path) else {
             crate::style::warn_line!("not rewriting unparsable {}", self.path);
             return;
