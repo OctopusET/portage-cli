@@ -188,6 +188,25 @@ impl DependencyProvider for PortageDependencyProvider {
         let bump_slot =
             self.prefer_newest_slot && matches!(package, PortagePackage::SlotChoice { .. });
 
+        let candidates = if !self.exclude.is_empty()
+            && matches!(
+                package,
+                PortagePackage::Choice { .. } | PortagePackage::SlotChoice { .. }
+            ) {
+            let allowed: Vec<&Version> = candidates
+                .iter()
+                .copied()
+                .filter(|v| !self.branch_needs_excluded(&data.versions[*v]))
+                .collect();
+            if allowed.is_empty() {
+                candidates
+            } else {
+                allowed
+            }
+        } else {
+            candidates
+        };
+
         // portage `dep_zapdeps`: a branch whose USE deps hold beats one needing a USE change,
         // installed or not; the installed preference below then ranks within that tier.
         let candidates = if matches!(package, PortagePackage::Choice { .. }) {
@@ -302,6 +321,29 @@ impl DependencyProvider for PortageDependencyProvider {
 }
 
 impl PortageDependencyProvider {
+    /// Whether a choice branch's direct target can only be met by installing an `--exclude`d version
+    fn branch_needs_excluded(&self, vd: &VersionData) -> bool {
+        let Dependencies::Available(ref cs) = vd.merged else {
+            return false;
+        };
+        cs.iter().filter(|(p, _)| !p.is_virtual()).any(|(p, vs)| {
+            if self.installed.get(p).is_some_and(|(v, _)| vs.contains(v)) {
+                return false;
+            }
+            let slot = p.slot().map(portage_atom::Slot::from_name);
+            let excluded = |v: &Version| {
+                let cpv = portage_atom::Cpv::new(*p.cpn(), v.clone());
+                self.exclude
+                    .iter()
+                    .any(|d| d.matches_cpv(&cpv, slot.as_ref()))
+            };
+            self.package_data(p).is_some_and(|d| {
+                let mut in_range = d.versions.keys().filter(|v| vs.contains(v)).peekable();
+                in_range.peek().is_some() && in_range.all(excluded)
+            })
+        })
+    }
+
     fn compute_dependencies(
         &self,
         package: &PortagePackage,

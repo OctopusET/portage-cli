@@ -327,16 +327,12 @@ pub struct DepgraphOpts<'a> {
     pub binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
     /// `-X`/`--exclude`: package atoms to never install (emerge's own
     /// wording — "won't install any ebuild or binary package that matches
-    /// any of the given atoms"). Applied as a post-solve filter on `order`,
-    /// before *any* consumer — the `-p`/`--tree`/`--json` preview and the
-    /// final `PlannedMerge` merge-loop plan alike — so every display and
-    /// the actual merge agree.
+    /// any of the given atoms"). The solver steers `||` choices away from an
+    /// excluded package; whatever still lands in `order` is dropped before
+    /// *any* consumer (preview and merge plan alike) so they agree.
     ///
-    /// Not integrated into the pubgrub solve itself: a deliberate
-    /// simplification — if an excluded package is a genuine hard dependency
-    /// of something else still in the plan, that other package's own
-    /// preflight/build fails with a clear missing-dependency error rather
-    /// than the solver reporting the conflict up front.
+    /// A hard dependency on an excluded package is not a solve error: the
+    /// dependent's own build fails on the missing dependency instead.
     pub exclude: &'a [String],
     /// Packages already finished in a prior attempt of a `-r`/`--resume` job
     /// (`maint::resume::completed_keys`)

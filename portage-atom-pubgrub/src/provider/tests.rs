@@ -4450,3 +4450,37 @@ fn kept_installed_package_is_expanded_with_its_build_use_and_vdb_deps() {
     assert_eq!(solve(true), [true, true]);
     assert_eq!(solve(false), [false, false]);
 }
+
+#[test]
+fn or_group_skips_an_excluded_branch() {
+    let mut repo = InMemoryRepository::new();
+    for cpv in ["dev-libs/a-1.0", "dev-libs/b-1.0"] {
+        let cpv = portage_atom::Cpv::parse(cpv).unwrap();
+        repo.add_version(cpv, Some(Interned::intern("0")), None, empty_deps());
+    }
+    repo.add_version(
+        portage_atom::Cpv::parse("app-misc/consumer-1.0").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        PackageDeps {
+            rdepend: (DepEntry::parse("|| ( dev-libs/a dev-libs/b )").unwrap()).into(),
+            ..empty_deps()
+        },
+    );
+    let slotted =
+        |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let solve = |exclude: &[Dep]| {
+        let mut provider = PortageDependencyProvider::new(repo.clone());
+        provider.set_exclude(exclude);
+        provider
+            .resolve_targets(vec![(
+                slotted("app-misc/consumer"),
+                PortageVersionSet::any(),
+            )])
+            .unwrap()
+    };
+    assert!(solve(&[]).get(&slotted("dev-libs/a")).is_some());
+    let solution = solve(&[Dep::parse("dev-libs/a").unwrap()]);
+    assert!(solution.get(&slotted("dev-libs/a")).is_none());
+    assert!(solution.get(&slotted("dev-libs/b")).is_some());
+}

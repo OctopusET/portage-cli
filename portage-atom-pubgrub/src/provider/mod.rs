@@ -374,6 +374,8 @@ pub struct PortageDependencyProvider {
     /// Selective resolution (`-u`/`-n`/`-N`/`-U`): a root target kept at its installed version is
     /// left alone rather than reinstalled, so without `--deep` its deps are not listed either
     pub(crate) selective: bool,
+    /// `--exclude` atoms: an `||` branch needing a matching version that is not installed loses
+    pub(crate) exclude: Vec<Dep>,
 
     /// `--root-deps=rdeps` (crossdev cross builds): discard a target package's
     /// `DEPEND` from the target-root graph
@@ -912,6 +914,7 @@ impl PortageDependencyProvider {
             expand_kept: true,
             selective_no_update: false,
             selective: false,
+            exclude: Vec::new(),
             root_deps_rdeps: false,
             nodeps: false,
             use_decision_prefer,
@@ -1085,6 +1088,13 @@ impl PortageDependencyProvider {
     /// Selective resolution: a root target kept at its installed version is not reinstalled
     pub fn set_selective(&mut self, active: bool) {
         self.selective = active;
+    }
+
+    /// `--exclude`: steer `||` choices away from branches that would install a matching package
+    ///
+    /// A hard dependency on an excluded package still resolves; the caller drops it from the plan.
+    pub fn set_exclude(&mut self, atoms: &[Dep]) {
+        self.exclude = atoms.to_vec();
     }
 
     /// What a kept installed version lists in place of its repository entry, if anything
