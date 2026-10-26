@@ -11,7 +11,7 @@
 //! Hooked into `ebuild::unmerge_package`, the one function both `-C` and
 //! ordinary version-bump replacement funnel through, so both benefit.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -274,7 +274,8 @@ impl PreservedLibsRegistry {
         self.apply_prune(remove_keys, updates);
     }
 
-    /// Delete preserved files no live package still needs via `DT_NEEDED`
+    /// Delete preserved files no live package still needs via `DT_NEEDED`, directly or
+    /// through other preserved files it keeps
     fn prune_unneeded(&mut self, vdb: &Vdb, root: &Utf8Path) {
         if self.data.is_empty() {
             return;
@@ -286,6 +287,29 @@ impl PreservedLibsRegistry {
                 for n in rec.needed {
                     needed.insert((rec.category.clone(), n));
                 }
+            }
+        }
+        // Preserved libraries by path, and the subset `needed` reaches.
+        let mut sonamed: HashMap<&str, ((String, String), Vec<String>)> = HashMap::new();
+        for path_s in self.data.values().flat_map(|e| &e.paths) {
+            let abs = root.join(path_s.trim_start_matches('/'));
+            if let Some(info) = elfscan::scan_file(abs.as_std_path())
+                && let Some(soname) = info.soname
+            {
+                sonamed.insert(path_s, ((info.category, soname), info.needed));
+            }
+        }
+        let mut reached: HashSet<&str> = HashSet::new();
+        loop {
+            let before = reached.len();
+            for (path, (key, deps)) in &sonamed {
+                if !reached.contains(path) && needed.contains(key) {
+                    reached.insert(path);
+                    needed.extend(deps.iter().map(|n| (key.0.clone(), n.clone())));
+                }
+            }
+            if reached.len() == before {
+                break;
             }
         }
 
@@ -301,13 +325,9 @@ impl PreservedLibsRegistry {
                     println!(">>> preserved-libs: dropped missing {path}");
                     continue;
                 }
-                let still_needed = elfscan::scan_file(abs.as_std_path())
-                    .and_then(|info| {
-                        let soname = info.soname?;
-                        Some(needed.contains(&(info.category, soname)))
-                    })
-                    // Unreadable / non-ELF: keep (safe direction).
-                    .unwrap_or(true);
+                // Unreadable, non-ELF or soname-less: keep (safe direction).
+                let still_needed =
+                    !sonamed.contains_key(path_s.as_str()) || reached.contains(path_s.as_str());
                 if still_needed {
                     remaining.push(path_s.clone());
                     continue;
@@ -635,27 +655,35 @@ impl MergePreserveState {
     }
 }
 
-/// Which of `old_contents`' own files must survive `old_pkg`'s removal,
-/// because something outside the batch `graph` was built for still needs
-/// them via `DT_NEEDED`, and no other installed copy of that soname
-/// remains. Cheap: only reads `old_pkg`'s own `NEEDED.ELF.2` and queries
-/// the already-built `graph` — call once per removed package, reusing the
-/// same `graph` for the whole batch (see [`build_link_graph`]'s doc).
+/// Which of `old_contents`' own files must survive `old_pkg`'s removal: those an object
+/// outside the batch `graph` needs via `DT_NEEDED`, directly or through another preserved
+/// file, with no other installed copy of that soname. Reads only `old_pkg`'s own
+/// `NEEDED.ELF.2`, so one `graph` serves the whole batch (see [`build_link_graph`]).
 pub fn find_libs_to_preserve(
     graph: &LinkGraph,
     old_pkg: &InstalledPackage,
     old_contents: &[ContentsEntry],
 ) -> Vec<PreserveEntry> {
-    let mut preserve = Vec::new();
-    for rec in package_needed(old_pkg) {
-        let Some(soname) = rec.soname else { continue };
+    let records = package_needed(old_pkg);
+    // External consumers are queued first, so a library both kinds need reports those.
+    let mut queue: VecDeque<(&NeededRecord, Vec<Utf8PathBuf>)> = VecDeque::new();
+    for rec in &records {
+        let Some(soname) = &rec.soname else { continue };
         let key = (rec.category.clone(), soname.clone());
-        // Nobody outside this package needs it -> nothing to preserve.
-        if !graph.consumer_files.contains_key(&key) {
-            continue;
-        }
         // Another installed copy already provides it -> nothing orphaned.
         if graph.providers.contains(&key) {
+            continue;
+        }
+        // Nobody outside this package needs it -> nothing to preserve.
+        if let Some(consumers) = graph.consumer_files.get(&key) {
+            queue.push_back((rec, consumers.clone()));
+        }
+    }
+
+    let mut preserve = Vec::new();
+    let mut seen: HashSet<&Utf8Path> = HashSet::new();
+    while let Some((rec, consumers)) = queue.pop_front() {
+        if !seen.insert(&rec.path) {
             continue;
         }
         let Some(entry) = old_contents
@@ -664,15 +692,29 @@ pub fn find_libs_to_preserve(
         else {
             continue;
         };
+        let soname = rec.soname.as_deref().unwrap_or_default();
         let soname_symlink = old_contents
             .iter()
-            .find(|e| e.kind == ContentsKind::Sym && e.path.file_name() == Some(soname.as_str()))
+            .find(|e| e.kind == ContentsKind::Sym && e.path.file_name() == Some(soname))
             .map(|e| e.path.clone());
         preserve.push(PreserveEntry {
             path: entry.path.clone(),
             soname_symlink,
-            consumers: graph.consumer_files.get(&key).cloned().unwrap_or_default(),
+            consumers,
         });
+        for needed in &rec.needed {
+            if graph
+                .providers
+                .contains(&(rec.category.clone(), needed.clone()))
+            {
+                continue;
+            }
+            for dep in &records {
+                if dep.category == rec.category && dep.soname.as_ref() == Some(needed) {
+                    queue.push_back((dep, vec![rec.path.clone()]));
+                }
+            }
+        }
     }
     preserve
 }
@@ -879,6 +921,54 @@ mod tests {
     }
 
     #[test]
+    fn reclaim_keeps_what_a_kept_preserved_lib_needs() {
+        // libc and the loader it needs, as mapped into this test binary.
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+        let mapped: Vec<&str> = maps
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(5))
+            .collect();
+        let host = || {
+            let libc = *mapped.iter().find(|p| p.ends_with("/libc.so.6"))?;
+            let info = elfscan::scan_file(std::path::Path::new(libc))?;
+            let loader = *info.needed.iter().find_map(|n| {
+                mapped
+                    .iter()
+                    .find(|p| Utf8Path::new(p).file_name() == Some(n.as_str()))
+            })?;
+            Some((libc, loader, info.category))
+        };
+        let Some((libc, loader, category)) = host() else {
+            let glibc = cfg!(all(target_os = "linux", target_env = "gnu"));
+            assert!(!glibc, "libc or its loader not found in this glibc process");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        std::fs::create_dir_all(root.join("opt/old")).unwrap();
+        let mut paths = Vec::new();
+        for (src, name) in [(libc, "libc.so.6"), (loader, "loader.so")] {
+            std::fs::copy(src, root.join("opt/old").join(name)).unwrap();
+            paths.push(Utf8PathBuf::from(format!("/opt/old/{name}")));
+        }
+        let vdb_root = root.join("var/db/pkg");
+        write_fake_package(
+            vdb_root.as_std_path(),
+            "app-misc",
+            "consumer-1.0",
+            "obj /usr/bin/consumer bbbb 0\n",
+            &format!("X86_64;/usr/bin/consumer;;;libc.so.6;{category}\n"),
+        );
+        let mut reg = PreservedLibsRegistry::load(&root);
+        reg.register(&Cpv::parse("sys-libs/old-1.0").unwrap(), "0", 1, paths);
+        reg.reclaim(&Vdb::open(&vdb_root).unwrap(), &root);
+        let kept: HashSet<_> = reg.all_paths().map(|p| p.into_string()).collect();
+        assert!(kept.contains("/opt/old/libc.so.6"), "{kept:?}");
+        assert!(kept.contains("/opt/old/loader.so"), "{kept:?}");
+    }
+
+    #[test]
     fn reclaim_drops_missing_orphan_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
@@ -964,6 +1054,19 @@ mod tests {
             preserved[0].consumers,
             vec![Utf8PathBuf::from("/usr/bin/consumer")]
         );
+    }
+
+    // What removing `sys-libs/libfoo-1.0` from the VDB under `root` would preserve.
+    fn preserve_libfoo(root: &Utf8Path) -> Vec<PreserveEntry> {
+        let vdb = Vdb::open(root.join("var/db/pkg")).unwrap();
+        let libfoo = vdb
+            .category("sys-libs")
+            .unwrap()
+            .package("libfoo-1.0")
+            .unwrap();
+        let exclude: HashSet<Cpv> = std::iter::once(libfoo.cpv().clone()).collect();
+        let graph = build_link_graph(&vdb, &exclude, &PreservedLibsRegistry::load(root), root);
+        find_libs_to_preserve(&graph, &libfoo, &libfoo.contents().unwrap())
     }
 
     #[test]
@@ -1170,6 +1273,50 @@ mod tests {
     }
 
     #[test]
+    fn preserves_the_in_package_providers_of_a_preserved_lib() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        let vdb_root = root.join("var/db/pkg");
+        write_fake_package(
+            vdb_root.as_std_path(),
+            "sys-libs",
+            "libfoo-1.0",
+            "obj /usr/lib64/libfoo.so.1 aaaa 0\nobj /usr/lib64/libfoo-core.so.1 aaaa 0\n\
+             obj /usr/lib64/libunused.so.1 aaaa 0\n",
+            "X86_64;/usr/lib64/libfoo.so.1;libfoo.so.1;;libfoo-core.so.1;x86_64\n\
+             X86_64;/usr/lib64/libfoo-core.so.1;libfoo-core.so.1;;;x86_64\n\
+             X86_64;/usr/lib64/libunused.so.1;libunused.so.1;;;x86_64\n",
+        );
+        write_fake_package(
+            vdb_root.as_std_path(),
+            "app-misc",
+            "consumer-1.0",
+            "obj /usr/bin/consumer bbbb 0\n",
+            "X86_64;/usr/bin/consumer;;;libfoo.so.1;x86_64\n",
+        );
+        let preserved = preserve_libfoo(&root);
+        let got: Vec<(&str, Vec<&str>)> = preserved
+            .iter()
+            .map(|e| {
+                (
+                    e.path.as_str(),
+                    e.consumers.iter().map(|c| c.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("/usr/lib64/libfoo.so.1", vec!["/usr/bin/consumer"]),
+                (
+                    "/usr/lib64/libfoo-core.so.1",
+                    vec!["/usr/lib64/libfoo.so.1"]
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn does_not_preserve_lib_with_no_external_consumers() {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
@@ -1182,21 +1329,7 @@ mod tests {
             "obj /usr/lib64/libfoo.so.1 aaaa 0\n",
             "X86_64;/usr/lib64/libfoo.so.1;libfoo.so.1;;;x86_64\n",
         );
-
-        let vdb = Vdb::open(&vdb_root).unwrap();
-        let libfoo = vdb
-            .category("sys-libs")
-            .unwrap()
-            .package("libfoo-1.0")
-            .unwrap();
-        let old_contents = libfoo.contents().unwrap();
-        let exclude: HashSet<Cpv> = std::iter::once(libfoo.cpv().clone()).collect();
-        let registry = PreservedLibsRegistry::load(&root);
-
-        let graph = build_link_graph(&vdb, &exclude, &registry, &root);
-        let preserved = find_libs_to_preserve(&graph, &libfoo, &old_contents);
-
-        assert!(preserved.is_empty());
+        assert!(preserve_libfoo(&root).is_empty());
     }
 
     // A real system `.so` to drive `preserved_rebuild_atoms` tests without
