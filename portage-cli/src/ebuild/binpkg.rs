@@ -111,6 +111,7 @@ pub(crate) async fn build_binpkg_standalone(
     let record = vec![
         ("BINPKGMD5", binpkg_md5(&out)?),
         ("BUILD_ID", build_id.to_string()),
+        ("BUILD_TIME", build_time.to_string()),
     ];
     Ok((out, record))
 }
