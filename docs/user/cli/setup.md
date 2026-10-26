@@ -77,6 +77,14 @@ How the solver and build scheduler behave.
 * `--with-bdeps-auto <y|n>` — `n`: an install does not turn `--with-bdeps` on by itself
   * `y`: Yes
   * `n`: No
+* `--changed-deps[=<y|n>]` — Rebuild installed packages whose ebuild's dependencies changed since they were built
+
+  Compares the same version's dependencies under the installed USE, ignoring slot-operator bindings; build-time classes count under `--with-bdeps`.
+  * `y`: Yes
+  * `n`: No
+* `--changed-slot[=<y|n>]` — Rebuild installed packages whose ebuild's SLOT or sub-slot changed since they were built
+  * `y`: Yes
+  * `n`: No
 * `-X, --exclude <ATOM>...` — Exclude the specified atom from being merged
 * `--root-deps` — Only require RDEPEND (not DEPEND) to be satisfied in the merge target. Work-around for cross-compilation bootstrap: a still-empty target sysroot cannot yet satisfy plain DEPEND (e.g. virtual/os-headers, acct-group/root) while its own toolchain is being built. `em crossdev --setup` always applies this unconditionally; elsewhere it defaults off.
 

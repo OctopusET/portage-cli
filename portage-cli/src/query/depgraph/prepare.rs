@@ -82,6 +82,7 @@ pub(super) struct Prepared<'a> {
     pub(super) root_pkgs: Vec<PortagePackage>,
     pub(super) pristine_package_use: Vec<(Dep, Vec<UseOverride>)>,
     pub(super) rebuilding_installed_cpvs: std::collections::HashSet<Cpv>,
+    pub(super) changed_rebuild_cpvs: std::collections::HashSet<Cpv>,
 }
 
 /// Load repos, the installed trees, and profile policy, then classify roots.
@@ -111,6 +112,8 @@ pub(super) async fn prepare<'a>(
         newuse,
         changed_use,
         noreplace,
+        changed_deps,
+        changed_slot,
         nodeps,
         host_merge_root,
         extra_use_override,
@@ -135,7 +138,8 @@ pub(super) async fn prepare<'a>(
     // `create_depgraph_params`' `selective`, restricted to the flags em has: an
     // installed instance may satisfy a named target, so the target is left alone
     // instead of being reinstalled. `--emptytree` is the explicit opposite.
-    let selective = (update || noreplace || newuse || changed_use) && !empty;
+    let selective =
+        (update || noreplace || newuse || changed_use || changed_deps || changed_slot) && !empty;
     let cross = root_aware::detect(roots, host_merge_root);
     let config_root = roots.config();
     let host_config_stage = cross.active && cross.sysroot.as_str() != cross.target.as_str();
@@ -300,6 +304,21 @@ pub(super) async fn prepare<'a>(
     metrics.record("collapse_duplicates", collapse_start.elapsed());
     let target_policy = target_policy.with_package_use(&policy_facts, &package_use);
 
+    let libc = portage_resolve::changed_deps::libc_providers(&target_installed);
+    let changed_rebuild_cpvs: std::collections::HashSet<Cpv> = target_installed
+        .iter()
+        .filter(|_| !empty && (changed_deps || changed_slot))
+        .filter(|e| {
+            data.cache_entry(&e.cpn, &e.version).is_some_and(|c| {
+                let meta = &c.metadata;
+                (changed_slot && portage_resolve::changed_deps::slot_changed(e, meta))
+                    || (changed_deps
+                        && portage_resolve::changed_deps::deps_changed(e, meta, with_bdeps, &libc))
+            })
+        })
+        .map(|e| Cpv::new(e.cpn, e.version.clone()))
+        .collect();
+
     let provided_avail = provided_availability(&provided, &data);
 
     let RootTargets {
@@ -443,7 +462,8 @@ pub(super) async fn prepare<'a>(
             let use_rebuild = use_reinstall_mode.is_some_and(|mode| {
                 package_needs_use_reinstall(mode, e, &pkg, &data, &target_policy)
             });
-            if explicit_reinstall || use_rebuild {
+            let changed = changed_rebuild_cpvs.contains(&Cpv::new(e.cpn, e.version.clone()));
+            if explicit_reinstall || use_rebuild || changed {
                 rebuilding_installed_cpvs.insert(Cpv::new(e.cpn, e.version.clone()));
             }
         }
@@ -522,5 +542,6 @@ pub(super) async fn prepare<'a>(
         root_pkgs,
         pristine_package_use,
         rebuilding_installed_cpvs,
+        changed_rebuild_cpvs,
     })
 }

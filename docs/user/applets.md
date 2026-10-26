@@ -47,6 +47,7 @@ applet, and each one's `--help` lists its subcommands.
 - **VDB awareness** — installed packages use `InstalledPolicy::Favor` (keep satisfying versions); already-installed exact CPVs are filtered from the merge list; installed-and-kept packages expand runtime deps only
 - **`-uD` / `--update --deep`** — transitive **in-slot upgrades** (`prefer_update`); host-satisfied build tools still enter the graph so they can upgrade (emerge deep-update). `-u` alone does not mass-upgrade deps; `-D` alone still bumps `:*` slots (`prefer_newest_slot`)
 - **`-N` / `--newuse` and `-U` / `--changed-use`** — same-CPV rebuild when planned USE/IUSE differs from the VDB; with `-uD`, prefer newest when USE drift forces a rebuild
+- **`--changed-deps` / `--changed-slot`**: same-CPV rebuild when the ebuild's USE-evaluated dependencies (slot-operator bindings ignored) or its SLOT/sub-slot differ from the VDB
 - **Profile USE flags** — `make.defaults` / `make.conf` through brush with portage-style incremental USE stacking (see `docs/design/architecture.md`)
 - **USE_EXPAND** — `PYTHON_TARGETS`, `CPU_FLAGS_*`, `ABI_X86`, etc. expanded and grouped in output
 - **OR-group branch selection**: as emerge's `dep_zapdeps`, a branch whose USE deps hold beats one needing a USE change, then a fully installed branch beats the rest, then the first listed; a DEPEND/BDEPEND branch only the package itself satisfies comes last (`dev-lang/go` takes `go-bootstrap`), and a branch emptied by a disabled USE conditional or an unavailable atom is no alternative

@@ -302,6 +302,10 @@ pub struct DepgraphOpts<'a> {
     /// `--noreplace` / `-n`: leave a named target alone when an installed
     /// version already satisfies it, rather than reinstalling it.
     pub noreplace: bool,
+    /// `--changed-deps`: rebuild installed packages whose ebuild's dependencies changed
+    pub changed_deps: bool,
+    /// `--changed-slot`: rebuild installed packages whose ebuild's SLOT or sub-slot changed
+    pub changed_slot: bool,
     /// `--nodeps` (emerge `-O`): merge only the named atoms, no dependency expansion
     ///
     /// Used by the staged toolchain bootstrap.
@@ -408,6 +412,7 @@ fn resolve(
         policy_facts: &prepared.policy_facts,
         solver_installed_cpvs,
         rebuilding_installed_cpvs: &prepared.rebuilding_installed_cpvs,
+        changed_rebuild_cpvs: &prepared.changed_rebuild_cpvs,
         slot_map: &prepared.slot_map,
         widened_slot_map: &prepared.widened_slot_map,
         target_policy: &target_policy,

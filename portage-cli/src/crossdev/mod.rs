@@ -1040,6 +1040,8 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
         newuse: false,
         changed_use: false,
         noreplace: false,
+        changed_deps: false,
+        changed_slot: false,
         nodeps: true,
         extra_use_override: None,
         extra_package_use: &[],

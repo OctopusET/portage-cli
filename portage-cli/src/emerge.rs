@@ -637,6 +637,8 @@ async fn emerge_atoms_inner(
         newuse: depgraph_flags.1,
         changed_use: depgraph_flags.2,
         noreplace: merge_flags.noreplace,
+        changed_deps: merge_flags.changed_deps == Some(cli::YesNo::Y),
+        changed_slot: merge_flags.changed_slot == Some(cli::YesNo::Y),
         nodeps,
         extra_use_override,
         extra_package_use,

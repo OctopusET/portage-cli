@@ -161,6 +161,17 @@ pub struct MergeFlags {
     #[arg(long, value_name = "y|n")]
     pub with_bdeps_auto: Option<YesNo>,
 
+    /// Rebuild installed packages whose ebuild's dependencies changed since they were built
+    ///
+    /// Compares the same version's dependencies under the installed USE, ignoring slot-operator
+    /// bindings; build-time classes count under `--with-bdeps`.
+    #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
+    pub changed_deps: Option<YesNo>,
+
+    /// Rebuild installed packages whose ebuild's SLOT or sub-slot changed since they were built
+    #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
+    pub changed_slot: Option<YesNo>,
+
     /// Exclude the specified atom from being merged
     #[arg(short = 'X', long, value_name = "ATOM")]
     pub exclude: Vec<String>,

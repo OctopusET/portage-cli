@@ -40,6 +40,7 @@ struct Solve<'a> {
     update: bool,
     deep: bool,
     newuse: bool,
+    changed_deps: bool,
     complete_graph: bool,
     exclude: &'a [String],
     resume: HashSet<(MergeRoot, String)>,
@@ -56,6 +57,7 @@ impl<'a> Solve<'a> {
             update: false,
             deep: false,
             newuse: false,
+            changed_deps: false,
             complete_graph: false,
             exclude: &[],
             resume: HashSet::new(),
@@ -203,6 +205,8 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         newuse: opts.newuse,
         changed_use: false,
         noreplace: opts.noreplace,
+        changed_deps: opts.changed_deps,
+        changed_slot: false,
         nodeps: false,
         extra_use_override: None,
         extra_package_use: extra,
@@ -575,6 +579,8 @@ fn a_missing_explicit_atom_is_fatal() {
             newuse: false,
             changed_use: false,
             noreplace: false,
+            changed_deps: false,
+            changed_slot: false,
             nodeps: false,
             extra_use_override: None,
             extra_package_use: extra,
@@ -1069,6 +1075,43 @@ fn deep_update_rebuilds_a_consumer_for_a_new_slot() {
             deep_update_of_top(&lua, top_rdepend, plant, true),
             ["dev-lang/lua-5.4.6", "app-misc/consumer-1"],
             "{top_rdepend}"
+        );
+    }
+}
+
+#[test]
+fn changed_deps_rebuilds_only_an_installed_package_whose_deps_changed() {
+    let pkgs = vec![
+        Pkg {
+            cpv: "app-misc/bar-1",
+            keywords: "amd64",
+            depend: "",
+            rdepend: "app-misc/baz",
+            iuse: "",
+            slot: "0",
+        },
+        Pkg {
+            cpv: "app-misc/baz-1",
+            keywords: "amd64",
+            depend: "",
+            rdepend: "",
+            iuse: "",
+            slot: "0",
+        },
+    ];
+    let atoms = [TargetAtom::explicit("app-misc/bar")];
+    for (recorded, planned) in [
+        (None, vec!["app-misc/bar-1"]),
+        (Some("app-misc/baz"), vec![]),
+    ] {
+        let fix = fixture(&pkgs, &["app-misc/baz-1"]);
+        plant_vdb_rdepend(&fix.root, "app-misc/bar-1", recorded);
+        let mut opts = Solve::new(&atoms);
+        opts.changed_deps = true;
+        assert_eq!(
+            names(&solve(&fix, opts)),
+            planned,
+            "VDB RDEPEND {recorded:?}"
         );
     }
 }

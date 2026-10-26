@@ -19,6 +19,8 @@ mod bdepend_avail;
 pub mod bdepend_trim;
 #[cfg(test)]
 mod c7;
+/// `--changed-deps` / `--changed-slot` rebuild detection
+pub mod changed_deps;
 /// Post-solve reverse-dependency conflict detection against installed
 /// packages the plan doesn't replace
 pub mod conflicts;

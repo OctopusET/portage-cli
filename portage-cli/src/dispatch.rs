@@ -616,6 +616,8 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 newuse: depgraph_flags.newuse,
                 changed_use: depgraph_flags.changed_use,
                 noreplace: false,
+                changed_deps: merge_flags.changed_deps == Some(crate::cli::YesNo::Y),
+                changed_slot: merge_flags.changed_slot == Some(crate::cli::YesNo::Y),
                 nodeps: false,
                 extra_use_override: None,
                 extra_package_use: &[],

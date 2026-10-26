@@ -43,6 +43,7 @@ pub(super) struct RoundCtx<'a> {
     pub(super) policy_facts: &'a repo::PolicyFactsCache,
     pub(super) solver_installed_cpvs: &'a HashSet<Cpv>,
     pub(super) rebuilding_installed_cpvs: &'a HashSet<Cpv>,
+    pub(super) changed_rebuild_cpvs: &'a HashSet<Cpv>,
     pub(super) slot_map: &'a SlotMap,
     pub(super) widened_slot_map: &'a Option<SlotMap>,
     pub(super) target_policy: &'a repo::ResolvePolicy<'a>,
@@ -154,6 +155,7 @@ pub(super) fn solve_round(
         policy_facts,
         solver_installed_cpvs,
         rebuilding_installed_cpvs,
+        changed_rebuild_cpvs,
         slot_map,
         widened_slot_map,
         target_policy,
@@ -314,7 +316,8 @@ pub(super) fn solve_round(
         for (e, blockers) in target_installed.iter().zip(installed_blockers) {
             let pkg = installed_package(e.cpn, e.slot);
             provider.add_installed_blockers(&pkg, blockers);
-            let policy = if empty || slot_op_rebuild.contains(&pkg) {
+            let changed = changed_rebuild_cpvs.contains(&Cpv::new(e.cpn, e.version.clone()));
+            let policy = if empty || changed || slot_op_rebuild.contains(&pkg) {
                 InstalledPolicy::Rebuild
             } else if let Some(mode) = use_reinstall_mode {
                 // Compare VDB USE/IUSE to the planned fold for this CPV.

@@ -425,6 +425,8 @@ pub fn merge_resume_flags(saved: &MergeFlags, cli: &MergeFlags) -> MergeFlags {
         complete_graph: saved.complete_graph || cli.complete_graph,
         with_bdeps: cli.with_bdeps.or(saved.with_bdeps),
         with_bdeps_auto: cli.with_bdeps_auto.or(saved.with_bdeps_auto),
+        changed_deps: cli.changed_deps.or(saved.changed_deps),
+        changed_slot: cli.changed_slot.or(saved.changed_slot),
         root_deps: saved.root_deps || cli.root_deps,
         jobs: cli.jobs.or(saved.jobs),
         load_average: cli.load_average.or(saved.load_average),

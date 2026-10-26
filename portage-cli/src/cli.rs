@@ -1845,6 +1845,14 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_changed_deps_leaves_the_next_atom_alone() {
+        let cli = parse_cli(&["em", "-p", "--changed-deps", "@world", "--changed-slot=n"]);
+        assert_eq!(cli.merge_flags().changed_deps, Some(YesNo::Y));
+        assert_eq!(cli.merge_flags().changed_slot, Some(YesNo::N));
+        assert_eq!(emerge_applet(&cli).atoms, ["@world"]);
+    }
+
+    #[test]
     fn exclude_value_matching_an_applet_name_is_not_the_search_applet() {
         let cli = parse_cli(&["em", "emerge", "-X", "search", "-p", "sys-libs/zlib"]);
         assert_eq!(cli.merge_flags().exclude, vec!["search".to_string()]);
