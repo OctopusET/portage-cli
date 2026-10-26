@@ -250,7 +250,7 @@ pub(super) async fn prepare<'a>(
     // "already installed" for cede/ingest), while action tags still use the
     // real VDB via `target_installed_cpvs`.
     let empty_solver_cpvs = std::collections::HashSet::new();
-    let solver_installed_cpvs: &std::collections::HashSet<Cpv> = if emptytree_native {
+    let solver_installed_cpvs: &std::collections::HashSet<Cpv> = if empty {
         &empty_solver_cpvs
     } else {
         &target_installed_cpvs
@@ -430,7 +430,7 @@ pub(super) async fn prepare<'a>(
     // so cede already applies universally there.
     let mut rebuilding_installed_cpvs: std::collections::HashSet<Cpv> =
         std::collections::HashSet::new();
-    if !emptytree_native {
+    if !empty {
         for e in &target_installed {
             let pkg = match e.slot.filter(|s| !s.is_empty()) {
                 Some(s) => PortagePackage::slotted(e.cpn, s),

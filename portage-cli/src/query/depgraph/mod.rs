@@ -389,7 +389,7 @@ fn resolve(
         .as_policy()
         .with_package_use(&prepared.policy_facts, &prepared.resolved.package_use);
     let empty_solver_cpvs = HashSet::new();
-    let solver_installed_cpvs = if prepared.emptytree_native {
+    let solver_installed_cpvs = if prepared.empty {
         &empty_solver_cpvs
     } else {
         &prepared.target_installed_cpvs

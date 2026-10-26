@@ -326,6 +326,25 @@ fn emptytree_still_plans_a_package_that_is_already_installed() {
 }
 
 #[test]
+fn emptytree_rebuilds_an_installed_dependency_under_an_offset_root() {
+    let mut fix = fixture(&pair(), &["app-misc/foo-1", "app-misc/bar-1"]);
+    let broot = Utf8PathBuf::try_from(fix._dir.path().join("broot")).unwrap();
+    std::fs::create_dir_all(broot.as_std_path()).unwrap();
+    fix.roots = fix.roots.clone().with_broot(Some(broot));
+    let atoms = [TargetAtom::explicit("app-misc/foo")];
+    let mut opts = Solve::new(&atoms);
+    opts.empty = true;
+    let outcome = solve(&fix, opts);
+    let target: Vec<String> = outcome
+        .plan
+        .iter()
+        .filter(|p| p.merge_root == MergeRoot::Target)
+        .map(|p| p.cpv.to_string())
+        .collect();
+    assert_eq!(target, ["app-misc/bar-1", "app-misc/foo-1"]);
+}
+
+#[test]
 fn exclude_removes_the_dependency_after_the_solve() {
     let fix = fixture(&pair(), &[]);
     let atoms = [TargetAtom::explicit("app-misc/foo")];

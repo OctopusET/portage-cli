@@ -285,7 +285,7 @@ pub(super) fn solve_round(
                 None => PortagePackage::unslotted(e.cpn),
             };
             provider.add_installed_blockers(&pkg, blockers);
-            let policy = if emptytree_native {
+            let policy = if empty {
                 InstalledPolicy::Rebuild
             } else if let Some(mode) = use_reinstall_mode {
                 // Compare VDB USE/IUSE to the planned fold for this CPV.
