@@ -476,9 +476,11 @@ fn reexec_sudo() -> i32 {
 #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
 fn distdir(cli: &Cli) -> String {
     let path = crate::select::config_portage_dir(cli).join("make.conf");
+    let roots = cli.roots();
+    let eprefix = roots.eprefix().map_or("", |p| p.as_str());
     portage_repo::MakeConf::load(&path)
         .ok()
-        .and_then(|mc| mc.get("DISTDIR").map(str::to_string))
+        .and_then(|mc| mc.get_expanded("DISTDIR", &[("EPREFIX", eprefix)]))
         .unwrap_or_else(|| "/var/cache/distfiles".to_string())
 }
 

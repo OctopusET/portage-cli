@@ -194,6 +194,33 @@ impl MakeConf {
         None
     }
 
+    /// [`get`](Self::get) with `$X`/`${X}` expanded from earlier assignments, then `seed`
+    ///
+    /// Unset variables expand empty and single-quoted values stay literal; no other shell
+    /// expansion applies. `NAME+=VALUE` is skipped, as portage's `getconfig` does.
+    pub fn get_expanded(&self, name: &str, seed: &[(&str, &str)]) -> Option<String> {
+        let mut vars: std::collections::HashMap<&str, String> =
+            seed.iter().map(|&(k, v)| (k, v.to_string())).collect();
+        let mut found = false;
+        for entry in &self.entries {
+            let Entry::Statement { vars: assigns, .. } = entry else {
+                continue;
+            };
+            for var in assigns.iter().filter(|v| !v.append) {
+                let raw = &self.src[var.value.clone()];
+                let single_quoted = self.src[..var.value.start].ends_with('\'');
+                let value = if single_quoted {
+                    raw.to_string()
+                } else {
+                    expand_vars(raw, &vars)
+                };
+                found |= var.name == name;
+                vars.insert(var.name.as_str(), value);
+            }
+        }
+        found.then(|| vars.remove(name).unwrap_or_default())
+    }
+
     /// Apply this file's assignments to `env` the way `bash source` would
     ///
     /// Sources the raw file text through a minimal, non-interactive
@@ -564,14 +591,18 @@ fn build_entries(src: &str, program: &brush_parser::ast::Program) -> Vec<Entry> 
             let Command::Simple(simple) = &pipeline.seq[0] else {
                 continue;
             };
-            // Pure assignment: no command name.
-            if simple.word_or_name.is_some() {
-                continue;
-            }
+            // Pure assignment, or `export NAME=VALUE` (portage's getconfig accepts both).
+            let items = match &simple.word_or_name {
+                None => simple.prefix.as_ref().map(|p| &p.0),
+                Some(w) if w.value == "export" && simple.prefix.is_none() => {
+                    simple.suffix.as_ref().map(|s| &s.0)
+                }
+                Some(_) => continue,
+            };
 
             let mut vars = Vec::new();
-            if let Some(prefix) = &simple.prefix {
-                for item in &prefix.0 {
+            if let Some(items) = items {
+                for item in items {
                     if let CommandPrefixOrSuffixItem::AssignmentWord(assignment, _) = item
                         && let Some(v) = var_from_assignment(src, assignment)
                     {
@@ -635,6 +666,39 @@ fn extend_to_newline(src: &str, end: usize) -> usize {
 ///
 /// Computes the value span from `assignment.loc` and the name length
 /// (avoids relying on `Word.loc` which may not always be populated).
+fn expand_vars(raw: &str, vars: &std::collections::HashMap<&str, String>) -> String {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(i) = rest.find(['$', '\\']) {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        if rest.as_bytes()[i] == b'\\' {
+            let n = tail.chars().next().map_or(0, char::len_utf8);
+            out.push_str(&tail[..n]);
+            rest = &tail[n..];
+            continue;
+        }
+        let (name, after) = if let Some(braced) = tail.strip_prefix('{')
+            && let Some(end) = braced.find('}')
+        {
+            (&braced[..end], &braced[end + 1..])
+        } else {
+            let end = tail.find(|c| !is_name(c)).unwrap_or(tail.len());
+            (&tail[..end], &tail[end..])
+        };
+        if name.is_empty() || !name.chars().all(is_name) {
+            out.push('$');
+            rest = tail;
+            continue;
+        }
+        out.push_str(vars.get(name).map_or("", String::as_str));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 fn var_from_assignment(src: &str, a: &brush_parser::ast::Assignment) -> Option<Var> {
     // Skip array assignments (uncommon in make.conf, hard to edit safely).
     if matches!(a.value, AssignmentValue::Array(_)) {
@@ -705,6 +769,17 @@ mod tests {
 
     fn parse(src: &str) -> MakeConf {
         MakeConf::parse(src.to_owned()).expect("parse failed")
+    }
+
+    #[test]
+    fn get_expanded_follows_earlier_assignments_and_seed() {
+        let mc = parse("export DISTDIR=\"${EPREFIX}/d\"\nA=x\nB=\"${A}/y$UNSET\"\nC='$A'\n");
+        assert_eq!(mc.get("DISTDIR"), Some("${EPREFIX}/d"));
+        let seed = [("EPREFIX", "/p")];
+        assert_eq!(mc.get_expanded("DISTDIR", &seed).as_deref(), Some("/p/d"));
+        assert_eq!(mc.get_expanded("B", &seed).as_deref(), Some("x/y"));
+        assert_eq!(mc.get_expanded("C", &seed).as_deref(), Some("$A"));
+        assert_eq!(mc.get_expanded("EPREFIX", &seed), None);
     }
 
     #[test]

@@ -211,9 +211,12 @@ fn distdir(globals: &Cli) -> Utf8PathBuf {
         return Utf8PathBuf::from(v);
     }
     let conf = crate::select::config_portage_dir(globals).join("make.conf");
+    let roots = globals.roots();
+    let eprefix = roots.eprefix().map_or("", |p| p.as_str());
     portage_repo::MakeConf::load(&conf)
         .ok()
-        .and_then(|mc| mc.get("DISTDIR").map(Utf8PathBuf::from))
+        .and_then(|mc| mc.get_expanded("DISTDIR", &[("EPREFIX", eprefix)]))
+        .map(Utf8PathBuf::from)
         .unwrap_or_else(|| globals.roots().merge_root().join("var/cache/distfiles"))
 }
 

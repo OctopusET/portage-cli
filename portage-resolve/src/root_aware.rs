@@ -186,8 +186,7 @@ pub fn display_root<'a>(
 }
 
 fn read_chost_cbuild(root: &Utf8Path) -> (Option<String>, Option<String>) {
-    let var =
-        |mc: &portage_repo::MakeConf, k| mc.get(k).filter(|s| !s.is_empty()).map(str::to_owned);
+    let var = |mc: &portage_repo::MakeConf, k| mc.get_expanded(k, &[]).filter(|s| !s.is_empty());
     for rel in ["etc/portage/make.conf", "etc/make.conf"] {
         if let Ok(mc) = portage_repo::MakeConf::load(&root.join(rel)) {
             let (chost, cbuild) = (var(&mc, "CHOST"), var(&mc, "CBUILD"));

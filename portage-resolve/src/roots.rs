@@ -304,22 +304,22 @@ impl Roots {
     /// not merged — a single bash assignment, not a directory of stackable
     /// fragments).
     ///
-    /// Read via [`portage_repo::MakeConf::get`], a static parse, so `${VAR}`
-    /// expansion and `NAME+=VALUE` append aren't
-    /// honored (same limitation as `read_chost_cbuild` elsewhere).
+    /// Read via [`portage_repo::MakeConf::get_expanded`], a static parse: `${VAR}` expands
+    /// from earlier make.conf assignments and `EPREFIX`, nothing else.
     pub fn portdir_overlay(&self) -> Vec<Utf8PathBuf> {
         // `config_overlay` is always set to `<prefix>/etc/portage` directly
         // (`Cli`'s `with_config_overlay` call sites), so its make.conf is a
         // direct child — unlike `config()`, a root that still needs
         // `etc/portage/`/`etc/` joined on.
+        let seed = [("EPREFIX", self.eprefix().map_or("", |p| p.as_str()))];
         if let Some(overlay) = self.config_overlay()
             && let Ok(mc) = portage_repo::MakeConf::load(&overlay.join("make.conf"))
-            && let Some(raw) = mc.get("PORTDIR_OVERLAY")
+            && let Some(raw) = mc.get_expanded("PORTDIR_OVERLAY", &seed)
         {
             return raw.split_whitespace().map(Utf8PathBuf::from).collect();
         }
         let cfg = self.config().unwrap_or_else(|| Utf8Path::new("/"));
-        read_portdir_overlay(cfg).unwrap_or_default()
+        read_portdir_overlay(cfg, &seed).unwrap_or_default()
     }
 
     // -----------------------------------------------------------------
@@ -472,10 +472,10 @@ impl Roots {
 ///
 /// `None` when neither file sets the var at all (distinct from `Some(vec![])`,
 /// an explicit empty assignment).
-fn read_portdir_overlay(root: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
+fn read_portdir_overlay(root: &Utf8Path, seed: &[(&str, &str)]) -> Option<Vec<Utf8PathBuf>> {
     for rel in ["etc/portage/make.conf", "etc/make.conf"] {
         if let Ok(mc) = portage_repo::MakeConf::load(&root.join(rel))
-            && let Some(raw) = mc.get("PORTDIR_OVERLAY")
+            && let Some(raw) = mc.get_expanded("PORTDIR_OVERLAY", seed)
         {
             return Some(raw.split_whitespace().map(Utf8PathBuf::from).collect());
         }
