@@ -644,6 +644,8 @@ PubGrub core" in *some* way:
 candidates: em resolves the atom as `=cat/pkg-1.0-r1` and pins that plan entry
 to the local binary package with `BUILD_ID` 3. The target fails unless `-k`/`-K`
 is set and the local `PKGDIR` index holds that build; a remote binhost alone does not count.
+Other operators keep the build id but ignore it (`>=cat/pkg-1.0-3` is `>=cat/pkg-1.0`), as
+portage does.
 
 PMS 8.3.2: hard blocker conflicts (`PlannedCoexistence`, strong `StillNeeded`)
 fail with exit 1 after classify. `WouldUnmerge` victims are unmerged on a real

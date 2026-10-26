@@ -81,9 +81,9 @@ pub struct Dep {
     /// for comparison". Only valid with `op = Some(Equal)`.
     #[cfg_attr(feature = "builder", builder(default))]
     pub glob: bool,
-    /// Binary package build id (`=cat/pkg-1.0-r1-3`), only with `op = Some(Equal)` and no glob
+    /// Binary package build id (`=cat/pkg-1.0-r1-3`), after any operator's version but never a glob
     ///
-    /// Selects the binary package whose `BUILD_ID` it names; no ebuild has one.
+    /// Only `=` compares it (see [`Dep::pinned_build`]); no ebuild has one.
     pub build_id: Option<u64>,
     /// Optional slot dependency (the portion after `:`)
     ///
@@ -121,7 +121,7 @@ impl Dep {
     /// `None` sub-slot means *unrecorded*, so a sub-slot constraint is only
     /// enforced when both sides carry one.
     ///
-    /// USE-dep brackets, blockers, `::repo` and the build id are *not* evaluated here —
+    /// USE-dep brackets, blockers, `::repo` and the build id are *not* evaluated here:
     /// this answers the `has_version`-style question "does a matching
     /// version exist", per [PMS 8.3.1]/[8.3.3].
     ///
@@ -199,6 +199,12 @@ impl Dep {
     /// Build a [`Cpv`] from this dependency, if it carries a version
     pub fn cpv(&self) -> Option<Cpv> {
         self.version.as_ref().map(|v| Cpv::new(self.cpn, v.clone()))
+    }
+
+    /// The `BUILD_ID` this atom selects: portage compares a build id only under `=`
+    pub fn pinned_build(&self) -> Option<u64> {
+        self.build_id
+            .filter(|_| self.op == Some(crate::Operator::Equal))
     }
 }
 
@@ -332,7 +338,7 @@ pub(crate) fn parse_dep(input: &mut &str) -> ModalResult<Dep> {
 
     let operator = opt(parse_operator).parse_next(input)?;
 
-    let build_id = if operator == Some(Operator::Equal) {
+    let build_id = if operator.is_some() {
         opt(parse_cpv_build_id).parse_next(input)?
     } else {
         None
@@ -490,12 +496,18 @@ mod tests {
         assert_eq!((dep.package(), dep.build_id), ("foo", Some(30)));
         assert_eq!(dep.to_string(), "=app-misc/foo-1-30:0::gentoo");
         assert_eq!(Dep::parse("=cat/pkg2-3").unwrap().build_id, None);
-        for atom in [
-            "=cat/pkg-1.0-03",
-            ">=cat/pkg-1.0-3",
-            "=cat/pkg-1.0-3*",
-            "cat/pkg-1.0-3",
-        ] {
+        assert_eq!(dep.pinned_build(), Some(30));
+        for atom in [">=cat/pkg-1.0-3", "~cat/pkg-1.0-3"] {
+            let dep = Dep::parse(atom).unwrap();
+            assert_eq!(
+                (dep.build_id, dep.pinned_build()),
+                (Some(3), None),
+                "{atom}"
+            );
+            assert_eq!(dep.version.as_ref().unwrap().to_string(), "1.0");
+            assert_eq!(dep.to_string(), atom);
+        }
+        for atom in ["=cat/pkg-1.0-03", "=cat/pkg-1.0-3*", "cat/pkg-1.0-3"] {
             assert!(Dep::parse(atom).is_err(), "{atom}");
         }
     }

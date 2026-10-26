@@ -1062,7 +1062,7 @@ fn target_build_ids(
         let Ok(dep) = Dep::parse(&target.atom) else {
             continue;
         };
-        if let (Some(id), Some(cpv)) = (dep.build_id, dep.cpv()) {
+        if let (Some(id), Some(cpv)) = (dep.pinned_build(), dep.cpv()) {
             require_binpkg_build(binpkg_index, &target.atom, &cpv, id)?;
             build_ids.insert(cpv, id);
         }
