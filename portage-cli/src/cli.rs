@@ -20,7 +20,7 @@ pub use context::{
 };
 pub use depgraph_flags::DepgraphFlags;
 pub use emerge_mode::EmergeModeArgs;
-pub use merge_flags::{MergeFlags, YesNo};
+pub use merge_flags::{MergeFlags, YesNo, attach_yes_no_values};
 pub use topology::{RootArg, RootTopology, RootedTopology, Topology};
 
 fn default_arch() -> Arch {
@@ -158,6 +158,7 @@ pub fn parse_cli_or_exit() -> Validated {
         print!("{answer}");
         std::process::exit(0);
     }
+    let args = attach_yes_no_values(args);
     let parsed = Cli::parse_from(&args).and_then(|cli| {
         let defaults = match &cli.applet {
             Some(Applet::Emerge(a)) if !a.ignore_default_opts => {
@@ -168,7 +169,7 @@ pub fn parse_cli_or_exit() -> Validated {
                     .to_owned();
                 let words =
                     emerge_default_opts(std::env::var("EMERGE_DEFAULT_OPTS").ok(), &config_root);
-                known_default_opts(words)
+                known_default_opts(attach_yes_no_values(words))
             }
             _ => Vec::new(),
         };
@@ -617,16 +618,17 @@ impl Cli {
     /// The dispatched applet's own [`MergeFlags`], or the all-default value
     /// for an applet that doesn't carry one.
     pub fn merge_flags(&self) -> MergeFlags {
-        match &self.applet {
-            Some(Applet::Emerge(a)) => a.merge_flags.clone(),
-            Some(Applet::Crossdev(a)) => a.merge_flags.clone(),
-            Some(Applet::Toolchain(a)) => a.merge_flags.clone(),
-            Some(Applet::Stages(a)) => a.merge_flags.clone(),
-            Some(Applet::Setup(a)) => a.merge_flags.clone(),
-            Some(Applet::Revdep(a)) => a.merge_flags.clone(),
-            Some(Applet::Depclean(a)) => a.merge_flags.clone(),
-            _ => MergeFlags::default(),
-        }
+        let flags = match &self.applet {
+            Some(Applet::Emerge(a)) => &a.merge_flags,
+            Some(Applet::Crossdev(a)) => &a.merge_flags,
+            Some(Applet::Toolchain(a)) => &a.merge_flags,
+            Some(Applet::Stages(a)) => &a.merge_flags,
+            Some(Applet::Setup(a)) => &a.merge_flags,
+            Some(Applet::Revdep(a)) => &a.merge_flags,
+            Some(Applet::Depclean(a)) => &a.merge_flags,
+            _ => return MergeFlags::default(),
+        };
+        flags.clone().resolve_short_flags()
     }
 
     /// The dispatched applet's own [`DepgraphFlags`], for merge applets only — not query.
@@ -690,12 +692,18 @@ pub(crate) fn os_argv<'a>(argv: &'a [&'a str]) -> Vec<&'a OsStr> {
 /// Parse argv including argv0, through `default_subcommand_flags`' own routing.
 #[cfg(test)]
 pub(crate) fn parse_cli(argv: &[&str]) -> Cli {
-    Cli::parse_from_argv(argv).unwrap_or_else(|e| panic!("expected parse of {argv:?}: {e}"))
+    Cli::parse_from_argv(test_argv(argv))
+        .unwrap_or_else(|e| panic!("expected parse of {argv:?}: {e}"))
+}
+
+#[cfg(test)]
+fn test_argv(argv: &[&str]) -> Vec<OsString> {
+    attach_yes_no_values(argv.iter().map(OsString::from).collect())
 }
 
 #[cfg(test)]
 pub(crate) fn parse_cli_into(argv: &[&str]) -> Result<Cli, String> {
-    Cli::parse_from_argv(argv)
+    Cli::parse_from_argv(test_argv(argv))
         .and_then(Validated::try_from)
         .map(|Validated(cli)| cli)
         .map_err(|e| err_name(&e))

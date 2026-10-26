@@ -11,6 +11,9 @@
 //! `--search`/`--searchdesc`/`--nodeps` are not here: they select a different
 //! emerge *action* ([`super::EmergeModeArgs`]), or a per-step `EmergeOpts`
 //! override in the staged bootstrap.
+
+use std::ffi::OsString;
+
 #[derive(
     winnow_args::Args, Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize,
 )]
@@ -48,14 +51,15 @@ pub struct MergeFlags {
     /// Build binary packages for all merged packages
     ///
     /// `--buildpkg=n` overrides `FEATURES=buildpkg`.
-    #[arg(
-        short = 'b',
-        long,
-        require_equals,
-        default_missing = "y",
-        value_name = "y|n"
-    )]
+    #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
+    #[serde(deserialize_with = "saved_switch")]
     pub buildpkg: Option<YesNo>,
+
+    /// Same as `--buildpkg`
+    // A separate switch because a short flag never takes a value in emerge: `-bk` is `-b -k`.
+    #[arg(short = 'b', overrides("--buildpkg"))]
+    #[serde(skip)]
+    pub(crate) buildpkg_short: bool,
 
     /// Space-separated atoms never to build binary packages for, whatever enables it
     #[arg(long, value_name = "ATOMS")]
@@ -79,14 +83,14 @@ pub struct MergeFlags {
     /// Fetch binary packages for all requested packages
     ///
     /// `--getbinpkg=n` overrides `FEATURES=getbinpkg`.
-    #[arg(
-        short = 'g',
-        long,
-        require_equals,
-        default_missing = "y",
-        value_name = "y|n"
-    )]
+    #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
+    #[serde(deserialize_with = "saved_switch")]
     pub getbinpkg: Option<YesNo>,
+
+    /// Same as `--getbinpkg`
+    #[arg(short = 'g', overrides("--getbinpkg"))]
+    #[serde(skip)]
+    pub(crate) getbinpkg_short: bool,
 
     /// Only fetch binary packages, do not install
     #[arg(short = 'G', long)]
@@ -236,7 +240,62 @@ impl<'de> serde::Deserialize<'de> for YesNo {
     }
 }
 
+/// A `y`/`n` value, or a plain boolean from older resume files, where `false` meant not given
+fn saved_switch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<YesNo>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Unset(Option<bool>),
+        Value(YesNo),
+    }
+    Ok(match <Saved as serde::Deserialize>::deserialize(d)? {
+        Saved::Unset(Some(true)) => Some(YesNo::Y),
+        Saved::Unset(_) => None,
+        Saved::Value(v) => Some(v),
+    })
+}
+
+/// Long options whose `y`/`n` value may also be the next word, as in emerge's `--buildpkg n`
+const DETACHED_YES_NO: [&str; 2] = ["--buildpkg", "--getbinpkg"];
+
+/// `args` with a detached `y` or `n` after a [`DETACHED_YES_NO`] option attached to it
+///
+/// Any other next word is left alone, so a bare `--buildpkg` can still precede an atom.
+pub fn attach_yes_no_values(args: Vec<OsString>) -> Vec<OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut words = args.into_iter().peekable();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            out.push(word);
+            out.extend(words);
+            break;
+        }
+        let optional = DETACHED_YES_NO.iter().any(|o| word == *o);
+        match words.next_if(|next| optional && (next == "y" || next == "n")) {
+            Some(value) => {
+                let mut joined = word;
+                joined.push("=");
+                joined.push(value);
+                out.push(joined);
+            }
+            None => out.push(word),
+        }
+    }
+    out
+}
+
 impl MergeFlags {
+    /// Fold the short `-b`/`-g` switches into `buildpkg`/`getbinpkg`
+    pub fn resolve_short_flags(mut self) -> Self {
+        if std::mem::take(&mut self.buildpkg_short) {
+            self.buildpkg = Some(YesNo::Y);
+        }
+        if std::mem::take(&mut self.getbinpkg_short) {
+            self.getbinpkg = Some(YesNo::Y);
+        }
+        self
+    }
+
     /// Whether an install follows kept packages' build-time deps: emerge's `--with-bdeps`, `auto`
     /// unless binary packages are in use
     pub fn install_bdeps(&self) -> bool {
@@ -328,6 +387,42 @@ mod tests {
         assert_eq!(off.buildpkg, Some(YesNo::N));
         assert_eq!(off.getbinpkg, Some(YesNo::N));
         assert_eq!(parse(&["em", "emerge", "app-misc/foo"]).buildpkg, None);
+    }
+
+    #[test]
+    fn short_buildpkg_and_getbinpkg_cluster_without_a_value() {
+        let parse = |args: &[&str]| crate::cli::parse_cli(args).merge_flags();
+        let bk = parse(&["em", "emerge", "-bk", "x/y"]);
+        assert_eq!((bk.buildpkg, bk.usepkg), (Some(YesNo::Y), true));
+        let gk = parse(&["em", "emerge", "-gK", "x/y"]);
+        assert_eq!((gk.getbinpkg, gk.usepkgonly), (Some(YesNo::Y), true));
+        let avb = parse(&["em", "-avb", "x/y"]);
+        assert_eq!((avb.ask, avb.buildpkg), (true, Some(YesNo::Y)));
+        let last = parse(&["em", "emerge", "-b", "--buildpkg=n", "x/y"]);
+        assert_eq!(last.buildpkg, Some(YesNo::N));
+        let last = parse(&["em", "emerge", "--buildpkg=n", "-b", "x/y"]);
+        assert_eq!(last.buildpkg, Some(YesNo::Y));
+    }
+
+    #[test]
+    fn a_detached_y_or_n_is_the_long_options_value_and_anything_else_an_atom() {
+        let cli = crate::cli::parse_cli(&["em", "emerge", "--buildpkg", "n", "x/y"]);
+        assert_eq!(cli.merge_flags().buildpkg, Some(YesNo::N));
+        assert_eq!(cli.atoms(), ["x/y"]);
+        let cli = crate::cli::parse_cli(&["em", "emerge", "--getbinpkg", "x/y"]);
+        assert_eq!(cli.merge_flags().getbinpkg, Some(YesNo::Y));
+        assert_eq!(cli.atoms(), ["x/y"]);
+        let cli = crate::cli::parse_cli(&["em", "emerge", "--", "--buildpkg", "n"]);
+        assert_eq!(cli.merge_flags().buildpkg, None);
+    }
+
+    #[test]
+    fn an_old_resume_files_boolean_buildpkg_still_loads() {
+        let old: MergeFlags =
+            serde_json::from_str(r#"{"buildpkg": false, "getbinpkg": true}"#).unwrap();
+        assert_eq!((old.buildpkg, old.getbinpkg), (None, Some(YesNo::Y)));
+        let new: MergeFlags = serde_json::from_str(r#"{"buildpkg": "n"}"#).unwrap();
+        assert_eq!(new.buildpkg, Some(YesNo::N));
     }
 
     #[test]

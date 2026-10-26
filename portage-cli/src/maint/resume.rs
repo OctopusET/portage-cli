@@ -416,6 +416,9 @@ pub fn merge_resume_flags(saved: &MergeFlags, cli: &MergeFlags) -> MergeFlags {
         usepkg: saved.usepkg || cli.usepkg,
         usepkgonly: saved.usepkgonly || cli.usepkgonly,
         getbinpkg: cli.getbinpkg.or(saved.getbinpkg),
+        // `Cli::merge_flags` has already folded `-b`/`-g` into the two above.
+        buildpkg_short: false,
+        getbinpkg_short: false,
         getbinpkgonly: saved.getbinpkgonly || cli.getbinpkgonly,
         emptytree: saved.emptytree || cli.emptytree,
         onlydeps: saved.onlydeps || cli.onlydeps,
