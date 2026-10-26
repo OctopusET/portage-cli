@@ -1304,7 +1304,7 @@ mod tests {
             "ssl? ( dev-libs/openssl ) !ssl? ( dev-libs/libressl )",
             "|| ( ssl? ( dev-libs/openssl ) dev-libs/gnutls )",
             "^^ ( dev-libs/a dev-libs/b ) ?? ( dev-libs/c dev-libs/d )",
-            "!dev-libs/old !!dev-libs/older >=dev-lang/rust-1.75.0:0[ssl]::gentoo",
+            "!dev-libs/old !!dev-libs/older >=dev-lang/rust-1.75.0:0::gentoo[ssl]",
         ];
         for input in inputs {
             let entries = DepEntry::parse(input).unwrap();

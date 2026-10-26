@@ -50,7 +50,7 @@ fn bench_dep_parsing(c: &mut Criterion) {
         ">=dev-lang/rust-1.75.0",
         ">=dev-lang/rust-1.75.0:0",
         ">=dev-lang/rust-1.75.0:0[llvm_targets_AMDGPU]",
-        "!!>=dev-lang/rust-1.75.0:0/1.75[llvm_targets_AMDGPU,-debug]::gentoo",
+        "!!>=dev-lang/rust-1.75.0:0/1.75::gentoo[llvm_targets_AMDGPU,-debug]",
     ];
 
     c.bench_function("dep_parse", |b| {

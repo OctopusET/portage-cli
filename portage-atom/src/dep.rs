@@ -39,9 +39,9 @@ impl fmt::Display for Blocker {
 /// Full dependency atom
 ///
 /// Represents a complete dependency atom as it appears in ebuild `*DEPEND`
-/// variables, e.g. `>=dev-lang/rust-1.75.0:0[ssl]::gentoo`.
+/// variables, e.g. `>=dev-lang/rust-1.75.0:0::gentoo[ssl]`.
 ///
-/// The general form is `[!|!!][op]category/package[-ver][:slot][use][::repo]`.
+/// The general form is `[!|!!][op]category/package[-ver][:slot][::repo][use]`.
 ///
 /// See [PMS 8.3](https://projects.gentoo.org/pms/9/pms.html#package-dependency-specifications)
 /// for the full specification.
@@ -243,6 +243,10 @@ impl fmt::Display for Dep {
             write!(f, ":{}", slot)?;
         }
 
+        if let Some(repo) = &self.repo {
+            write!(f, "::{}", repo)?;
+        }
+
         if let Some(use_deps) = &self.use_deps
             && !use_deps.is_empty()
         {
@@ -254,10 +258,6 @@ impl fmt::Display for Dep {
                 write!(f, "{}", dep)?;
             }
             write!(f, "]")?;
-        }
-
-        if let Some(repo) = &self.repo {
-            write!(f, "::{}", repo)?;
         }
 
         Ok(())
@@ -290,7 +290,7 @@ fn parse_repo(input: &mut &str) -> ModalResult<Interned<DefaultInterner>> {
 
 /// Parse full dependency atom
 ///
-/// Handles: [!|!!][op]cat/pkg[-ver][:slot][use][::repo]
+/// Handles: [!|!!][op]cat/pkg[-ver][:slot][::repo][use]
 pub(crate) fn parse_dep(input: &mut &str) -> ModalResult<Dep> {
     use crate::version::{Operator, parse_operator};
     use winnow::combinator::fail;
@@ -321,9 +321,9 @@ pub(crate) fn parse_dep(input: &mut &str) -> ModalResult<Dep> {
 
     let slot_dep = opt(preceded(':', parse_slot_dep)).parse_next(input)?;
 
-    let use_deps = opt(parse_use_deps).parse_next(input)?;
-
     let repo = opt(preceded("::", parse_repo)).parse_next(input)?;
+
+    let use_deps = opt(parse_use_deps).parse_next(input)?;
 
     Ok(Dep {
         cpn,
@@ -428,8 +428,18 @@ mod tests {
     }
 
     #[test]
+    fn repo_comes_between_slot_and_use_deps() {
+        let dep = Dep::parse("cat/pkg:1::gentoo[foo]").unwrap();
+        assert!(matches!(&dep.slot_dep, Some(SlotDep::Slot { slot: Some(s), .. }) if s.slot == "1"));
+        assert_eq!(dep.repo, Some(Interned::intern("gentoo")));
+        assert_eq!(dep.use_deps.as_ref().unwrap().len(), 1);
+        assert_eq!(dep.to_string(), "cat/pkg:1::gentoo[foo]");
+        assert!(Dep::parse("cat/pkg[foo]::gentoo").is_err());
+    }
+
+    #[test]
     fn test_dep_complex() {
-        let dep = Dep::parse(">=dev-lang/rust-1.75.0:0/1.75[llvm_targets_AMDGPU,-debug]::gentoo")
+        let dep = Dep::parse(">=dev-lang/rust-1.75.0:0/1.75::gentoo[llvm_targets_AMDGPU,-debug]")
             .unwrap();
         assert!(dep.version.is_some());
         assert!(dep.slot_dep.is_some());
@@ -440,7 +450,7 @@ mod tests {
     #[test]
     fn test_dep_with_all_features() {
         // Test a complex dependency using all PMS features
-        let dep_str = "!!>=dev-lang/rust-1.75.0_rc1:0/1.75=[ssl(-),-debug,python?]::gentoo";
+        let dep_str = "!!>=dev-lang/rust-1.75.0_rc1:0/1.75=::gentoo[ssl(-),-debug,python?]";
         let dep = Dep::parse(dep_str).unwrap();
 
         assert_eq!(dep.blocker, Some(Blocker::Strong));
@@ -512,7 +522,7 @@ mod tests {
     #[test]
     #[cfg(feature = "builder")]
     fn test_dep_builder_roundtrip() {
-        let original = Dep::parse(">=dev-lang/rust-1.75.0:0[ssl,-debug]::gentoo").unwrap();
+        let original = Dep::parse(">=dev-lang/rust-1.75.0:0::gentoo[ssl,-debug]").unwrap();
 
         let built = Dep::builder(original.cpn)
             .op(Operator::GreaterOrEqual)
@@ -577,7 +587,7 @@ mod tests {
             "dev-lang/rust:0/1.75",
             "dev-lang/rust[ssl]",
             "dev-lang/rust::gentoo",
-            ">=dev-lang/rust-1.75.0:0[ssl]::gentoo",
+            ">=dev-lang/rust-1.75.0:0::gentoo[ssl]",
         ];
         for input in inputs {
             let dep = Dep::parse(input).unwrap();
