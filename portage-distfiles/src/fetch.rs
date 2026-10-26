@@ -323,7 +323,7 @@ impl Fetcher {
                     if url.starts_with("file://")
                         && source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    eprintln!("fetch: {url}: {e}");
+                    tracing::warn!("fetch: {url}: {e}");
                     let verify = matches!(e, Error::Verify { .. });
                     last_err = Some(e);
                     if verify {
