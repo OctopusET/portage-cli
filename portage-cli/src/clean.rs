@@ -418,15 +418,13 @@ fn dist_candidates(globals: &Cli, opts: &CleanOpts, filters: &Filters) -> Result
     // and keeping one scanner means those rules cannot drift apart.
     // Only the *policy* differs — what counts as referenced.
     let refs: std::collections::HashSet<&str> = wanted.iter().map(String::as_str).collect();
-    // Portage's own bookkeeping in a *local* DISTDIR, which a mirror dir never
-    // has, so the shared scanner does not know about it: `<file>.lock` is a
-    // live fetch lock (removing one lets two fetchers write the same path) and
-    // `.layout.conf.<mirror>` is a cached mirror layout. Neither is a distfile.
+    // Dotfiles are local-DISTDIR bookkeeping, never distfiles: `.<file>.portage_lockfile` is a live
+    // fetch lock (removing one lets two fetchers write the same path), `.layout.conf.<mirror>` a cached layout.
     let keep: std::collections::HashSet<String> = std::fs::read_dir(dir.as_std_path())
         .with_context(|| format!("reading {dir}"))?
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".lock") || n.starts_with('.'))
+        .filter(|n| n.starts_with('.'))
         .collect();
     let state = crate::mirrordist::scan_distdir(&dir, &refs, &keep, false)
         .with_context(|| format!("scanning {dir}"))?;
