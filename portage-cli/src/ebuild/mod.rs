@@ -24,7 +24,7 @@ mod protect;
 
 use binpkg::{BinpkgRecord, binpkg_record, build_binpkg_standalone, ed_image_dir};
 use flock::{CleanWhen, acquire_flock, filter_clean_subs, lock_builddir, lock_merge_flock};
-use protect::scan_cfg;
+use protect::{ConfigMemory, Landing, LiveNode, link_md5, scan_cfg};
 // `etc`/`quickpkg` resolve config protection through this path.
 pub(crate) use protect::ConfigProtect;
 
@@ -2301,6 +2301,31 @@ fn register_merged(
     Ok((installed, spec))
 }
 
+/// The config memory a merge into `root` decides protected updates against
+///
+/// Like portage, a downgrade offers every differing update again, as `NOCONFMEM` does.
+fn config_memory(
+    shell: &portage_repo::EbuildShell,
+    root: &Utf8Path,
+    old_pkg: Option<&InstalledPackage>,
+    ebuild: &Ebuild,
+) -> Result<ConfigMemory> {
+    let if_modified = shell
+        .get_var("FEATURES")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|f| f == "config-protect-if-modified");
+    let downgrade = old_pkg.is_some_and(|o| ebuild.cpv().version < o.cpv().version);
+    let ignore = downgrade || shell.get_var("NOCONFMEM").is_some_and(|v| !v.is_empty());
+    let old = match old_pkg {
+        Some(o) => o
+            .contents()
+            .context("reading the replaced package's CONTENTS")?,
+        None => vec![],
+    };
+    Ok(ConfigMemory::load(root, old, if_modified, ignore))
+}
+
 /// Tell the user which config files were installed under a `._cfg` name
 fn report_protected(protected: &[Utf8PathBuf]) {
     if protected.is_empty() {
@@ -2402,18 +2427,23 @@ async fn run_merge(
         .await
         .context("pkg_preinst failed")?;
 
+    let mut memory = config_memory(shell, root, old_pkg.as_ref(), ebuild)?;
     let WalkResult {
         contents,
         size,
         protected,
-    } = walk_image(
+    } = walk_image_with(
         &image_dir,
         &work_root.join("image"),
         root,
         &cp,
         rewrite_d,
         Walk::Merge,
+        &mut memory,
     )?;
+    if let Err(e) = memory.store() {
+        crate::style::warn_line!("could not update the config memory file: {e}");
+    }
 
     let preserve_is_local = merge_state.is_none();
     let mut local_preserve =
@@ -3133,9 +3163,32 @@ fn walk_image(
     rewrite_d: bool,
     walk: Walk,
 ) -> Result<WalkResult> {
+    let mut memory = ConfigMemory::default();
+    walk_image_with(
+        image_dir,
+        d_dir,
+        dest_root,
+        cp,
+        rewrite_d,
+        walk,
+        &mut memory,
+    )
+}
+
+/// [`walk_image`] deciding config-protected updates against `memory`
+fn walk_image_with(
+    image_dir: &Utf8Path,
+    d_dir: &Utf8Path,
+    dest_root: &Utf8Path,
+    cp: &ConfigProtect,
+    rewrite_d: bool,
+    walk: Walk,
+    memory: &mut ConfigMemory,
+) -> Result<WalkResult> {
     let mut pass = ImagePass {
         d_dir,
         cp,
+        memory,
         rewrite_d,
         walk,
         result: WalkResult {
@@ -3212,6 +3265,7 @@ impl ImageEntry {
 struct ImagePass<'a> {
     d_dir: &'a Utf8Path,
     cp: &'a ConfigProtect,
+    memory: &'a mut ConfigMemory,
     rewrite_d: bool,
     walk: Walk,
     result: WalkResult,
@@ -3276,25 +3330,20 @@ impl ImagePass<'_> {
             tracing::info!("rewriting absolute symlink {installed} -> {target} to {rewritten}");
             target = rewritten;
         }
-        // Symlinks are config-protectable too (portage bug #485598):
-        // divert when an existing link points somewhere different.
+        // Symlinks are config-protectable too (portage bug #485598).
         let write_path = if self.cp.is_protected(installed) {
-            match std::fs::read_link(dest_path.as_std_path()) {
-                Ok(existing) if existing == target.as_std_path() => dest_path.clone(),
-                Ok(_) => {
-                    let (next, latest) = scan_cfg(dest_path);
-                    let reuse = latest.filter(|p| {
-                        std::fs::read_link(p.as_std_path()).is_ok_and(|t| t == target.as_std_path())
-                    });
-                    self.result.protected.push(installed.clone());
-                    reuse.unwrap_or(next)
-                }
-                Err(_) => dest_path.clone(),
-            }
+            self.protected_path(
+                installed,
+                dest_path,
+                &link_md5(target.as_std_path()),
+                Some(&target),
+            )
         } else {
-            dest_path.clone()
+            Some(dest_path.clone())
         };
-        if self.merging() {
+        if self.merging()
+            && let Some(write_path) = write_path
+        {
             if std::fs::symlink_metadata(write_path.as_std_path()).is_ok() {
                 std::fs::remove_file(write_path.as_std_path())
                     .with_context(|| format!("removing {write_path}"))?;
@@ -3326,40 +3375,51 @@ impl ImagePass<'_> {
             std::fs::read(src_path.as_std_path()).with_context(|| format!("reading {src_path}"))?;
         let md5_str = format!("{:x}", md5::compute(&src_data));
 
-        // Config protection: an existing, differing file in a protected path
-        // is written to a `._cfg` sidecar (.keep placeholders are never
-        // protected). CONTENTS still records the real path with the new md5,
-        // matching portage.
+        // CONTENTS records the real path with the new md5 wherever the update
+        // lands, matching portage. `.keep` placeholders are never protected.
         let is_keep = meta.len() == 0
             && installed
                 .file_name()
                 .is_some_and(|n| n.starts_with(".keep"));
-        let write_path = if !is_keep
-            && self.cp.is_protected(installed)
-            && std::fs::symlink_metadata(dest_path.as_std_path()).is_ok()
-        {
-            let same = std::fs::read(dest_path.as_std_path())
-                .is_ok_and(|d| format!("{:x}", md5::compute(&d)) == md5_str);
-            if same {
-                dest_path.clone()
-            } else {
-                let (next, latest) = scan_cfg(dest_path);
-                let reuse = latest.filter(|p| {
-                    std::fs::read(p.as_std_path())
-                        .is_ok_and(|d| format!("{:x}", md5::compute(&d)) == md5_str)
-                });
-                self.result.protected.push(installed.clone());
-                reuse.unwrap_or(next)
-            }
+        let write_path = if !is_keep && self.cp.is_protected(installed) {
+            self.protected_path(installed, dest_path, &md5_str, None)
         } else {
-            dest_path.clone()
+            Some(dest_path.clone())
         };
 
-        if self.merging() {
+        if self.merging()
+            && let Some(write_path) = write_path
+        {
             self.install_file(src_path, &write_path, meta)?;
         }
         self.record(ContentsKind::Obj, entry, Some(md5_str), None);
         Ok(())
+    }
+
+    /// Where the update of protected `installed` is written: the live path, a
+    /// `._cfg` sibling, or `None` to leave the live path as it is
+    fn protected_path(
+        &mut self,
+        installed: &Utf8Path,
+        dest_path: &Utf8Path,
+        src_md5: &str,
+        src_link: Option<&Utf8Path>,
+    ) -> Option<Utf8PathBuf> {
+        let live = LiveNode::at(dest_path);
+        match self
+            .memory
+            .decide(installed, src_md5, src_link, live.as_ref())
+        {
+            Landing::Replace => Some(dest_path.to_owned()),
+            Landing::Keep => None,
+            Landing::Divert => {
+                let (next, latest) = scan_cfg(dest_path);
+                let reuse =
+                    latest.filter(|p| LiveNode::at(p).is_some_and(|n| n.holds(src_md5, src_link)));
+                self.result.protected.push(installed.to_owned());
+                Some(reuse.unwrap_or(next))
+            }
+        }
     }
 
     /// Put one regular file of the image at `write_path`

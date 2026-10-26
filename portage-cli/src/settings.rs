@@ -162,15 +162,28 @@ const SEEDED: &[&str] = &[
     "UNINSTALL_IGNORE",
 ];
 
-/// Give a build shell the [`SEEDED`] values
+/// FEATURES em implements that make.globals may enable: the build shell's FEATURES lists what
+/// em provides, so only these are carried over from the settings
+const PROVIDED_FEATURES: &[&str] = &["config-protect-if-modified"];
+
+/// Give a build shell the [`SEEDED`] values and the enabled [`PROVIDED_FEATURES`]
 pub(crate) async fn seed_build_shell(shell: &mut EbuildShell, settings: &Settings) -> Result<()> {
-    let script: String = SEEDED
+    let mut script: String = SEEDED
         .iter()
         .filter_map(|&name| {
             let value = settings.get(name)?;
             Some(format!("export {name}={}\n", shell_quote(value)))
         })
         .collect();
+    let mut features = shell.get_var("FEATURES").unwrap_or_default();
+    let enabled = settings.get("FEATURES").unwrap_or_default();
+    for &f in PROVIDED_FEATURES {
+        let has = |list: &str| list.split_whitespace().any(|w| w == f);
+        if has(enabled) && !has(&features) {
+            features = format!("{features} {f}").trim_start().to_owned();
+            script += &format!("export FEATURES={}\n", shell_quote(&features));
+        }
+    }
     shell
         .run_string(&script)
         .await
