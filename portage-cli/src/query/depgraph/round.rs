@@ -112,6 +112,8 @@ pub(super) struct RoundOutcome {
     pub(super) widened_autounmask_candidates: Vec<repo::AutounmaskCandidate>,
     /// Installed `:=` consumers this round's plan invalidates, each with a visible version to build
     pub(super) slot_op_rebuilds: Vec<subslot::SubslotRebuild>,
+    /// Invalidated `:=` consumers with no visible version to rebuild
+    pub(super) slot_op_unbuildable: Vec<subslot::SubslotRebuild>,
     pub(super) dep_conflicts: Vec<conflicts::Conflict>,
     // Target-routed merge plan entries, kept alongside `dep_conflicts` for
     // the blocker classifier (`conflicts::classify_blockers`), which needs
@@ -796,6 +798,7 @@ pub(super) fn solve_round(
     // plan invalidates. The caller re-solves with them rebuilt, so they pass every plan filter
     // (emerge's __auto_slot_operator_replace_installed__ set).
     let mut slot_op_rebuilds = Vec::new();
+    let mut slot_op_unbuildable = Vec::new();
     if !empty {
         let mut planned_slots: HashMap<Cpn, Vec<(Version, portage_atom::Slot)>> = HashMap::new();
         for (pkg, ver) in &order {
@@ -816,18 +819,10 @@ pub(super) fn solve_round(
             Some([&meta.depend.list()[..], &meta.rdepend.list()[..]].concat())
         };
         let deep_update: Option<subslot::TreeDeps<'_>> = (update && deep).then_some(&tree_deps);
-        for rb in subslot::find_rebuilds(target_installed, &planned_slots, &in_plan, deep_update) {
-            if rebuild_visible(data, target_policy, &rb) {
-                slot_op_rebuilds.push(rb);
-            } else {
-                crate::style::warn_line!(
-                    "{}-{} needs a rebuild for a changed slot-operator dependency, \
-                     but no visible version of it is available",
-                    rb.cpn,
-                    rb.version
-                );
-            }
-        }
+        let found = subslot::find_rebuilds(target_installed, &planned_slots, &in_plan, deep_update);
+        (slot_op_rebuilds, slot_op_unbuildable) = found
+            .into_iter()
+            .partition(|rb| rebuild_visible(data, target_policy, rb));
     }
 
     // Shared by both closure walks below: `accept_keywords` here is
@@ -891,6 +886,7 @@ pub(super) fn solve_round(
         autounmask_candidates,
         widened_autounmask_candidates: widened_candidates,
         slot_op_rebuilds,
+        slot_op_unbuildable,
         dep_conflicts,
         proposed,
         exclude_omitted,

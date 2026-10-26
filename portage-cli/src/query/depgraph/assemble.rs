@@ -90,12 +90,22 @@ pub(super) fn assemble(
         autounmask_candidates,
         widened_autounmask_candidates,
         slot_op_rebuilds: _,
+        slot_op_unbuildable,
         dep_conflicts,
         proposed,
         exclude_omitted,
         resume_omitted,
         round_metrics: _,
     } = outcome;
+
+    for rb in &slot_op_unbuildable {
+        crate::style::warn_line!(
+            "{}-{} needs a rebuild for a changed slot-operator dependency, \
+             but no visible version of it is available",
+            rb.cpn,
+            rb.version
+        );
+    }
 
     if exclude_omitted > 0 {
         println!(
