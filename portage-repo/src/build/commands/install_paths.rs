@@ -29,9 +29,13 @@ pub(crate) struct InstallPaths(Arc<Mutex<Lists>>);
 /// Snapshot of the four path lists, handed to the post-install pass
 #[derive(Default)]
 pub struct InstallPathLists {
+    /// `docompress` paths
     pub compress: Vec<String>,
+    /// `docompress -x` paths
     pub compress_exclude: Vec<String>,
+    /// `dostrip` paths
     pub strip: Vec<String>,
+    /// `dostrip -x` paths
     pub strip_exclude: Vec<String>,
 }
 

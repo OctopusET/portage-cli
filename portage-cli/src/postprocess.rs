@@ -307,36 +307,59 @@ pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<Pos
             let _ = std::fs::set_permissions(on_disk.as_std_path(), p);
         }
         let ok = if archive {
-            run(tool(&cfg.strip_cmd, cfg).arg("-g").arg(on_disk))?
-                && run(tool(&cfg.ranlib_cmd, cfg).arg(on_disk))?
+            run(tool(&cfg.strip_cmd, cfg).arg("-g").arg(on_disk), installed)
+                && run(tool(&cfg.ranlib_cmd, cfg).arg(on_disk), installed)
         } else {
             if let Some(split) = &cfg.split_debug
                 && !installed.as_str().ends_with(".debug")
             {
                 save_debug(image_dir, installed, on_disk, &perms, split, cfg)?;
             }
-            run(tool(&cfg.strip_cmd, cfg)
-                .args(&cfg.strip_flags)
-                .arg(on_disk))?
+            run(
+                tool(&cfg.strip_cmd, cfg)
+                    .args(&cfg.strip_flags)
+                    .arg(on_disk),
+                installed,
+            )
         };
         if !writable {
             let _ = std::fs::set_permissions(on_disk.as_std_path(), perms);
         }
         if ok {
             stats.stripped += 1;
-        } else {
-            crate::style::warn_line!("estrip: {} failed on {installed}", cfg.strip_cmd);
         }
     }
 
     Ok(stats)
 }
 
-fn run(cmd: &mut std::process::Command) -> Result<bool> {
-    let status = cmd
-        .status()
-        .with_context(|| format!("running {}", cmd.get_program().display()))?;
-    Ok(status.success())
+/// Run one tool on `installed`; a failure, a missing tool included, only warns, as in estrip
+fn run(cmd: &mut std::process::Command, installed: &Utf8Path) -> bool {
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    match cmd.status() {
+        Ok(status) if status.success() => true,
+        Ok(_) => {
+            crate::style::warn_line!("estrip: {program} failed on {installed}");
+            false
+        }
+        Err(e) => {
+            crate::style::warn_line!("estrip: {program} failed on {installed}: {e}");
+            false
+        }
+    }
+}
+
+/// `set` (the tool's variable) or else `derived`, when the build `PATH` has it, else `bare`,
+/// as estrip falls back to the unprefixed tool
+pub fn binutil(set: Option<String>, derived: String, bare: &str, path: Option<&str>) -> String {
+    let name = set.unwrap_or(derived);
+    let found = if name.contains('/') {
+        Utf8Path::new(&name).is_file()
+    } else {
+        let path = path.map_or_else(|| std::env::var("PATH").unwrap_or_default(), str::to_string);
+        std::env::split_paths(&path).any(|dir| dir.join(&name).is_file())
+    };
+    if found { name } else { bare.to_string() }
 }
 
 /// Copy `on_disk`'s debug info to the splitdebug tree and link the object to it
@@ -359,8 +382,7 @@ fn save_debug(
     if split.compress {
         keep.arg("--compress-debug-sections");
     }
-    if !run(keep.arg(on_disk).arg(&debug))? {
-        crate::style::warn_line!("estrip: {} could not split {installed}", cfg.objcopy_cmd);
+    if !run(keep.arg(on_disk).arg(&debug), installed) {
         return Ok(());
     }
     // A setuid/setgid object's symbols stay unreadable to group and others.
@@ -372,12 +394,12 @@ fn save_debug(
         let _ =
             std::fs::set_permissions(debug.as_std_path(), std::fs::Permissions::from_mode(mode));
     }
-    if !run(tool(&cfg.objcopy_cmd, cfg)
-        .arg(format!("--add-gnu-debuglink={debug}"))
-        .arg(on_disk))?
-    {
-        crate::style::warn_line!("estrip: {} could not link {installed}", cfg.objcopy_cmd);
-    }
+    run(
+        tool(&cfg.objcopy_cmd, cfg)
+            .arg(format!("--add-gnu-debuglink={debug}"))
+            .arg(on_disk),
+        installed,
+    );
     Ok(())
 }
 
@@ -545,6 +567,40 @@ mod tests {
                 "strip --custom usr/lib64/libx.so",
                 "strip -g usr/lib64/libx.a",
             ]
+        );
+    }
+
+    #[test]
+    fn a_missing_tool_warns_instead_of_failing_the_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let (mut cfg, log) = fake_tools(&root);
+        cfg.ranlib_cmd = root.join("eu-ranlib").into_string();
+        let image = root.join("image");
+        write(&image.join("usr/lib64/libx.a"), b"!<arch>\nmembers");
+        write(&image.join("usr/lib64/libx.so"), &tiny_elf());
+
+        assert_eq!(post_process_image(&image, &cfg).unwrap().stripped, 1);
+        assert_eq!(logged(&log, &image).len(), 2);
+    }
+
+    #[test]
+    fn binutil_falls_back_to_the_bare_tool_off_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        write(&dir.join("x86_64-pc-linux-gnu-ranlib"), b"");
+        let path = Some(dir.as_str());
+        let pick = |set: Option<&str>, derived: &str| {
+            binutil(set.map(str::to_string), derived.to_string(), "ranlib", path)
+        };
+        assert_eq!(
+            pick(None, "x86_64-pc-linux-gnu-ranlib"),
+            "x86_64-pc-linux-gnu-ranlib"
+        );
+        assert_eq!(pick(None, "eu-ranlib"), "ranlib");
+        assert_eq!(
+            pick(Some("my-ranlib"), "x86_64-pc-linux-gnu-ranlib"),
+            "ranlib"
         );
     }
 

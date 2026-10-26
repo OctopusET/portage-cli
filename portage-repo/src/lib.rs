@@ -52,6 +52,7 @@ pub mod userdb;
 
 pub use build::ACTION_TARGET;
 pub use build::EbuildEnv;
+pub use build::commands::install_paths::InstallPathLists;
 pub use build::inherit;
 
 pub use error::{Error, Result};

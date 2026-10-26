@@ -2110,97 +2110,7 @@ fn post_process_after_install(
 
     // docompress/dostrip path lists the install phase accumulated (PMS
     // 12.3.9/12.3.10), pushed into shared state by the Rust builtins.
-    let paths = shell.install_paths();
-    let to_paths =
-        |v: Vec<String>| -> Vec<Utf8PathBuf> { v.into_iter().map(Utf8PathBuf::from).collect() };
-
-    // PMS 12.3.9 defaults, then whatever the ebuild added via docompress.
-    let mut compress_include = vec![
-        Utf8PathBuf::from("/usr/share/doc"),
-        Utf8PathBuf::from("/usr/share/info"),
-        Utf8PathBuf::from("/usr/share/man"),
-    ];
-    compress_include.extend(to_paths(paths.compress));
-    let mut compress_exclude = to_paths(paths.compress_exclude);
-    if let Some(pf) = shell.get_var("PF") {
-        compress_exclude.push(Utf8Path::new("/usr/share/doc").join(pf).join("html"));
-    }
-
-    let compress_cmd = shell
-        .get_var("PORTAGE_COMPRESS")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "bzip2".to_string());
-    let compress_flags: Vec<String> = shell
-        .get_var("PORTAGE_COMPRESS_FLAGS")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "-9".to_string())
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
-
-    // Conservative RESTRICT check: a conditional `use? ( strip )` counts as
-    // restricted; the cost is only an unstripped binary.
-    let restricted = |token: &str| {
-        shell
-            .get_var("RESTRICT")
-            .unwrap_or_default()
-            .split_whitespace()
-            .any(|t| t == token)
-    };
-    let strip = if features.contains("nostrip") {
-        postprocess::StripMode::Disabled
-    } else if restricted("strip") {
-        // dostrip <path> opts paths back in under RESTRICT=strip.
-        postprocess::StripMode::Only(to_paths(paths.strip))
-    } else {
-        postprocess::StripMode::All
-    };
-
-    let var = |name: &str| shell.get_var(name).filter(|s| !s.is_empty());
-    let strip_cmd = var("STRIP").unwrap_or_else(|| "strip".to_string());
-    // The strip's sibling tool, so `x86_64-pc-linux-gnu-strip` pairs with `x86_64-pc-linux-gnu-objcopy`.
-    let sibling = |name: &str| {
-        let prefix = strip_cmd.strip_suffix("strip").unwrap_or("");
-        format!("{prefix}{name}")
-    };
-    let split_debug = (features.contains("splitdebug") && !restricted("splitdebug")).then(|| {
-        postprocess::SplitDebug {
-            dir: Utf8PathBuf::from(format!(
-                "/usr/lib/debug{}",
-                shell.get_var("EPREFIX").unwrap_or_default()
-            )),
-            compress: features.contains("compressdebug"),
-        }
-    });
-    let no_dostrip = shell
-        .get_var("EAPI")
-        .and_then(|e| e.parse::<portage_metadata::Eapi>().ok())
-        .is_some_and(|e| e < portage_metadata::Eapi::Seven);
-    let strip_mask = if no_dostrip {
-        var("STRIP_MASK")
-            .unwrap_or_default()
-            .split_whitespace()
-            .filter_map(|g| glob::Pattern::new(g).ok())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let cfg = postprocess::PostProcess {
-        compress_include,
-        compress_exclude,
-        compress_cmd,
-        compress_flags,
-        strip,
-        strip_exclude: to_paths(paths.strip_exclude),
-        strip_mask,
-        strip_flags: postprocess::strip_flags(shell.get_var("PORTAGE_STRIP_FLAGS").as_deref()),
-        objcopy_cmd: var("OBJCOPY").unwrap_or_else(|| sibling("objcopy")),
-        ranlib_cmd: var("RANLIB").unwrap_or_else(|| sibling("ranlib")),
-        strip_cmd,
-        split_debug,
-        path: shell.get_var("PATH"),
-    };
+    let cfg = post_process_config(|name| shell.get_var(name), shell.install_paths(), features);
 
     let stats = postprocess::post_process_image(&image_dir, &cfg)?;
     if stats.compressed + stats.relinked + stats.stripped > 0 {
@@ -2216,6 +2126,102 @@ fn post_process_after_install(
         );
     }
     Ok(())
+}
+
+/// The post-install settings from the ebuild's variables, its install path lists and FEATURES
+fn post_process_config(
+    get: impl Fn(&str) -> Option<String>,
+    paths: portage_repo::InstallPathLists,
+    features: &std::collections::HashSet<String>,
+) -> postprocess::PostProcess {
+    let to_paths =
+        |v: Vec<String>| -> Vec<Utf8PathBuf> { v.into_iter().map(Utf8PathBuf::from).collect() };
+
+    // PMS 12.3.9 defaults, then whatever the ebuild added via docompress.
+    let mut compress_include = vec![
+        Utf8PathBuf::from("/usr/share/doc"),
+        Utf8PathBuf::from("/usr/share/info"),
+        Utf8PathBuf::from("/usr/share/man"),
+    ];
+    compress_include.extend(to_paths(paths.compress));
+    let mut compress_exclude = to_paths(paths.compress_exclude);
+    if let Some(pf) = get("PF") {
+        compress_exclude.push(Utf8Path::new("/usr/share/doc").join(pf).join("html"));
+    }
+
+    let compress_cmd = get("PORTAGE_COMPRESS")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bzip2".to_string());
+    let compress_flags: Vec<String> = get("PORTAGE_COMPRESS_FLAGS")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "-9".to_string())
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+
+    // Conservative RESTRICT check: a conditional `use? ( strip )` counts as
+    // restricted; the cost is only an unstripped binary.
+    let restricted = |token: &str| {
+        get("RESTRICT")
+            .unwrap_or_default()
+            .split_whitespace()
+            .any(|t| t == token)
+    };
+    let strip = if features.contains("nostrip") {
+        postprocess::StripMode::Disabled
+    } else if restricted("strip") {
+        // dostrip <path> opts paths back in under RESTRICT=strip.
+        postprocess::StripMode::Only(to_paths(paths.strip))
+    } else {
+        postprocess::StripMode::All
+    };
+
+    let var = |name: &str| get(name).filter(|s| !s.is_empty());
+    let path_var = get("PATH");
+    let path = path_var.as_deref();
+    let strip_cmd = var("STRIP").unwrap_or_else(|| "strip".to_string());
+    // The strip's sibling tool, so `x86_64-pc-linux-gnu-strip` pairs with `x86_64-pc-linux-gnu-objcopy`.
+    let sibling = |name: &str| {
+        let prefix = strip_cmd.strip_suffix("strip").unwrap_or("");
+        format!("{prefix}{name}")
+    };
+    let split_debug = (features.contains("splitdebug") && !restricted("splitdebug")).then(|| {
+        postprocess::SplitDebug {
+            dir: Utf8PathBuf::from(format!(
+                "/usr/lib/debug{}",
+                get("EPREFIX").unwrap_or_default()
+            )),
+            compress: features.contains("compressdebug"),
+        }
+    });
+    let no_dostrip = get("EAPI")
+        .and_then(|e| e.parse::<portage_metadata::Eapi>().ok())
+        .is_some_and(|e| e < portage_metadata::Eapi::Seven);
+    let strip_mask = if no_dostrip {
+        var("STRIP_MASK")
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|g| glob::Pattern::new(g).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    postprocess::PostProcess {
+        compress_include,
+        compress_exclude,
+        compress_cmd,
+        compress_flags,
+        strip,
+        strip_exclude: to_paths(paths.strip_exclude),
+        strip_mask,
+        strip_flags: postprocess::strip_flags(get("PORTAGE_STRIP_FLAGS").as_deref()),
+        objcopy_cmd: postprocess::binutil(var("OBJCOPY"), sibling("objcopy"), "objcopy", path),
+        ranlib_cmd: postprocess::binutil(var("RANLIB"), sibling("ranlib"), "ranlib", path),
+        strip_cmd,
+        split_debug,
+        path: path.map(str::to_string),
+    }
 }
 
 struct PhaseContext<'a> {
@@ -4884,6 +4890,28 @@ mod tests {
         assert_eq!(checksum_try_mirrors(None, 5), 5);
         assert_eq!(checksum_try_mirrors(Some("0"), 5), 5);
         assert_eq!(checksum_try_mirrors(Some("many"), 5), 5);
+    }
+
+    #[test]
+    fn post_process_config_gates_strip_mask_on_eapi_and_honours_restrict_splitdebug() {
+        let config = |eapi: &str, restrict: &str| {
+            let vars = [
+                ("EAPI", eapi),
+                ("RESTRICT", restrict),
+                ("STRIP_MASK", "*/plugins/*"),
+            ];
+            let get = |name: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.to_string())
+            };
+            let features = ["splitdebug".to_string()].into();
+            post_process_config(get, Default::default(), &features)
+        };
+        assert_eq!(config("6", "").strip_mask.len(), 1);
+        assert!(config("8", "").strip_mask.is_empty());
+        assert!(config("8", "").split_debug.is_some());
+        assert!(config("8", "test splitdebug").split_debug.is_none());
     }
 
     #[tokio::test]
