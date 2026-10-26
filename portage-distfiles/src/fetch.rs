@@ -281,7 +281,9 @@ impl Fetcher {
         // Try each URL in order.
         let mut last_err = None;
         for url in &df.urls {
-            let result = self.fetch_one_url(url, &dest, manifest_entry).await;
+            let result = self
+                .fetch_one_url(&self.config.strategy, url, &dest, manifest_entry)
+                .await;
             match result {
                 Ok(()) => return Ok(FetchStatus::Downloaded),
                 Err(e) => {
@@ -293,16 +295,13 @@ impl Fetcher {
 
         // Primary strategy exhausted — try fallback command if configured.
         if let Some(cmd_template) = &self.config.fallback_command {
-            let temp = download_path(&dest);
+            let fallback = FetchStrategy::Command(cmd_template.clone());
             for url in &df.urls {
-                let result = self
-                    .fetch_command(cmd_template, url, &temp, manifest_entry)
-                    .await;
-                match result {
-                    Ok(()) => {
-                        rename_into_place(&temp, &dest)?;
-                        return Ok(FetchStatus::Downloaded);
-                    }
+                match self
+                    .fetch_one_url(&fallback, url, &dest, manifest_entry)
+                    .await
+                {
+                    Ok(()) => return Ok(FetchStatus::Downloaded),
                     Err(e) => last_err = Some(e),
                 }
             }
@@ -370,15 +369,16 @@ impl Fetcher {
     // Internal
     // -----------------------------------------------------------------------
 
-    /// Download `url` to `dest`'s [`download_path`], verify it, then rename it over `dest`
+    /// Download `url` with `strategy` to `dest`'s [`download_path`], verify it, then rename it over `dest`
     async fn fetch_one_url(
         &self,
+        strategy: &FetchStrategy,
         url: &str,
         dest: &Utf8Path,
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
         let temp = download_path(dest);
-        match &self.config.strategy {
+        match strategy {
             FetchStrategy::Builtin => self.fetch_builtin(url, &temp, manifest_entry).await?,
             FetchStrategy::Command(template) => {
                 self.fetch_command(template, url, &temp, manifest_entry)
