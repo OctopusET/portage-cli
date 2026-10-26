@@ -777,6 +777,8 @@ Entries keep the `CFLAGS` family and `BUILD_ENV_KEY` for em's reuse check.
 `--binpkg-changed-deps` rules, so the plan always resolves the ebuild's dependencies with the
 configured USE. Under `-K`, where a binpkg is installed and shown with its own USE, portage
 resolves that binpkg's dependencies instead. Rejected binpkgs get no "ignored binary packages" notice.
+Under `-pK`, a package with no acceptable binpkg shows as `[ebuild]` and fails only at merge
+time, where emerge fails the resolve.
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
