@@ -144,15 +144,12 @@ PRUNE_OUT="$(em maint binpkg prune --dry-run)"
 echo "$PRUNE_OUT"
 echo "$PRUNE_OUT" | grep -q 'nothing to prune' && pass "prune correctly finds nothing to collapse (distinct keys, not duplicates)" || fail "unexpected prune output: $PRUNE_OUT"
 
-# The `-p` preview's binary/ebuild tag is a known, documented simplification
-# (query/depgraph/output.rs: `find_reusable(&cpv, &use, "", "")` — always
-# passes an empty CHOST/build_env_key, so it never reflects the real
-# per-key reuse decision, only real (non-preview) merges do — see the
-# "Empty CHOST and build_env_key: preview skips both gates" comment there).
-# So the reuse gate itself is verified via a REAL merge instead: `-e`
-# (--emptytree) forces a merge attempt despite already being installed,
-# `-k` allows local binpkg reuse; a real *reuse* never re-invokes the
-# compiler, a real *rebuild* does — checked by grepping for a compile line.
+# The preview applies the same CHOST and build-env key gates as the merge; the
+# real merge below proves the merge side: a reuse never invokes the compiler.
+echo "--- reuse gate: -pe -k under pass-2's CFLAGS previews the binpkg ---"
+PREVIEW_OUT="$(em -pe -k sys-libs/zlib)"
+echo "$PREVIEW_OUT"
+echo "$PREVIEW_OUT" | grep -q '^\[binary.*sys-libs/zlib' && pass "preview shows the keyed variant as [binary]" || fail "preview did not show [binary] for matching CFLAGS"
 echo "--- reuse gate: real -e -k merge under pass-2's CFLAGS must reuse, not rebuild ---"
 REUSE_OUT="$(em -e -k sys-libs/zlib)"
 echo "$REUSE_OUT"
@@ -170,6 +167,9 @@ CXXFLAGS="-O2 -pipe"
 ACCEPT_KEYWORDS="~arm64"
 FEATURES="-sandbox -usersandbox"
 EOF
+PREVIEW_OUT2="$(em -pe -k sys-libs/zlib)"
+echo "$PREVIEW_OUT2"
+echo "$PREVIEW_OUT2" | grep -q '^\[ebuild.*sys-libs/zlib' && pass "preview shows [ebuild] under generic CFLAGS" || fail "preview did not show [ebuild] under generic CFLAGS"
 REUSE_OUT2="$(em -e -k sys-libs/zlib)"
 echo "$REUSE_OUT2"
 echo "$REUSE_OUT2" | grep -q -- '-c -o' && pass "generic CFLAGS correctly rebuilt instead of reusing a march-keyed binary" || fail "expected a real rebuild (compiler invocation) under generic CFLAGS, got: $REUSE_OUT2"
