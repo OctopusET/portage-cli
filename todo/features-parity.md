@@ -70,7 +70,7 @@ No meaning for em:
    Portage.
 4. `em --info`/`portageq envvar FEATURES` show Portage's stacked value (make.globals included)
    once [[portage-config-layering]] step 2 exists; the build environment shows em's. Say so in
-   `--info` if the two differ.
+   `--info` if the two differ. (`--info` names them: "Build environment FEATURES omits:", 2026-10-26.)
 
 ## Done (2026-10-27)
 

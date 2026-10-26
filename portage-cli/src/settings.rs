@@ -159,7 +159,6 @@ const SEEDED: &[&str] = &[
     "COLLISION_IGNORE",
     "CONFIG_PROTECT",
     "CONFIG_PROTECT_MASK",
-    "FEATURES",
     "GENTOO_MIRRORS",
     "PORTAGE_ELOG_CLASSES",
     "PORTAGE_ELOG_SYSTEM",
@@ -245,16 +244,20 @@ pub(crate) async fn seed_build_shell(
             Some(format!("export {name}={}\n", shell_quote(value)))
         })
         .collect();
-    if settings.is_none() {
-        let current = shell.get_var("FEATURES").unwrap_or_default();
-        let mut words: Vec<&str> = current.split_whitespace().collect();
-        words.extend(
-            EM_FEATURES
-                .split_whitespace()
-                .filter(|f| !has_feature(&current, f)),
-        );
-        script += &format!("export FEATURES={}\n", shell_quote(&words.join(" ")));
-    }
+    let features = match settings {
+        Some(_) => features(settings).to_owned(),
+        None => {
+            let current = shell.get_var("FEATURES").unwrap_or_default();
+            let mut words: Vec<&str> = current.split_whitespace().collect();
+            words.extend(
+                EM_FEATURES
+                    .split_whitespace()
+                    .filter(|f| !has_feature(&current, f)),
+            );
+            words.join(" ")
+        }
+    };
+    script += &format!("export FEATURES={}\n", shell_quote(&features));
     shell
         .run_string(&script)
         .await

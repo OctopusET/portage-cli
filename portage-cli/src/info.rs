@@ -206,6 +206,19 @@ struct Info {
     unset: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     packages: Vec<PackageSettings>,
+    /// FEATURES Portage's stacked value enables that the build environment does not list, since it
+    /// names only what em provides
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    build_env_omits: Vec<String>,
+}
+
+/// The words of `stacked` that `build` lacks
+fn features_omitted(stacked: &str, build: &str) -> Vec<String> {
+    stacked
+        .split_whitespace()
+        .filter(|f| !build.split_whitespace().any(|b| b == *f))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The installed packages `atoms` name, failing after a warning for each atom naming none
@@ -442,6 +455,15 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
         .map(|pkg| package_settings(pkg, &var, &expand, &hidden, arch.as_deref()))
         .collect::<Result<Vec<_>>>()?;
 
+    let build_env_omits = match loaded.as_deref() {
+        Some(s) => {
+            let stacked = s.get("FEATURES").unwrap_or_default();
+            let as_root = rustix::process::getuid().is_root();
+            features_omitted(stacked, &crate::settings::build_features(stacked, as_root))
+        }
+        None => Vec::new(),
+    };
+
     let info = Info {
         em_version: env!("CARGO_PKG_VERSION").to_string(),
         profile,
@@ -458,6 +480,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
         vars,
         unset,
         packages,
+        build_env_omits,
     };
 
     if cli.merge_flags().json {
@@ -627,6 +650,13 @@ fn print_text(info: &Info) -> Result<()> {
     }
     if !info.unset.is_empty() {
         writeln!(out, "{C_DIM}Unset:{C_DIM:#}  {}", info.unset.join(", "))?;
+    }
+    if !info.build_env_omits.is_empty() {
+        writeln!(
+            out,
+            "{C_DIM}Build environment FEATURES omits:{C_DIM:#} {}",
+            info.build_env_omits.join(" ")
+        )?;
     }
 
     if !info.packages.is_empty() {
@@ -888,6 +918,16 @@ mod tests {
         std::fs::create_dir_all(root.join("var/db/pkg")).unwrap();
         std::fs::write(root.join("etc/portage/sets/myuserset"), "app-shells/bash\n").unwrap();
         (tmp, root)
+    }
+
+    #[test]
+    fn the_build_env_note_names_the_features_em_does_not_provide() {
+        let build = crate::settings::build_features("sandbox unmerge-orphans", true);
+        assert_eq!(
+            features_omitted("sandbox unmerge-orphans", &build),
+            ["sandbox"]
+        );
+        assert!(features_omitted("candy", "candy").is_empty());
     }
 
     #[test]
