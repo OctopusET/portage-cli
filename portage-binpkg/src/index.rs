@@ -1503,17 +1503,21 @@ PATH: app-test/mixed/mixed-1.0-1.gpkg.tar
 CPV: app-test/a-1
 DEFINED_PHASES: compile pretend
 EAPI: 8
+PATH: app-test/a-1.gpkg.tar
 
 CPV: app-test/b-1
 DEFINED_PHASES: compile pretend
 EAPI: 3
+PATH: app-test/b-1.gpkg.tar
 
 CPV: app-test/c-1
 DEFINED_PHASES: compile pretend
+PATH: app-test/c-1.gpkg.tar
 
 CPV: app-test/d-1
 DEFINED_PHASES: compile
 EAPI: 8
+PATH: app-test/d-1.gpkg.tar
 ";
         let entries = parse_packages_entries(text);
         let pretend: Vec<bool> = entries.values().map(|e| e[0].pretend).collect();
