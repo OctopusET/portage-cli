@@ -6535,6 +6535,31 @@ mod tests {
     }
 
     #[test]
+    fn walk_image_keeps_the_old_file_when_its_replacement_cannot_be_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(image.join("usr/lib").as_std_path()).unwrap();
+        fs::write(image.join("usr/lib/libx.so").as_std_path(), b"new\n").unwrap();
+        // A directory in the temp file's place makes writing the replacement fail, even as root.
+        fs::create_dir_all(root.join("usr/lib/libx.so#new").as_std_path()).unwrap();
+        let dest = root.join("usr/lib/libx.so");
+        fs::write(dest.as_std_path(), b"old\n").unwrap();
+
+        let merged = walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Merge,
+        );
+
+        assert!(merged.is_err());
+        assert_eq!(fs::read(dest.as_std_path()).unwrap(), b"old\n");
+    }
+
+    #[test]
     fn walk_image_merges_fifos() {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
         let tmp = tempfile::tempdir().unwrap();
