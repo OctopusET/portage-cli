@@ -135,11 +135,12 @@ fn parse_env_file(content: &str) -> Result<BTreeMap<String, String>, String> {
         let Some(value) = words.next()? else {
             return Err(format!("no value for {key:?}"));
         };
-        let valid = !key.starts_with(|c: char| c.is_ascii_digit())
-            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if valid {
-            vars.insert(key, value);
+        if key.starts_with(|c: char| c.is_ascii_digit())
+            || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(format!("invalid variable name {key:?}"));
         }
+        vars.insert(key, value);
     }
     Ok(vars)
 }
@@ -459,7 +460,7 @@ mod tests {
     #[test]
     fn parses_env_d_like_portage_getconfig() {
         let vars = parse_env_file(
-            "# comment\nexport A=\"x y\" B='$q' # tail\nC=a\\ b\"c\\\"\\d\"\n1BAD=z\nD=\"\"\n",
+            "# comment\nexport A=\"x y\" B='$q' # tail\nC=a\\ b\"c\\\"\\d\"\nD=\"\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -468,6 +469,7 @@ mod tests {
         );
         assert!(parse_env_file("A=\"open\n").is_err());
         assert!(parse_env_file("A B\n").is_err());
+        assert!(parse_env_file("A=1\n1BAD=z\nB=2\n").is_err());
     }
 
     #[test]
