@@ -9,7 +9,7 @@
 //! Both families live here as registered builtins; `new*` reads stdin when its
 //! source arg is `-` (PMS 12.3.x). The pure destination-state setters
 //! (`into`/`insinto`/…) and the `doinitd`/`doconfd`/`doenvd` `do*` wrappers (which
-//! set `insinto` then call `doins`) still live in bash.
+//! call `doins`/`doexe` with a function-local destination) still live in bash.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1444,9 +1444,18 @@ impl NewKind {
                     vec!["-m0755".into()],
                 )
             }
-            Self::Initd => (under_ed(&ed, "etc/init.d"), vec!["-m0755".into()]),
-            Self::Confd => (under_ed(&ed, "etc/conf.d"), vec!["-m0644".into()]),
-            Self::Envd => (under_ed(&ed, "etc/env.d"), vec!["-m0644".into()]),
+            Self::Initd => (
+                under_ed(&ed, "etc/init.d"),
+                service_opts(shell, "_exeopts", "-m0755"),
+            ),
+            Self::Confd => (
+                under_ed(&ed, "etc/conf.d"),
+                service_opts(shell, "_insopts", "-m0644"),
+            ),
+            Self::Envd => (
+                under_ed(&ed, "etc/env.d"),
+                service_opts(shell, "_insopts", "-m0644"),
+            ),
         }
     }
 }
@@ -1462,6 +1471,21 @@ fn opts_var<SE: brush_core::ShellExtensions>(
         .split_whitespace()
         .map(str::to_string)
         .collect()
+}
+
+/// The `new{initd,confd,envd}` install options: the ebuild's `name` options
+/// through EAPI 7, the fixed `mode` from EAPI 8 on (PMS 12.3.4).
+fn service_opts<SE: brush_core::ShellExtensions>(
+    shell: &brush_core::Shell<SE>,
+    name: &str,
+    mode: &str,
+) -> Vec<String> {
+    let eapi: u32 = var(shell, "EAPI", "0").parse().unwrap_or(0);
+    if eapi <= 7 {
+        opts_var(shell, name, mode)
+    } else {
+        vec![mode.into()]
+    }
 }
 
 /// Shared `new* <src> <name>` parser (PMS 12.3.4). A single type is registered

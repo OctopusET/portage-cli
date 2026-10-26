@@ -810,6 +810,53 @@ async fn install_helpers_are_self_contained() {
     assert!(d.join("etc/init.d/svc").exists(), "newinitd");
 }
 
+#[tokio::test]
+async fn service_helpers_keep_the_callers_destination_and_options() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    for (eapi, confd_mode, initd_mode) in [("7", 0o600, 0o700), ("8", 0o644, 0o755)] {
+        let dir = tempdir().unwrap();
+        let d = dir.path().join("image");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        for f in ["x", "y", "svc", "z"] {
+            std::fs::write(src.join(f), "x\n").unwrap();
+        }
+        let mut shell = minimal_shell(dir.path()).await;
+        shell
+            .run_string(&format!(
+                "{INSTALL_HELPERS}\n\
+                 export EAPI={eapi} D={d} ED={d} T={d}; cd {src}; \
+                 insinto /usr/share/foo; insopts -m0600; exeinto /opt/bin; exeopts -m0700; \
+                 doconfd x; newconfd x x2; doinitd svc; doins y; doexe z; \
+                 [[ ${{INSDESTTREE}} == /usr/share/foo && ${{EXEDESTTREE}} == /opt/bin ]] \
+                   || die 'destination leaked'",
+                d = d.display(),
+                src = src.display(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(mode(d.join("usr/share/foo/y")), 0o600, "EAPI {eapi} doins");
+        assert_eq!(mode(d.join("opt/bin/z")), 0o700, "EAPI {eapi} doexe");
+        assert_eq!(
+            mode(d.join("etc/conf.d/x")),
+            confd_mode,
+            "EAPI {eapi} doconfd"
+        );
+        assert_eq!(
+            mode(d.join("etc/init.d/svc")),
+            initd_mode,
+            "EAPI {eapi} doinitd"
+        );
+        assert_eq!(
+            mode(d.join("etc/conf.d/x2")),
+            confd_mode,
+            "EAPI {eapi} newconfd"
+        );
+    }
+}
+
 // Regression (live 2026-08-28, dev-build/make-4.4.1-r102's own
 // `DOCS="AUTHORS NEWS README*"`): a scalar DOCS containing a glob pattern
 // must still expand it, matching real bash's unquoted `dodoc -r ${DOCS}` —

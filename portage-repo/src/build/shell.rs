@@ -133,25 +133,26 @@ exeopts() { _exeopts="$*"; }
 # commands/install.rs.  They are registered on the shell and the metadata stubs
 # unset in init_build_env so the builtins win.  new* reads stdin when its source
 # arg is `-`.  The pure destination-state setters and the doinitd/doconfd/doenvd
-# do* wrappers (which set insinto then call doins) stay in bash for now.
+# do* wrappers (which call doins/doexe with a local destination) stay in bash.
 
 doinitd() {
     [[ $# -gt 0 ]] || die "doinitd: at least one argument required"
-    insinto /etc/init.d
-    insopts -m0755
-    doins "$@"
-    insopts -m0644
+    local EXEDESTTREE=/etc/init.d _exeopts="${_exeopts}"
+    ___eapi_doinitd_respects_exeopts || _exeopts=-m0755
+    doexe "$@"
 }
 
 doconfd() {
     [[ $# -gt 0 ]] || die "doconfd: at least one argument required"
-    insinto /etc/conf.d
+    local INSDESTTREE=/etc/conf.d _insopts="${_insopts}"
+    ___eapi_doconfd_respects_insopts || _insopts=-m0644
     doins "$@"
 }
 
 doenvd() {
     [[ $# -gt 0 ]] || die "doenvd: at least one argument required"
-    insinto /etc/env.d
+    local INSDESTTREE=/etc/env.d _insopts="${_insopts}"
+    ___eapi_doenvd_respects_insopts || _insopts=-m0644
     doins "$@"
 }
 
