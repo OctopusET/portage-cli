@@ -22,6 +22,7 @@ pub(super) fn assemble(
 ) -> anyhow::Result<DepgraphOutcome> {
     let Resolved {
         outcome,
+        slot_op_cpns,
         repair_completed,
         repair_incomplete,
         resolve_secs,
@@ -88,7 +89,7 @@ pub(super) fn assemble(
         ceded,
         autounmask_candidates,
         widened_autounmask_candidates,
-        slot_op_cpns,
+        slot_op_rebuilds: _,
         dep_conflicts,
         proposed,
         exclude_omitted,

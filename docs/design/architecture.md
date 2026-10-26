@@ -414,7 +414,11 @@ Stages, in order:
    (bounded) fixpoint.
 6. **Slot-operator rebuild detection** (`subslot.rs`) — VDB-recorded `:=` bindings
    of installed consumers are checked against the plan; a dependency moving across
-   a subslot boundary pulls the consumer in as a same-version rebuild.
+   a subslot boundary makes the consumer a rebuild target of the next solve round
+   (at its installed version or newer), so `--exclude` and visibility apply to it.
+   Under `-uD` a consumer in the graph is also rebuilt when the installed provider's
+   subslot already differs, or when its ebuild's unslotted `:=` accepts a newer
+   planned slot (`--rebuild-if-new-slot`; emerge also does this under `-u` alone).
 7. **Post-solve checks** — see [Post-solve validation](#post-solve-validation).
 8. **Install order** (`install_order`) — SCC condensation (iterative Tarjan) +
    lexicographic Kahn; hard (DEPEND/BDEPEND) edges before soft (RDEPEND); cycles

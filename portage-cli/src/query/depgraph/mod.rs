@@ -360,6 +360,8 @@ pub struct DepgraphOpts<'a> {
 /// The settled solve: last good round, plus `--complete-graph` repair notes.
 struct Resolved {
     outcome: round::RoundOutcome,
+    /// Slot-operator rebuild consumers and their triggers, marked `r` in the plan
+    slot_op_cpns: HashSet<Cpn>,
     repair_completed: Vec<Cpn>,
     repair_incomplete: Vec<Cpn>,
     resolve_secs: f64,
@@ -452,9 +454,19 @@ fn resolve(
     let resolve_start = std::time::Instant::now();
     let mut solve_targets: Vec<(PortagePackage, PortageVersionSet)> = root_deps.clone();
     let mut repaired: HashSet<Cpn> = HashSet::new();
+    let mut slot_op_rebuild: HashSet<PortagePackage> = HashSet::new();
+    let mut slot_op_cpns: HashSet<Cpn> = HashSet::new();
     metrics.solve_rounds += 1;
-    let mut outcome = round::solve_round(&round_ctx, solve_targets.clone())?;
+    let mut outcome = round::solve_round(&round_ctx, solve_targets.clone(), &slot_op_rebuild)?;
     metrics.merge(&outcome.round_metrics);
+    outcome = settle_slot_op_rebuilds(
+        &round_ctx,
+        &mut solve_targets,
+        &mut slot_op_rebuild,
+        &mut slot_op_cpns,
+        outcome,
+        metrics,
+    );
     let mut repair_completed: Vec<Cpn> = Vec::new();
     let mut repair_incomplete: Vec<Cpn> = Vec::new();
     if complete_graph && update && !empty {
@@ -482,12 +494,19 @@ fn resolve(
             let mut next_targets = solve_targets.clone();
             next_targets.extend(candidates.iter().cloned());
             metrics.solve_rounds += 1;
-            match round::solve_round(&round_ctx, next_targets.clone()) {
+            match round::solve_round(&round_ctx, next_targets.clone(), &slot_op_rebuild) {
                 Ok(next) => {
                     metrics.merge(&next.round_metrics);
                     repair_completed.extend(candidates.iter().map(|(pkg, _)| *pkg.cpn()));
                     solve_targets = next_targets;
-                    outcome = next;
+                    outcome = settle_slot_op_rebuilds(
+                        &round_ctx,
+                        &mut solve_targets,
+                        &mut slot_op_rebuild,
+                        &mut slot_op_cpns,
+                        next,
+                        metrics,
+                    );
                 }
                 Err(_) => {
                     // Discard this round; keep the last good outcome rather than
@@ -502,6 +521,7 @@ fn resolve(
     let resolve_secs = resolve_start.elapsed().as_secs_f64();
     Ok(Resolved {
         outcome,
+        slot_op_cpns,
         repair_completed,
         repair_incomplete,
         resolve_secs,
@@ -1019,23 +1039,24 @@ fn narrow_to_required_iuse(
     Ok((PortagePackage::slotted(dep.cpn, slot), narrowed))
 }
 
-/// Prefer a newer accepted same-slot version for a slot-operator rebuild.
-///
-/// Uses it only when that version's raw DEPEND and RDEPEND still accept every
-/// trigger. Otherwise returns `rb.version`.
-fn best_rebuild_version(
+/// The solver identity of an installed `(cpn, slot)`; an empty VDB `SLOT` is unslotted
+fn installed_package(cpn: Cpn, slot: Option<Interned<DefaultInterner>>) -> PortagePackage {
+    match slot.filter(|s| !s.is_empty()) {
+        Some(s) => PortagePackage::slotted(cpn, s),
+        None => PortagePackage::unslotted(cpn),
+    }
+}
+
+/// Whether a slot-operator rebuild has a version to build: one in its slot, no older than the
+/// installed one, keyword-accepted and unmasked
+fn rebuild_visible(
     data: &repo::RepoData,
     policy: &repo::ResolvePolicy,
     rb: &subslot::SubslotRebuild,
-    planned_slots: &HashMap<Cpn, Vec<(Version, portage_atom::Slot)>>,
-) -> Version {
-    let Some(entries) = data.versions.get(&rb.cpn) else {
-        return rb.version.clone();
-    };
-    let mut candidates: Vec<_> = entries
-        .iter()
-        .filter(|(cpv, cache)| {
-            cpv.version > rb.version
+) -> bool {
+    data.versions.get(&rb.cpn).is_some_and(|entries| {
+        entries.iter().any(|(cpv, cache)| {
+            cpv.version >= rb.version
                 && rb.slot.is_none_or(|s| cache.metadata.slot.slot == s)
                 && policy.accept_keywords.accepts(
                     &cache.metadata.keywords,
@@ -1050,56 +1071,66 @@ fn best_rebuild_version(
                     repo::repo_name_of(data, cpv),
                 )
         })
-        .collect();
-    candidates.sort_by(|a, b| b.0.version.cmp(&a.0.version));
-    candidates
-        .into_iter()
-        .find(|(_, cache)| {
-            rb.triggers
-                .iter()
-                .all(|trig| trigger_still_satisfied(cache, *trig, planned_slots))
-        })
-        .map_or_else(|| rb.version.clone(), |(cpv, _)| cpv.version.clone())
+    })
 }
 
-/// Whether `cache`'s own DEPEND/RDEPEND still binds `trigger` to a version
-/// range its planned version satisfies (see [`best_rebuild_version`])
-fn trigger_still_satisfied(
-    cache: &portage_metadata::CacheEntry,
-    trigger: Cpn,
-    planned_slots: &HashMap<Cpn, Vec<(Version, portage_atom::Slot)>>,
-) -> bool {
-    fn collect<'a>(entries: &'a [portage_atom::DepEntry], trigger: Cpn, out: &mut Vec<&'a Dep>) {
-        for entry in entries {
-            match entry {
-                portage_atom::DepEntry::Atom(dep)
-                    if dep.blocker.is_none() && dep.cpn == trigger =>
-                {
-                    out.push(dep);
-                }
-                portage_atom::DepEntry::UseConditional { children, .. }
-                | portage_atom::DepEntry::AllOf(children)
-                | portage_atom::DepEntry::AnyOf(children)
-                | portage_atom::DepEntry::ExactlyOneOf(children)
-                | portage_atom::DepEntry::AtMostOneOf(children) => collect(children, trigger, out),
-                portage_atom::DepEntry::Atom(_) => {}
+/// Re-solve until no round finds another `:=` consumer to rebuild
+///
+/// Each consumer joins the targets at its installed version or newer and is registered as a
+/// rebuild, so the solver picks its version and orders it after the triggers. A round that fails
+/// to solve is dropped with a warning; the last good one stands.
+fn settle_slot_op_rebuilds(
+    ctx: &round::RoundCtx<'_>,
+    targets: &mut Vec<(PortagePackage, PortageVersionSet)>,
+    rebuild: &mut HashSet<PortagePackage>,
+    marks: &mut HashSet<Cpn>,
+    mut outcome: round::RoundOutcome,
+    metrics: &mut ResolveMetrics,
+) -> round::RoundOutcome {
+    const MAX_ROUNDS: usize = 3;
+    for _ in 0..MAX_ROUNDS {
+        let pending: Vec<_> = outcome
+            .slot_op_rebuilds
+            .iter()
+            .filter(|rb| !rebuild.contains(&installed_package(rb.cpn, rb.slot)))
+            .collect();
+        if pending.is_empty() {
+            break;
+        }
+        let mut next_targets = targets.clone();
+        let mut next_rebuild = rebuild.clone();
+        for rb in &pending {
+            let pkg = installed_package(rb.cpn, rb.slot);
+            let at_least = PortageVersionSet::from_operator(
+                portage_atom::Operator::GreaterOrEqual,
+                false,
+                rb.version.clone(),
+            );
+            next_targets.push((pkg.clone(), at_least));
+            next_rebuild.insert(pkg);
+        }
+        let pending_marks: Vec<Cpn> = pending
+            .iter()
+            .flat_map(|rb| std::iter::once(rb.cpn).chain(rb.triggers.iter().copied()))
+            .collect();
+        metrics.solve_rounds += 1;
+        match round::solve_round(ctx, next_targets.clone(), &next_rebuild) {
+            Ok(next) => {
+                metrics.merge(&next.round_metrics);
+                *targets = next_targets;
+                *rebuild = next_rebuild;
+                marks.extend(pending_marks);
+                outcome = next;
+            }
+            Err(e) => {
+                crate::style::warn_line!(
+                    "skipping slot-operator rebuilds that do not resolve: {e}"
+                );
+                break;
             }
         }
     }
-
-    let Some(planned) = planned_slots.get(&trigger) else {
-        return true;
-    };
-    let mut atoms = Vec::new();
-    collect(cache.metadata.depend.list(), trigger, &mut atoms);
-    collect(cache.metadata.rdepend.list(), trigger, &mut atoms);
-    if atoms.is_empty() {
-        return false;
-    }
-    atoms.iter().any(|dep| {
-        let vs = conflicts::dep_to_version_set(dep);
-        planned.iter().any(|(ver, _)| vs.contains(ver))
-    })
+    outcome
 }
 
 /// Whether an installed VDB entry must rebuild under `-N`/`-U` for USE/IUSE

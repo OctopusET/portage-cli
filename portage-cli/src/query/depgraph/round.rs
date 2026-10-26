@@ -17,8 +17,8 @@ use portage_resolve::{
 };
 
 use super::{
-    ResolveMetrics, apply_order_filters, best_rebuild_version, package_needs_use_reinstall,
-    package_use, target_conflicts, widened_autounmask_candidates,
+    ResolveMetrics, apply_order_filters, installed_package, package_needs_use_reinstall,
+    package_use, rebuild_visible, target_conflicts, widened_autounmask_candidates,
 };
 
 /// Inputs shared by every solve round of one [`super::depgraph`] call.
@@ -110,7 +110,8 @@ pub(super) struct RoundOutcome {
     /// merged after the dropped-dep post-filter, which would otherwise
     /// discard them by construction.
     pub(super) widened_autounmask_candidates: Vec<repo::AutounmaskCandidate>,
-    pub(super) slot_op_cpns: HashSet<Cpn>,
+    /// Installed `:=` consumers this round's plan invalidates, each with a visible version to build
+    pub(super) slot_op_rebuilds: Vec<subslot::SubslotRebuild>,
     pub(super) dep_conflicts: Vec<conflicts::Conflict>,
     // Target-routed merge plan entries, kept alongside `dep_conflicts` for
     // the blocker classifier (`conflicts::classify_blockers`), which needs
@@ -126,9 +127,13 @@ pub(super) struct RoundOutcome {
 /// A failed `--autosolve-use` attempt falls back to a fixed-USE solve.
 /// When widening is requested, a strict failure or a strict success that
 /// dropped hard dependencies retries once with widened candidate supply.
+///
+/// `slot_op_rebuild` lists installed packages an earlier round found invalidated by a `:=`
+/// binding; they are rebuilt (registered as [`InstalledPolicy::Rebuild`]).
 pub(super) fn solve_round(
     ctx: &RoundCtx<'_>,
     targets: Vec<(PortagePackage, PortageVersionSet)>,
+    slot_op_rebuild: &HashSet<PortagePackage>,
 ) -> anyhow::Result<RoundOutcome> {
     let RoundCtx {
         data,
@@ -241,10 +246,7 @@ pub(super) fn solve_round(
             target_installed
                 .iter()
                 .map(|e| {
-                    let package = match e.slot.filter(|s| !s.is_empty()) {
-                        Some(s) => PortagePackage::slotted(e.cpn, s),
-                        None => PortagePackage::unslotted(e.cpn),
-                    };
+                    let package = installed_package(e.cpn, e.slot);
                     let deps = match repo::find_cache(data, &package, &e.version) {
                         Some(cache) => repo::package_deps_from_metadata(&cache.metadata),
                         None => e.classes.clone(),
@@ -307,12 +309,9 @@ pub(super) fn solve_round(
             provider.add_sysroot_installed(pkg.clone(), version.clone());
         }
         for (e, blockers) in target_installed.iter().zip(installed_blockers) {
-            let pkg = match e.slot.filter(|s| !s.is_empty()) {
-                Some(s) => PortagePackage::slotted(e.cpn, s),
-                None => PortagePackage::unslotted(e.cpn),
-            };
+            let pkg = installed_package(e.cpn, e.slot);
             provider.add_installed_blockers(&pkg, blockers);
-            let policy = if empty {
+            let policy = if empty || slot_op_rebuild.contains(&pkg) {
                 InstalledPolicy::Rebuild
             } else if let Some(mode) = use_reinstall_mode {
                 // Compare VDB USE/IUSE to the planned fold for this CPV.
@@ -597,13 +596,14 @@ pub(super) fn solve_round(
         &autounmask_candidates,
     );
 
-    // Packages that need a same-version rebuild (USE change) must stay in the
-    // merge list even though their installed CPV is unchanged — keep them in
-    // their topological position rather than appending them after the target.
+    // Packages that need a same-version rebuild (USE change, slot operator) must stay in the
+    // merge list even though their installed CPV is unchanged, in their topological position
+    // rather than appended after the target.
     let reinstall_cpns: std::collections::HashSet<Cpn> = provider
         .reinstall_deps()
         .iter()
         .map(|r| *r.package.cpn())
+        .chain(slot_op_rebuild.iter().map(|p| *p.cpn()))
         .collect();
 
     // When a rebuild is forced on an installed package and a newer version is
@@ -792,12 +792,10 @@ pub(super) fn solve_round(
         order.retain(|(pkg, _)| !root_cpns.contains(pkg.cpn()));
     }
 
-    // Slot-operator (`:=`) rebuilds: installed consumers whose VDB-recorded
-    // subslot binding is invalidated by a planned dependency are pulled into
-    // the plan as same-version rebuilds, placed right after their trigger
-    // (emerge's __auto_slot_operator_replace_installed__ set). Both ends carry
-    // the `r` (forced rebuild) marker in the output.
-    let mut slot_op_cpns: std::collections::HashSet<Cpn> = Default::default();
+    // Slot-operator (`:=`) rebuilds: installed consumers whose VDB-recorded subslot binding the
+    // plan invalidates. The caller re-solves with them rebuilt, so they pass every plan filter
+    // (emerge's __auto_slot_operator_replace_installed__ set).
+    let mut slot_op_rebuilds = Vec::new();
     if !empty {
         let mut planned_slots: HashMap<Cpn, Vec<(Version, portage_atom::Slot)>> = HashMap::new();
         for (pkg, ver) in &order {
@@ -808,21 +806,27 @@ pub(super) fn solve_round(
                     .push((ver.clone(), cache.metadata.slot));
             }
         }
-        let in_plan: std::collections::HashSet<Cpn> =
-            order.iter().map(|(pkg, _)| *pkg.cpn()).collect();
-        for rb in subslot::find_rebuilds(target_installed, &planned_slots, &in_plan) {
-            let pos = order
-                .iter()
-                .rposition(|(pkg, _)| rb.triggers.contains(pkg.cpn()))
-                .map_or(order.len(), |i| i + 1);
-            let pkg = match rb.slot.as_deref().filter(|s| !s.is_empty()) {
-                Some(s) => PortagePackage::slotted(rb.cpn, Interned::intern(s)),
-                None => PortagePackage::unslotted(rb.cpn),
-            };
-            let ver = best_rebuild_version(data, target_policy, &rb, &planned_slots);
-            order.insert(pos, (pkg, ver));
-            slot_op_cpns.insert(rb.cpn);
-            slot_op_cpns.extend(rb.triggers.iter().copied());
+        let in_plan: HashSet<Cpn> = order.iter().map(|(pkg, _)| *pkg.cpn()).collect();
+        let tree_deps = |e: &installed::VdbEntry| {
+            let pkg = installed_package(e.cpn, e.slot);
+            if solution.get(&pkg) != Some(&e.version) {
+                return None;
+            }
+            let meta = &repo::find_cache(data, &pkg, &e.version)?.metadata;
+            Some([&meta.depend.list()[..], &meta.rdepend.list()[..]].concat())
+        };
+        let deep_update: Option<subslot::TreeDeps<'_>> = (update && deep).then_some(&tree_deps);
+        for rb in subslot::find_rebuilds(target_installed, &planned_slots, &in_plan, deep_update) {
+            if rebuild_visible(data, target_policy, &rb) {
+                slot_op_rebuilds.push(rb);
+            } else {
+                crate::style::warn_line!(
+                    "{}-{} needs a rebuild for a changed slot-operator dependency, \
+                     but no visible version of it is available",
+                    rb.cpn,
+                    rb.version
+                );
+            }
         }
     }
 
@@ -886,7 +890,7 @@ pub(super) fn solve_round(
         ceded,
         autounmask_candidates,
         widened_autounmask_candidates: widened_candidates,
-        slot_op_cpns,
+        slot_op_rebuilds,
         dep_conflicts,
         proposed,
         exclude_omitted,

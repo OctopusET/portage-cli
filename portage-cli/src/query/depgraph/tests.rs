@@ -934,3 +934,126 @@ fn deep_descends_into_a_kept_package_with_the_use_it_was_built_with() {
     deep.deep = true;
     assert_eq!(names(&solve(&fix, deep)), ["app-misc/app-1"]);
 }
+
+fn pkg(cpv: &'static str, slot: &'static str, rdepend: &'static str) -> Pkg {
+    Pkg {
+        cpv,
+        keywords: "amd64",
+        depend: "",
+        rdepend,
+        iuse: "",
+        slot,
+    }
+}
+
+fn plant_vdb_slot(root: &Utf8PathBuf, cpv: &str, slot: &str, rdepend: &str) {
+    plant_installed(root, cpv, slot, "", "");
+    let cpv = Cpv::parse(cpv).unwrap();
+    let dir = root
+        .join("var/db/pkg")
+        .join(cpv.cpn.category.as_str())
+        .join(format!("{}-{}", cpv.cpn.package, cpv.version));
+    std::fs::write(dir.join("RDEPEND").as_std_path(), format!("{rdepend}\n")).unwrap();
+}
+
+/// `lib` moves from subslot 1 to 2 under `-u lib`; installed `consumer-1` bound `lib:0/1=`.
+fn slot_op_update(consumers: &[Pkg], exclude: &[String]) -> Vec<String> {
+    let mut pkgs = vec![
+        pkg("dev-libs/lib-1", "0/1", ""),
+        pkg("dev-libs/lib-2", "0/2", ""),
+    ];
+    pkgs.extend(consumers.iter().map(|c| pkg(c.cpv, c.slot, c.rdepend)));
+    let fix = fixture(&pkgs, &[]);
+    plant_vdb_slot(&fix.root, "dev-libs/lib-1", "0/1", "");
+    plant_vdb_slot(&fix.root, "app-misc/consumer-1", "0", "dev-libs/lib:0/1=");
+    let atoms = [TargetAtom::explicit("dev-libs/lib")];
+    let mut opts = Solve::new(&atoms);
+    opts.update = true;
+    opts.exclude = exclude;
+    names(&solve(&fix, opts))
+}
+
+#[test]
+fn slot_op_rebuild_follows_its_trigger() {
+    let consumer = [pkg("app-misc/consumer-1", "0", "dev-libs/lib:=")];
+    assert_eq!(
+        slot_op_update(&consumer, &[]),
+        ["dev-libs/lib-2", "app-misc/consumer-1"]
+    );
+}
+
+#[test]
+fn slot_op_rebuild_solves_the_consumer_upgrade() {
+    let consumers = [
+        pkg("app-misc/consumer-1", "0", "dev-libs/lib:="),
+        pkg("app-misc/consumer-2", "0", ">=dev-libs/lib-2:="),
+    ];
+    assert_eq!(
+        slot_op_update(&consumers, &[]),
+        ["dev-libs/lib-2", "app-misc/consumer-2"]
+    );
+}
+
+#[test]
+fn slot_op_rebuild_honours_exclude() {
+    let consumer = [pkg("app-misc/consumer-1", "0", "dev-libs/lib:=")];
+    let exclude = ["app-misc/consumer".to_string()];
+    assert_eq!(slot_op_update(&consumer, &exclude), ["dev-libs/lib-2"]);
+}
+
+#[test]
+fn slot_op_rebuild_skips_a_consumer_with_no_visible_version() {
+    assert_eq!(slot_op_update(&[], &[]), ["dev-libs/lib-2"]);
+}
+
+/// Installed `top-1` keeps `consumer-1` (bound `lib:0/1=`) in the `-uD top` graph.
+fn deep_update_of_top(
+    extra: &[Pkg],
+    top_rdepend: &'static str,
+    plant: impl Fn(&Utf8PathBuf),
+    deep: bool,
+) -> Vec<String> {
+    let mut pkgs = vec![
+        pkg("app-misc/top-1", "0", top_rdepend),
+        pkg("app-misc/consumer-1", "0", "dev-lang/lua:="),
+    ];
+    pkgs.extend(extra.iter().map(|p| pkg(p.cpv, p.slot, p.rdepend)));
+    let fix = fixture(&pkgs, &[]);
+    plant_vdb_slot(&fix.root, "app-misc/top-1", "0", top_rdepend);
+    plant(&fix.root);
+    let atoms = [TargetAtom::explicit("app-misc/top")];
+    let mut opts = Solve::new(&atoms);
+    opts.update = true;
+    opts.deep = deep;
+    names(&solve(&fix, opts))
+}
+
+#[test]
+fn deep_update_rebuilds_a_consumer_of_an_installed_provider_with_another_subslot() {
+    let lua = [pkg("dev-lang/lua-5.1.6", "5.1/6", "")];
+    let plant = |root: &Utf8PathBuf| {
+        plant_vdb_slot(root, "dev-lang/lua-5.1.6", "5.1/6", "");
+        plant_vdb_slot(root, "app-misc/consumer-1", "0", "dev-lang/lua:5.1/5=");
+    };
+    assert_eq!(
+        deep_update_of_top(&lua, "app-misc/consumer", plant, true),
+        ["app-misc/consumer-1"]
+    );
+    assert!(deep_update_of_top(&lua, "app-misc/consumer", plant, false).is_empty());
+}
+
+#[test]
+fn deep_update_rebuilds_a_consumer_for_a_new_slot() {
+    let lua = [
+        pkg("dev-lang/lua-5.1.5", "5.1", ""),
+        pkg("dev-lang/lua-5.4.6", "5.4", ""),
+    ];
+    let plant = |root: &Utf8PathBuf| {
+        plant_vdb_slot(root, "dev-lang/lua-5.1.5", "5.1", "");
+        plant_vdb_slot(root, "app-misc/consumer-1", "0", "dev-lang/lua:5.1/5.1=");
+    };
+    assert_eq!(
+        deep_update_of_top(&lua, "app-misc/consumer dev-lang/lua:5.4", plant, true),
+        ["dev-lang/lua-5.4.6", "app-misc/consumer-1"]
+    );
+}

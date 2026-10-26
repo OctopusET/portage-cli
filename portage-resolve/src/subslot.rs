@@ -61,18 +61,49 @@ fn collect_bound_atoms<'a>(entries: &'a [DepEntry], out: &mut Vec<&'a portage_at
     }
 }
 
+/// Whether `dep` is an unslotted `:=` atom, which binds whatever slot it resolves to
+fn is_unslotted_equal(dep: &portage_atom::Dep) -> bool {
+    matches!(
+        &dep.slot_dep,
+        Some(SlotDep::Operator(SlotOperator::Equal))
+            | Some(SlotDep::Slot {
+                slot: None,
+                op: Some(SlotOperator::Equal),
+            })
+    )
+}
+
+/// The consumer's tree-ebuild dependencies, `None` when it is outside the solve graph or the tree
+pub type TreeDeps<'a> = &'a dyn Fn(&VdbEntry) -> Option<Vec<DepEntry>>;
+
 /// Find installed packages whose recorded `:=` bindings are invalidated by the plan
 ///
 /// `planned_slots` maps each in-plan CPN to its planned versions and their tree
 /// slots; owners already in the plan are skipped (they are being upgraded or
-/// rebuilt anyway).
+/// rebuilt anyway). `deep_update` (`--update --deep`) also invalidates a binding
+/// the installed provider's subslot no longer matches, and one a planned newer
+/// slot satisfies through the tree ebuild's unslotted `:=` (`--rebuild-if-new-slot`).
 pub fn find_rebuilds(
     installed: &[VdbEntry],
     planned_slots: &HashMap<Cpn, Vec<(Version, Slot)>>,
     in_plan: &HashSet<Cpn>,
+    deep_update: Option<TreeDeps<'_>>,
 ) -> Vec<SubslotRebuild> {
-    let mut rebuilds = Vec::new();
+    let mut installed_slots: HashMap<Cpn, Vec<(Version, Slot)>> = HashMap::new();
+    for e in installed {
+        if let Some(slot) = e.slot {
+            let slot = Slot {
+                slot,
+                subslot: e.subslot,
+            };
+            installed_slots
+                .entry(e.cpn)
+                .or_default()
+                .push((e.version.clone(), slot));
+        }
+    }
 
+    let mut rebuilds = Vec::new();
     for entry in installed {
         if in_plan.contains(&entry.cpn) {
             continue;
@@ -81,6 +112,12 @@ pub fn find_rebuilds(
         let evaluated = DepEntry::evaluate_use(&entry.deps, &active);
         let mut atoms = Vec::new();
         collect_bound_atoms(&evaluated, &mut atoms);
+        if atoms.is_empty() {
+            continue;
+        }
+        let tree_deps = deep_update
+            .and_then(|f| f(entry))
+            .map(|deps| DepEntry::evaluate_use(&deps, &active));
 
         let mut triggers: Vec<Cpn> = Vec::new();
         for dep in atoms {
@@ -88,23 +125,50 @@ pub fn find_rebuilds(
                 continue;
             };
             let Some(bound_subslot) = s.subslot else {
-                // This should not happen as collect_bound_atoms filters for
-                // s.subslot.is_some(), but handle it gracefully
-                continue;
-            };
-            let Some(planned) = planned_slots.get(&dep.cpn) else {
                 continue;
             };
             let vs = dep_to_version_set(dep);
-            // A planned version in the bound slot, satisfying the dep's version
-            // range, but with a different subslot ⇒ the binding is invalidated.
-            // (A range mismatch is a dependency conflict, reported elsewhere.)
-            let invalidated = planned.iter().any(|(ver, pslot)| {
-                pslot.slot == s.slot
-                    && vs.contains(ver)
-                    && effective_subslot(pslot) != bound_subslot
-            });
-            if invalidated && !triggers.contains(&dep.cpn) {
+            // A version in the bound slot, satisfying the dep's version range, but with a
+            // different subslot. (A range mismatch is a dependency conflict, reported elsewhere.)
+            let moved = |provs: &[(Version, Slot)]| {
+                provs.iter().any(|(ver, pslot)| {
+                    pslot.slot == s.slot
+                        && vs.contains(ver)
+                        && effective_subslot(pslot) != bound_subslot
+                })
+            };
+            let planned = planned_slots.get(&dep.cpn).map(Vec::as_slice);
+            let current = installed_slots.get(&dep.cpn).map(Vec::as_slice);
+            let planned_in_slot =
+                planned.is_some_and(|p| p.iter().any(|(_, ps)| ps.slot == s.slot));
+            let invalidated = if planned_in_slot {
+                planned.is_some_and(moved)
+            } else {
+                tree_deps.is_some() && current.is_some_and(moved)
+            };
+            let new_slot = || {
+                let (Some(tree), Some(planned)) = (&tree_deps, planned) else {
+                    return false;
+                };
+                let bound_ver = current.and_then(|c| {
+                    c.iter()
+                        .filter(|(_, ps)| ps.slot == s.slot)
+                        .map(|(v, _)| v)
+                        .max()
+                });
+                let mut ranges = Vec::new();
+                DepEntry::walk_atoms(tree, &mut |a| {
+                    if a.blocker.is_none() && a.cpn == dep.cpn && is_unslotted_equal(a) {
+                        ranges.push(dep_to_version_set(a));
+                    }
+                });
+                planned.iter().any(|(ver, ps)| {
+                    ps.slot != s.slot
+                        && bound_ver.is_some_and(|b| ver > b)
+                        && ranges.iter().any(|r| r.contains(ver))
+                })
+            };
+            if (invalidated || new_slot()) && !triggers.contains(&dep.cpn) {
                 triggers.push(dep.cpn);
             }
         }
@@ -167,7 +231,7 @@ mod tests {
             ">=dev-cpp/simdutf-5:0/25=",
         )];
         let plan = planned(&[("dev-cpp/simdutf", "9.0.0", "0", Some("34"))]);
-        let got = find_rebuilds(&installed, &plan, &HashSet::new());
+        let got = find_rebuilds(&installed, &plan, &HashSet::new(), None);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].cpn.to_string(), "net-libs/nodejs");
         assert_eq!(got[0].triggers[0].to_string(), "dev-cpp/simdutf");
@@ -181,7 +245,7 @@ mod tests {
             ">=dev-cpp/simdutf-5:0/25=",
         )];
         let plan = planned(&[("dev-cpp/simdutf", "8.0.0", "0", Some("25"))]);
-        assert!(find_rebuilds(&installed, &plan, &HashSet::new()).is_empty());
+        assert!(find_rebuilds(&installed, &plan, &HashSet::new(), None).is_empty());
     }
 
     #[test]
@@ -193,7 +257,7 @@ mod tests {
         )];
         let plan = planned(&[("dev-cpp/simdutf", "9.0.0", "0", Some("34"))]);
         let in_plan: HashSet<Cpn> = [Cpn::parse("net-libs/nodejs").unwrap()].into();
-        assert!(find_rebuilds(&installed, &plan, &in_plan).is_empty());
+        assert!(find_rebuilds(&installed, &plan, &in_plan, None).is_empty());
     }
 
     #[test]
@@ -206,7 +270,7 @@ mod tests {
             "<dev-cpp/simdutf-8:0/25=",
         )];
         let plan = planned(&[("dev-cpp/simdutf", "9.0.0", "0", Some("34"))]);
-        assert!(find_rebuilds(&installed, &plan, &HashSet::new()).is_empty());
+        assert!(find_rebuilds(&installed, &plan, &HashSet::new(), None).is_empty());
     }
 
     #[test]
@@ -219,7 +283,7 @@ mod tests {
             ">=dev-cpp/simdutf-5:0/25=",
         )];
         let plan = planned(&[("dev-cpp/simdutf", "9.0.0", "0", None)]);
-        let got = find_rebuilds(&installed, &plan, &HashSet::new());
+        let got = find_rebuilds(&installed, &plan, &HashSet::new(), None);
         assert_eq!(got.len(), 1);
     }
 
@@ -227,7 +291,7 @@ mod tests {
     fn other_slot_does_not_trigger() {
         let installed = vec![vdb("dev-tcltk/expect", "5.45.4", "dev-lang/tcl:0/8.6=")];
         let plan = planned(&[("dev-lang/tcl", "9.0.3", "9", Some("9.0"))]);
-        assert!(find_rebuilds(&installed, &plan, &HashSet::new()).is_empty());
+        assert!(find_rebuilds(&installed, &plan, &HashSet::new(), None).is_empty());
     }
 
     /// One `find_rebuilds` call, checked against an expected trigger set
@@ -249,7 +313,7 @@ mod tests {
             .collect();
         let plan = planned(plan);
         let in_plan: HashSet<Cpn> = in_plan.iter().map(|c| Cpn::parse(c).unwrap()).collect();
-        let got: HashSet<String> = find_rebuilds(&installed, &plan, &in_plan)
+        let got: HashSet<String> = find_rebuilds(&installed, &plan, &in_plan, None)
             .into_iter()
             .map(|r| r.cpn.to_string())
             .collect();
@@ -288,5 +352,54 @@ mod tests {
             &[],
             &["dev-libs/protobuf"],
         );
+    }
+
+    fn provider(cpn: &str, ver: &str, s: &str, sub: &str) -> VdbEntry {
+        let mut e = vdb(cpn, ver, "");
+        e.slot = Some(Interned::intern(s));
+        e.subslot = Some(Interned::intern(sub));
+        e
+    }
+
+    fn rebuilt(
+        installed: &[VdbEntry],
+        plan: &HashMap<Cpn, Vec<(Version, Slot)>>,
+        tree: Option<&str>,
+    ) -> Vec<String> {
+        let tree_deps = |_: &VdbEntry| tree.map(|t| DepEntry::parse(t).unwrap());
+        let deep_update: Option<TreeDeps<'_>> = tree.map(|_| &tree_deps as TreeDeps<'_>);
+        find_rebuilds(installed, plan, &HashSet::new(), deep_update)
+            .into_iter()
+            .map(|r| r.cpn.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn deep_update_rebuilds_against_an_installed_provider_with_another_subslot() {
+        let installed = vec![
+            vdb("dev-libs/boost", "1.0", "dev-libs/icu:0/76="),
+            provider("dev-libs/icu", "77.1", "0", "77"),
+        ];
+        let plan = HashMap::new();
+        assert_eq!(
+            rebuilt(&installed, &plan, Some("dev-libs/icu:=")),
+            ["dev-libs/boost"]
+        );
+        assert!(rebuilt(&installed, &plan, None).is_empty());
+    }
+
+    #[test]
+    fn deep_update_moves_an_unslotted_slot_operator_to_a_new_slot() {
+        let installed = vec![
+            vdb("app-misc/consumer", "1.0", "dev-lang/lua:5.1/5.1="),
+            provider("dev-lang/lua", "5.1.5", "5.1", "5.1"),
+        ];
+        let plan = planned(&[("dev-lang/lua", "5.4.6", "5.4", None)]);
+        assert_eq!(
+            rebuilt(&installed, &plan, Some("dev-lang/lua:=")),
+            ["app-misc/consumer"]
+        );
+        assert!(rebuilt(&installed, &plan, Some("dev-lang/lua:5.1=")).is_empty());
+        assert!(rebuilt(&installed, &plan, None).is_empty());
     }
 }
