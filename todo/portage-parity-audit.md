@@ -3,7 +3,7 @@
 Source audit of em against gentoo/portage master `f13a45f3f` (cloned at ../portage), one finder per
 subsystem, each finding checked by an independent refuting agent (165 confirmed, 4 refuted).
 Duplicates across subsystems are kept; the live harness (`test-scripts/parity/`) confirms some below.
-Status: open unless marked.
+Status: all fixed by fix batch 3 except the four items listed in [[portage-parity-live]].
 
 
 ## atom-version

@@ -5,9 +5,20 @@ Source-audit items are in [[portage-parity-audit]]. Status: open unless marked d
 
 ## Resolve (`resolve-sweep.sh`)
 
-Whole tree (19616 targets, frozen 2026-10-26 tree, after `9984edea`): both succeed 10493 (same 5618,
-order 4790, display 40, set 45), one side fails 254 (em only: 156 pre-flight, mostly the `||`
-causes below; 19 USE changes), both fail 8869.
+Whole tree (19616 targets, frozen 2026-10-26 tree):
+
+| | after `9984edea` | after fix batch 3 (`caf7f20d`) |
+|---|---|---|
+| same | 5618 | 5702 |
+| order | 4790 | 4904 |
+| display | 40 | 29 |
+| set | 45 | 32 |
+| one side fails | 254 | 42 |
+| both fail | 8869 | 8907 |
+
+The 36 targets that moved to "both fail" now report emerge's own USE change (virtual/opengl
+`libglvnd[X?]`). Remaining one-side failures: java cycles (openjdk-bin/virtual/jdk), emerge-only
+license or news stops, and the in-graph `||` preference below.
 
 Sample of 491 targets (every 40th cp), `-pv`, after `e4713b74`: both succeed 272 (same 144,
 order 113, display 8, set 3), one side fails 4, both fail 219 (mostly REQUIRED_USE/USE changes
@@ -96,3 +107,22 @@ Each needs a cascading signature change (confirm the shape first) or is a known 
   `sync-rsync-verify-metamanifest` there for `[gentoo]`.
 - binrepos.conf `verify-signature = false` cannot be told from unset.
 - `em -C <ambiguous name>`: em refuses when several regular packages match; portage picks one.
+
+## Fix batch 3 (2026-10-27)
+
+Every open item of the audit and of this file was triaged against master (54 already fixed,
+4 intentional, 4 not bugs) and the remaining 133 fixed in nine lanes, then integrated and
+re-verified (whole tree, three scenarios, 17 merges). Not done, each needs a decision:
+
+- `||` choice preferring packages already in the graph (dep_zapdeps `preferred_in_graph`): tried
+  and reverted once (todo/done/em-emptytree.md, firefox -pe lost rust/llvm); needs a fresh go-ahead.
+- `em -C <ambiguous name>` picking one package: conflicts with architecture.md's ambiguity policy.
+- CONTENTS paths under `--prefix` without EPREFIX: changes the prefix VDB format; existing
+  em-written prefix VDBs need a migration or dual lookup.
+- BROOT exported empty: exporting `build_broot` conflicts with docs/user/root-model.md under `--prefix`.
+
+Remaining merge differences (17 packages, 3 scenarios): VDB `metadata` cache (safe to omit),
+`/var/lib/gentoo/news` and an empty `world` not pre-created, env-update header comments,
+binaries embedding the per-root builddir path, VDB FEATURES and `environment.bz2` variable set
+(D3), `usr/share/info/dir` entry order after unmerge, em-only reuse keys (BUILD_ENV_KEY,
+C/CXX/LDFLAGS) in `Packages`.
