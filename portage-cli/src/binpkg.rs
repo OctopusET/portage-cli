@@ -339,9 +339,8 @@ pub struct BinRepoEntry {
 /// Sorted ascending by `(priority, name)` then reversed, matching
 /// `bintree.py`'s `reversed(list(self._binrepos_conf.values()))` — for a
 /// plain `PORTAGE_BINHOST` list with no `binrepos.conf`, the reversals
-/// cancel to left-to-right order (see unit tests below). Simplification vs
-/// real portage's `ConfigParser`: no `%(VAR)s` interpolation, no
-/// `[DEFAULT]` section inheritance (same as `ReposConf`'s handling).
+/// cancel to left-to-right order (see unit tests below). `[DEFAULT]` keys
+/// apply to every section; no `%(VAR)s` interpolation.
 pub(crate) async fn portage_binhosts(globals: &Cli) -> Vec<BinRepoEntry> {
     let config_root = globals
         .roots()
@@ -394,9 +393,7 @@ fn combine_binhosts(
     // need the already-resolved order.
     let mut repos: Vec<(Option<i64>, String, BinRepoEntry)> = Vec::new();
     for name in order {
-        let Some(s) = sections.get(name) else {
-            continue;
-        };
+        let s = &portage_repo::ini::section_with_defaults(sections, name);
         let Some(sync_uri) = s.get("sync-uri").map(|v| normalize_binhost_uri(v)) else {
             crate::style::warn_line!("missing sync-uri setting for binrepo {name}");
             continue;
@@ -969,6 +966,14 @@ mod tests {
         let result = combine_binhosts(&sections, &order, None);
         assert_eq!(result.len(), 1);
         assert!(result[0].frozen);
+        assert!(result[0].verify_signature);
+    }
+
+    #[test]
+    fn default_section_keys_reach_every_binrepo() {
+        let (sections, order) =
+            parse_sections("[DEFAULT]\nverify-signature = true\n[a]\nsync-uri = http://a\n");
+        let result = combine_binhosts(&sections, &order, None);
         assert!(result[0].verify_signature);
     }
 
