@@ -224,7 +224,6 @@ mod tests {
             profile_package_use: &[],
             force_mask,
             facts: None,
-            installed: None,
         }
     }
 

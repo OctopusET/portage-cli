@@ -647,7 +647,7 @@ fn apply_order_filters(
 }
 
 /// Installed versions the solution keeps although `package.mask` or LICENSE
-/// filters them out, each with the reason, sorted by package.
+/// masks them, each with the reason, sorted by package.
 ///
 /// A version the plan still merges (same slot and merge root, any version)
 /// is not listed. A kept version whose ebuild is gone, or whose slot has no
@@ -692,14 +692,8 @@ fn masked_installed_kept(
     let mut kept: Vec<(Cpv, String)> = pairs
         .into_iter()
         .filter_map(|(pkg, ver)| {
-            let only = PortageVersionSet::from_operator(Operator::Equal, false, ver.clone());
-            let filtered = repo::filter_reasons_for(data, pkg.cpn(), &only, final_policy)
-                .into_iter()
-                .find(|c| {
-                    c.cpv.version == ver && pkg.slot().is_none_or(|slot| c.slot == Some(slot))
-                })?;
-            let why = repo::filter_reason_text(&filtered.reasons);
-            Some((filtered.cpv, why))
+            let (cpv, reasons) = installed_mask_reasons(data, &pkg, &ver, final_policy)?;
+            Some((cpv, repo::filter_reason_text(&reasons)))
         })
         .chain(dropped_roots.iter().filter_map(|(cpv, slot, why)| {
             if planned.contains(&(cpv.cpn, *slot, MergeRoot::Target)) {
@@ -712,6 +706,26 @@ fn masked_installed_kept(
     kept.sort_by_key(|(cpv, _)| cpv.to_string());
     kept.dedup();
     kept
+}
+
+/// What masks the installed `ver` of `pkg`: its filtered ebuild's reasons that apply
+/// to an installed instance, `None` when there are none.
+fn installed_mask_reasons(
+    data: &repo::RepoData,
+    pkg: &PortagePackage,
+    ver: &Version,
+    policy: &repo::ResolvePolicy,
+) -> Option<(Cpv, Vec<repo::FilterReason>)> {
+    let only = PortageVersionSet::from_operator(Operator::Equal, false, ver.clone());
+    let filtered = repo::filter_reasons_for(data, pkg.cpn(), &only, policy)
+        .into_iter()
+        .find(|c| c.cpv.version == *ver && pkg.slot().is_none_or(|slot| c.slot == Some(slot)))?;
+    let reasons: Vec<_> = filtered
+        .reasons
+        .into_iter()
+        .filter(repo::FilterReason::masks_installed)
+        .collect();
+    (!reasons.is_empty()).then_some((filtered.cpv, reasons))
 }
 
 /// Widened phase-2 selections, as autounmask candidates.
@@ -820,8 +834,8 @@ struct RootTargets {
     cpns: std::collections::HashSet<Cpn>,
     /// Atoms dropped with a warning, reported after the plan
     unsatisfiable: Vec<output::UnsatisfiableTarget>,
-    /// Installed versions that satisfied a silently dropped atom, with why
-    /// policy filters them. The slot is the filtered ebuild's slot.
+    /// Installed versions that satisfied a silently dropped atom, with what
+    /// masks them. The slot is the filtered ebuild's slot.
     masked_kept: Vec<(Cpv, Option<Interned<DefaultInterner>>, String)>,
 }
 
@@ -907,9 +921,14 @@ fn classify_root_targets(
                             let installed_here = installed.get(&c.cpv.cpn).is_some_and(|slots| {
                                 slots.get(&slot).is_some_and(|v| *v == c.cpv.version)
                             });
-                            installed_here.then(|| {
-                                (c.cpv.clone(), c.slot, repo::filter_reason_text(&c.reasons))
-                            })
+                            let masks: Vec<_> = c
+                                .reasons
+                                .iter()
+                                .filter(|r| r.masks_installed())
+                                .cloned()
+                                .collect();
+                            (installed_here && !masks.is_empty())
+                                .then(|| (c.cpv.clone(), c.slot, repo::filter_reason_text(&masks)))
                         }));
                         continue;
                     }

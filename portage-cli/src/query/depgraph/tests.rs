@@ -39,6 +39,7 @@ struct Solve<'a> {
     onlydeps: bool,
     update: bool,
     deep: bool,
+    newuse: bool,
     complete_graph: bool,
     exclude: &'a [String],
     resume: HashSet<(MergeRoot, String)>,
@@ -54,6 +55,7 @@ impl<'a> Solve<'a> {
             onlydeps: false,
             update: false,
             deep: false,
+            newuse: false,
             complete_graph: false,
             exclude: &[],
             resume: HashSet::new(),
@@ -198,7 +200,7 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         root_deps_rdeps: false,
         deep: opts.deep,
         update: opts.update,
-        newuse: false,
+        newuse: opts.newuse,
         changed_use: false,
         noreplace: opts.noreplace,
         nodeps: false,
@@ -680,6 +682,51 @@ fn an_installed_package_is_not_masked_by_its_keywords() {
         masked_names(&outcome)
     );
     assert_eq!(outcome.exit_code, 0);
+}
+
+#[test]
+fn a_keyword_masked_installed_target_is_not_reinstalled() {
+    let fix = fixture(&kept_bar("~amd64"), &[]);
+    plant_installed(&fix.root, "app-misc/bar-1", "0", "", "");
+    let atoms = [TargetAtom::explicit("app-misc/bar")];
+    let Err(err) = try_solve(&fix, Solve::new(&atoms)) else {
+        panic!("a keyword-masked target must not be planned");
+    };
+    assert!(format!("{err:#}").contains("app-misc/bar"), "{err:#}");
+}
+
+#[test]
+fn newuse_does_not_rebuild_a_keyword_masked_installed_package() {
+    let mut pkgs = kept_bar("~amd64");
+    pkgs[1].iuse = "+x";
+    let fix = fixture(&pkgs, &[]);
+    plant_installed(&fix.root, "app-misc/bar-1", "0", "", "x");
+    let atoms = [TargetAtom::explicit("app-misc/bar")];
+    let mut opts = Solve::new(&atoms);
+    opts.newuse = true;
+    let outcome = solve(&fix, opts);
+    assert!(names(&outcome).is_empty(), "planned {:?}", names(&outcome));
+    assert!(
+        masked_names(&outcome).is_empty(),
+        "masked was {:?}",
+        masked_names(&outcome)
+    );
+}
+
+#[test]
+fn a_keyword_masked_package_installed_only_on_the_target_is_not_built_for_broot() {
+    let mut pkgs = kept_bar("~amd64");
+    // `cache_text` has no BDEPEND field; this appends the line.
+    pkgs[0].depend = "app-misc/bar\nBDEPEND=app-misc/bar";
+    let mut fix = fixture(&pkgs, &[]);
+    plant_installed(&fix.root, "app-misc/bar-1", "0", "", "");
+    let broot = Utf8PathBuf::try_from(fix._dir.path().join("broot")).unwrap();
+    std::fs::create_dir_all(broot.as_std_path()).unwrap();
+    fix.roots = fix.roots.clone().with_broot(Some(broot));
+    let atoms = [TargetAtom::explicit("app-misc/consumer")];
+    let outcome = solve(&fix, Solve::new(&atoms));
+    assert_eq!(names(&outcome), ["app-misc/consumer-1"]);
+    assert_eq!(outcome.exit_code, 1);
 }
 
 #[test]

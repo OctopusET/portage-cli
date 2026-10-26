@@ -26,6 +26,16 @@ pub enum FilterReason {
     Restrict(Vec<String>),
 }
 
+impl FilterReason {
+    /// Whether this reason also masks the installed instance of the version
+    ///
+    /// Portage ignores KEYWORDS, PROPERTIES and RESTRICT for an installed package; its ebuild
+    /// stays filtered, so it is kept but never rebuilt.
+    pub fn masks_installed(&self) -> bool {
+        matches!(self, Self::Masked | Self::License(_))
+    }
+}
+
 /// A package version that was excluded and could resolve a dropped dep
 #[derive(Debug, Clone)]
 pub struct AutounmaskCandidate {
@@ -1104,9 +1114,6 @@ pub struct ResolvePolicy<'a> {
     pub force_mask: &'a crate::force_mask::ForceMask,
     /// Optional generation-scoped policy-fact cache
     pub facts: Option<PolicyFactsRef<'a>>,
-    /// Installed cpvs: portage never masks one by KEYWORDS, PROPERTIES or RESTRICT, so only
-    /// `package.mask` and LICENSE filter these
-    pub installed: Option<&'a std::collections::HashSet<Cpv>>,
 }
 
 impl<'a> ResolvePolicy<'a> {
@@ -1220,7 +1227,6 @@ impl ResolvedPolicy {
             profile_package_use: &self.profile_package_use,
             force_mask: &self.force_mask,
             facts: None,
-            installed: None,
         }
     }
 }
@@ -1448,7 +1454,6 @@ impl<'a> Adapter<'a> {
             profile_package_use: self.profile_package_use,
             force_mask: self.force_mask,
             facts: self.facts,
-            installed: Some(self.installed_cpvs),
         }
     }
 }
@@ -1857,19 +1862,6 @@ fn version_accepted_for(
     cache: &CacheEntry,
     repo: Interned<DefaultInterner>,
 ) -> bool {
-    if policy
-        .installed
-        .is_some_and(|installed| installed.contains(cpv))
-    {
-        let meta = &cache.metadata;
-        return !is_masked(
-            policy.package_mask,
-            policy.package_unmask,
-            cpv,
-            &meta.slot,
-            repo,
-        ) && license_ok_for(cpv, meta, policy, None);
-    }
     policy.facts.map_or_else(
         || version_accepted_uncached(policy, cpv, cache, repo, None),
         |facts| facts.accepted(*policy, cpv, cache, repo),
@@ -2032,12 +2024,10 @@ pub fn filter_reasons_for(
         let slot = Some(meta.slot.slot);
 
         let mut reasons = Vec::new();
-        let installed = policy.installed.is_some_and(|i| i.contains(cpv));
 
-        if !installed
-            && let Some(kw) = policy
-                .accept_keywords
-                .keyword_needed(&meta.keywords, cpv, slot)
+        if let Some(kw) = policy
+            .accept_keywords
+            .keyword_needed(&meta.keywords, cpv, slot)
         {
             reasons.push(FilterReason::Keyword(kw));
         }
@@ -2064,7 +2054,7 @@ pub fn filter_reasons_for(
                 reasons.push(FilterReason::License(needed));
             }
         }
-        if !installed && !meta.properties.is_empty() {
+        if !meta.properties.is_empty() {
             let accept = policy.accept_properties.effective_for(cpv, slot);
             let needed = if restrict_has_conditional(&meta.properties) {
                 let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
@@ -2076,7 +2066,7 @@ pub fn filter_reasons_for(
                 reasons.push(FilterReason::Properties(needed));
             }
         }
-        if !installed && !meta.restrict.is_empty() {
+        if !meta.restrict.is_empty() {
             let accept = policy.accept_restrict.effective_for(cpv, slot);
             let needed = if restrict_has_conditional(&meta.restrict) {
                 let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
@@ -2829,7 +2819,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &force_mask,
             facts: Some(cache.generation_for(&off)),
-            installed: None,
         };
         let on_policy = ResolvePolicy {
             package_use: &on,
@@ -2945,7 +2934,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &force_mask,
             facts: Some(facts),
-            installed: None,
         };
         let adapter = Adapter {
             data: &data,
@@ -3103,7 +3091,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: Box::leak(Box::default()),
             facts: None,
-            installed: None,
         }
     }
 
@@ -3472,7 +3459,6 @@ mod tests {
                     profile_package_use: &[],
                     force_mask: &ForceMask::default(),
                     facts: None,
-                    installed: None,
                 },
             )
             .slot()
@@ -3541,7 +3527,6 @@ mod tests {
                 profile_package_use: &[],
                 force_mask: &force_mask,
                 facts: None,
-                installed: None,
             };
 
             let selected = target_package(&data, &dep("app-misc/thing"), &policy);
@@ -3588,7 +3573,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &ForceMask::default(),
             facts: None,
-            installed: None,
         };
         let found = filter_reasons_for(
             &data,
@@ -3637,7 +3621,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &ForceMask::default(),
             facts: None,
-            installed: None,
         };
         let vs = portage_atom_pubgrub::PortageVersionSet::any();
         let cpn = Cpn::try_new("app-misc/thing").expect("cpn parses");
@@ -3675,7 +3658,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &ForceMask::default(),
             facts: None,
-            installed: None,
         };
         let cpn = Cpn::try_new("net-misc/thing").expect("cpn parses");
         let vs = portage_atom_pubgrub::PortageVersionSet::any();
@@ -3742,7 +3724,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &ForceMask::default(),
             facts: None,
-            installed: None,
         };
         assert!(
             target_package(&data, &dep("app-misc/thing"), &policy)
@@ -4445,7 +4426,6 @@ mod tests {
             profile_package_use: &[],
             force_mask: &ForceMask::default(),
             facts: None,
-            installed: None,
         };
         let vs = portage_atom_pubgrub::PortageVersionSet::any();
         let dropped = vec![DroppedDep {

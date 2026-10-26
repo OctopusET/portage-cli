@@ -255,7 +255,6 @@ mod tests {
                 profile_package_use: &[],
                 force_mask: &fm,
                 facts: None,
-                installed: None,
             },
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,

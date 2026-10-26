@@ -288,7 +288,6 @@ pub(super) async fn prepare<'a>(
         profile_package_use: &profile_package_use,
         force_mask: &force_mask,
         facts: None,
-        installed: Some(solver_installed_cpvs),
     };
 
     // Collapse each repo's own copy of a duplicate cpv (see

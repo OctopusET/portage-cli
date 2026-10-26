@@ -660,6 +660,12 @@ repository still has that version, the VDB's otherwise (emerge's default
 `--dynamic-deps=y`). Unlike emerge, the VDB's bound `:=` sub-slots are not
 merged into the ebuild's deps.
 
+**Installed packages masked only by KEYWORDS, PROPERTIES or RESTRICT.** As in
+emerge, such an installed version is visible and is never reported as masked,
+but its ebuild stays filtered, so em never rebuilds it. Unlike emerge, a
+package with no visible ebuild never enters the solve, so `--deep` does not
+descend into it. A dep on it is excused only when BROOT has the version too.
+
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
 condensation + lexicographic Kahn) and the `:slot` suffix on autounmask

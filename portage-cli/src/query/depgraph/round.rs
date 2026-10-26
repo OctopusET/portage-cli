@@ -562,15 +562,30 @@ pub(super) fn solve_round(
         profile_package_use,
         force_mask,
         facts: None,
-        installed: Some(solver_installed_cpvs),
     }
     .with_package_use(policy_facts, &package_use);
 
     // Autounmask: detect filtered candidates from dropped deps. Filtered
     // to just this round's actionable set and reported once the repair
     // loop settles (see below).
-    let autounmask_candidates =
-        repo::find_autounmask_candidates(data, provider.dropped_deps(), &final_policy);
+    // A dep an unmasked installed version satisfies needs no unmask. The dep carries no
+    // class, so it must be installed on BROOT too: a build-time edge is satisfied there.
+    let unmet_drops: Vec<_> = provider
+        .dropped_deps()
+        .iter()
+        .filter(|dep| {
+            empty
+                || dep.package.merge_root() != MergeRoot::Target
+                || !provider.installed_versions(&dep.package).any(|ver| {
+                    dep.version_set.contains(ver)
+                        && host_installed_cpvs.contains(&Cpv::new(*dep.package.cpn(), ver.clone()))
+                        && super::installed_mask_reasons(data, &dep.package, ver, &final_policy)
+                            .is_none()
+                })
+        })
+        .cloned()
+        .collect();
+    let autounmask_candidates = repo::find_autounmask_candidates(data, &unmet_drops, &final_policy);
     let widened_candidates = widened_autounmask_candidates(
         widened.get(),
         &solution,

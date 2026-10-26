@@ -130,7 +130,6 @@ impl Fixture {
             profile_package_use: &[],
             force_mask: &self.force_mask,
             facts: None,
-            installed: None,
         };
         filter_reasons_for(
             &self.data,
