@@ -95,6 +95,10 @@ impl PortageDependencyProvider {
                 };
 
             for ud in &constraint.use_deps {
+                // No USE change can satisfy a flag the target does not have.
+                if self.use_dep_flag_missing(target_pkg, target_ver, ud) {
+                    continue;
+                }
                 // Parent's flag state: currently active OR will be enabled after
                 // this build run (already recorded in by_target.required_enabled).
                 let parent_flag_enabled = if parent_is_installed {
@@ -372,6 +376,29 @@ impl PortageDependencyProvider {
         matches!(dep_default, Some(UseDefault::Enabled))
     }
 
+    /// Whether `ud` names a flag outside `pkg-ver`'s IUSE (or its VDB IUSE at the installed
+    /// version) without a `(+)`/`(-)` default, so the atom cannot match it (PMS 8.3.4)
+    pub(crate) fn use_dep_flag_missing(
+        &self,
+        pkg: &PortagePackage,
+        ver: &Version,
+        ud: &portage_atom::UseDep,
+    ) -> bool {
+        if ud.default.is_some() {
+            return false;
+        }
+        let in_repo = self
+            .package_data(pkg)
+            .and_then(|d| d.versions.get(ver))
+            .is_some_and(|v| v.iuse.contains(&ud.flag));
+        let in_vdb = self.installed.get(pkg).is_some_and(|(iv, _)| iv == ver)
+            && self
+                .installed_iuse
+                .get(pkg)
+                .is_some_and(|i| i.contains(&ud.flag));
+        !in_repo && !in_vdb
+    }
+
     /// Check whether all USE dep constraints for an OR-group branch are
     /// consistent with the desired final state of their targets
     ///
@@ -421,9 +448,16 @@ impl PortageDependencyProvider {
             None => &[],
         };
         Some(constraint.use_deps.iter().all(|ud| {
+            let parent_flag_enabled = constraint.parent_enabled.contains(&ud.flag);
+            if self.use_dep_flag_missing(target_pkg, &ver, ud) {
+                return match ud.kind {
+                    UseDepKind::Conditional => !parent_flag_enabled,
+                    UseDepKind::ConditionalInverse => parent_flag_enabled,
+                    _ => false,
+                };
+            }
             let dep_effective_enabled = active.contains(&ud.flag)
                 || self.effective_flag_new(target_pkg, &ver, ud.flag, ud.default);
-            let parent_flag_enabled = constraint.parent_enabled.contains(&ud.flag);
             eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled).is_none()
         }))
     }

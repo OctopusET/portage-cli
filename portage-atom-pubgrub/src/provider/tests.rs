@@ -4534,3 +4534,54 @@ fn or_group_skips_a_branch_whose_nested_choices_all_need_an_excluded_package() {
     assert!(solution.get(&pkg("dev-libs/c", "0")).is_some());
     assert!(solution.get(&pkg("dev-libs/b", "0")).is_none());
 }
+
+/// The version of `a/foo` picked for a consumer whose RDEPEND is `atom`
+fn foo_picked_for(foo: &[(&str, &[&str])], atom: &str) -> String {
+    let mut repo = InMemoryRepository::new();
+    for (cpv, iuse) in foo {
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse(cpv).unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            iuse.iter().copied().map(Interned::intern).collect(),
+            empty_deps(),
+        );
+    }
+    repo.add_version(
+        portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        PackageDeps {
+            rdepend: (DepEntry::parse(atom).unwrap()).into(),
+            ..empty_deps()
+        },
+    );
+    let mut provider = PortageDependencyProvider::new(repo);
+    let consumer = PortagePackage::slotted(
+        Cpn::parse("app-misc/consumer").unwrap(),
+        Interned::intern("0"),
+    );
+    let solution = provider
+        .resolve_targets(vec![(consumer, PortageVersionSet::any())])
+        .unwrap();
+    let foo = PortagePackage::slotted(Cpn::parse("a/foo").unwrap(), Interned::intern("0"));
+    solution.get(&foo).unwrap().to_string()
+}
+
+// PMS 8.3.4: a flag outside IUSE with no `(+)`/`(-)` default makes the atom not match.
+#[test]
+fn use_dep_on_a_flag_outside_iuse_skips_that_version() {
+    let foo: &[(&str, &[&str])] = &[("a/foo-1", &["bar"]), ("a/foo-2", &[])];
+    assert_eq!(foo_picked_for(foo, "a/foo[bar]"), "1");
+    assert_eq!(foo_picked_for(foo, "a/foo[-bar]"), "1");
+    assert_eq!(foo_picked_for(foo, "a/foo[bar(-)]"), "2");
+}
+
+// The `=V*` range is approximate; candidates are judged by `Version::glob_matches`.
+#[test]
+fn glob_dep_matches_exactly_over_candidates() {
+    let foo: &[(&str, &[&str])] = &[("a/foo-1.09", &[]), ("a/foo-1.095", &[])];
+    assert_eq!(foo_picked_for(foo, "=a/foo-1.09*"), "1.09");
+    let foo: &[(&str, &[&str])] = &[("a/foo-1.1", &[]), ("a/foo-1.2_alpha_alpha", &[])];
+    assert_eq!(foo_picked_for(foo, "=a/foo-1.2*"), "1.2_alpha_alpha");
+}

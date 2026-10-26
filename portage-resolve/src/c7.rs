@@ -350,7 +350,7 @@ fn cc6_conflicting_parents_terminate() {
 }
 
 // ---------------------------------------------------------------------------
-// CC7 — `[bar]` where bar is not in the target's IUSE: cannot be applied.
+// CC7: `[bar]` where bar is not in the target's IUSE, so no version matches (PMS 8.3.4).
 // ---------------------------------------------------------------------------
 #[test]
 fn cc7_flag_absent_from_target_iuse() {
@@ -358,8 +358,13 @@ fn cc7_flag_absent_from_target_iuse() {
         ("app/parent-1", &parent("", "dev/foo[bar]")),
         ("dev/foo-1", &leaf("other", "")), // no bar IUSE
     ]);
-    let (pu, co) = cosolve(&data, &["app/parent"]);
-    assert!(co.has("dev/foo-1"), "foo still resolves");
+    let (pu, _, solved) = crate::package_use::cosolve_use_deps(
+        Vec::new(),
+        &data,
+        |pu| solve_with(&data, &["app/parent"], pu),
+        |o: &Outcome| o.reqs.clone(),
+    );
+    assert!(solved.is_none(), "dev/foo-1 cannot match [bar]");
     assert!(
         !pu_forces(&pu, "dev/foo", "bar"),
         "C7 never forces a non-IUSE flag"

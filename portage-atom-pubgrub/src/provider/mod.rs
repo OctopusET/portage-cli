@@ -558,6 +558,7 @@ impl PortageDependencyProvider {
         // Second pass: register versions and convert deps for the closure of
         // `seeds` — every package referenced by a converted dependency (or a
         // virtual choice branch) is queued in turn.
+        let candidates = convert::Candidates::new(|cpn| repo.version_iuse(cpn));
         let mut queue: std::collections::VecDeque<Cpn> = seeds.into_iter().collect();
         let mut seen: HashSet<Cpn> = queue.iter().copied().collect();
         while let Some(cpn) = queue.pop_front() {
@@ -610,6 +611,7 @@ impl PortageDependencyProvider {
                         &cpn_str,
                         &cpv_use_cfg,
                         slot_map,
+                        &candidates,
                         meta.empty_any_of_matches,
                     )
                 });
@@ -705,8 +707,14 @@ impl PortageDependencyProvider {
                 let mut by_class = Vec::with_capacity(5);
                 let mut choices = Vec::new();
                 for entries in classes {
-                    let result =
-                        convert::convert_deps_groups(entries, &cpn_str, &use_cfg, slot_map, false);
+                    let result = convert::convert_deps_groups(
+                        entries,
+                        &cpn_str,
+                        &use_cfg,
+                        slot_map,
+                        &candidates,
+                        false,
+                    );
                     choices.extend(result.virtual_choices);
                     by_class.push(result.requirements);
                 }

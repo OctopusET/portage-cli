@@ -1555,6 +1555,25 @@ impl PackageRepository for Adapter<'_> {
         ranked
     }
 
+    fn version_iuse(&self, cpn: &Cpn) -> Vec<(Version, Vec<Interned<DefaultInterner>>)> {
+        self.data
+            .versions
+            .get(cpn)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(cpv, cache)| {
+                        self.autounmask_widen || self.version_accepted(cpv, cache)
+                    })
+                    .map(|(cpv, cache)| {
+                        let iuse = cache.metadata.iuse.iter().map(Interned::from).collect();
+                        (cpv.version.clone(), iuse)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)> {
         self.data
             .versions

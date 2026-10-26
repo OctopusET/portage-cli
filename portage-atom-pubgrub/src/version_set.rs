@@ -24,6 +24,10 @@ impl PortageVersionSet {
         self.0 == Ranges::full()
     }
 
+    pub(crate) fn from_ranges(ranges: Ranges<Version>) -> Self {
+        Self(ranges)
+    }
+
     /// Returns the inner ranges
     pub fn ranges(&self) -> &Ranges<Version> {
         &self.0
@@ -131,11 +135,11 @@ fn approximate_bounds(v: &Version) -> (Version, Version) {
     (base, upper)
 }
 
-/// `=V*` as a range agreeing with [`Version::glob_matches`]
+/// `=V*` as a range approximating [`Version::glob_matches`]
 ///
 /// PMS order has no least version above a prefix (`1_alpha_alpha` < `1_alpha`), so each bound
-/// is taken one `_alpha` below its version ([`alpha_below`]); deeper `_alpha` chains fall outside.
-/// Leading zeros of a later component also leak: `=1.09*` admits `1.095`.
+/// is taken one `_alpha` below its version ([`alpha_below`]); deeper `_alpha` chains fall outside,
+/// and `=1.09*` admits `1.095`. Dependency conversion corrects both over the repository's versions.
 fn glob_ranges(v: Version) -> Ranges<Version> {
     if v.revision.0 != 0 {
         return Ranges::singleton(v);

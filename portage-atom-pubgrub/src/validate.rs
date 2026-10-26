@@ -509,6 +509,9 @@ impl PortageDependencyProvider {
         match &blocker.use_deps {
             None => true,
             Some(use_deps) => use_deps.iter().all(|ud| {
+                if self.use_dep_flag_missing(cand_pkg, cand_ver, ud) {
+                    return false;
+                }
                 let eff = match installed_use {
                     Some(u) => u.contains(&ud.flag),
                     None => self.effective_flag_new(cand_pkg, cand_ver, ud.flag, ud.default),
@@ -1472,10 +1475,11 @@ mod tests {
             idepend: (vec![]).into(),
         };
 
-        repo.add_version(
+        repo.add_version_with_iuse(
             portage_atom::Cpv::parse("dev-libs/openssl-3.0.0").unwrap(),
             None,
             None,
+            vec![Interned::intern("ssl")],
             empty(),
         );
         repo.add_version(
@@ -1530,7 +1534,7 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: (DepEntry::parse("dev-libs/openssl[ssl?]").unwrap()).into(),
+                depend: (DepEntry::parse("dev-libs/openssl[ssl(-)?]").unwrap()).into(),
                 rdepend: (vec![]).into(),
                 bdepend: (vec![]).into(),
                 pdepend: (vec![]).into(),
@@ -1619,10 +1623,11 @@ mod tests {
             idepend: (vec![]).into(),
         };
 
-        repo.add_version(
+        repo.add_version_with_iuse(
             portage_atom::Cpv::parse("dev-libs/openssl-3.0.0").unwrap(),
             None,
             None,
+            vec![Interned::intern("ssl")],
             empty(),
         );
         repo.add_version(
@@ -1666,10 +1671,11 @@ mod tests {
             idepend: (vec![]).into(),
         };
 
-        repo.add_version(
+        repo.add_version_with_iuse(
             portage_atom::Cpv::parse("dev-libs/openssl-3.0.0").unwrap(),
             None,
             None,
+            vec![Interned::intern("ssl")],
             empty(),
         );
         repo.add_version(

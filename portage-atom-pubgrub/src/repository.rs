@@ -133,6 +133,16 @@ pub trait PackageRepository {
         rank_slots_by_version(best)
     }
 
+    /// Each version of `cpn` with its `IUSE`, the facts an atom's glob and USE deps filter on
+    ///
+    /// Override with a direct metadata read if `versions_for` is expensive.
+    fn version_iuse(&self, cpn: &Cpn) -> Vec<(Version, Vec<Interned<DefaultInterner>>)> {
+        self.versions_for(cpn)
+            .into_iter()
+            .map(|(cpv, meta)| (cpv.version, meta.iuse))
+            .collect()
+    }
+
     /// The resolved **desired** USE state for a specific version
     ///
     /// This is the caller's policy fully resolved — global USE (profile +

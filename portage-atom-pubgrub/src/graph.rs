@@ -1836,10 +1836,11 @@ mod tests {
             None,
             rdepend(&[">=media-libs/harfbuzz-1.4.5:=[icu,graphite]"]),
         );
-        repo.add_version(
+        repo.add_version_with_iuse(
             Cpv::parse("media-libs/harfbuzz-12.3.2").unwrap(),
             Some(slot("0")),
             Some(Interned::intern("6.0.0")),
+            vec![Interned::intern("icu"), Interned::intern("graphite")],
             rdepend(&[]),
         );
 

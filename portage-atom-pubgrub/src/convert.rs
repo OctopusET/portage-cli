@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use portage_atom::interner::{DefaultInterner, Interned};
@@ -10,6 +12,36 @@ use crate::package::PortagePackage;
 use crate::required_use::RequiredUse;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
+use version_ranges::Ranges;
+
+type Flag = Interned<DefaultInterner>;
+/// One CPN's versions, each with its IUSE
+type VersionIuse = [(Version, Vec<Flag>)];
+type ReadIuse<'a> = dyn Fn(&Cpn) -> Vec<(Version, Vec<Flag>)> + 'a;
+
+/// Each CPN's repository versions with their IUSE, read on first use
+pub(crate) struct Candidates<'a> {
+    read: Box<ReadIuse<'a>>,
+    cache: RefCell<HashMap<Cpn, Rc<VersionIuse>>>,
+}
+
+impl<'a> Candidates<'a> {
+    pub(crate) fn new(read: impl Fn(&Cpn) -> Vec<(Version, Vec<Flag>)> + 'a) -> Self {
+        Self {
+            read: Box::new(read),
+            cache: RefCell::default(),
+        }
+    }
+
+    fn get(&self, cpn: &Cpn) -> Rc<VersionIuse> {
+        if let Some(c) = self.cache.borrow().get(cpn) {
+            return c.clone();
+        }
+        let c: Rc<VersionIuse> = (self.read)(cpn).into();
+        self.cache.borrow_mut().insert(*cpn, c.clone());
+        c
+    }
+}
 
 /// One dependency requirement: target package, version range, and the
 /// outermost eagerly-evaluated USE flag gating it (if any)
@@ -154,25 +186,28 @@ fn convert_deps(
     use_config: &UseConfig,
     slot_map: &SlotMap,
 ) -> ConversionResult {
-    convert_deps_groups(entries, cpn_str, use_config, slot_map, true)
+    let none = Candidates::new(|_| Vec::new());
+    convert_deps_groups(entries, cpn_str, use_config, slot_map, &none, true)
 }
 
 /// [`convert_deps`] with PMS table 8.6 empty-`||`/`^^` policy
 ///
 /// `empty_any_of_matches` is EAPI 0–6 (vacuous success). EAPI 7–9 pass
 /// `false` so an any-of/exactly-one-of with no remaining members is
-/// unsatisfiable.
-pub fn convert_deps_groups(
+/// unsatisfiable. `candidates` narrows each atom to the versions it can match.
+pub(crate) fn convert_deps_groups(
     entries: &[DepEntry],
     cpn_str: &str,
     use_config: &UseConfig,
     slot_map: &SlotMap,
+    candidates: &Candidates<'_>,
     empty_any_of_matches: bool,
 ) -> ConversionResult {
     let mut ctx = ConvertCtx {
         cpn_str,
         use_config,
         slot_map,
+        candidates,
         empty_any_of_matches,
         requirements: Vec::new(),
         blockers: Vec::new(),
@@ -201,6 +236,7 @@ struct ConvertCtx<'a> {
     cpn_str: &'a str,
     use_config: &'a UseConfig,
     slot_map: &'a SlotMap,
+    candidates: &'a Candidates<'a>,
     empty_any_of_matches: bool,
     requirements: Vec<Req>,
     blockers: Vec<Dep>,
@@ -325,6 +361,7 @@ impl ConvertCtx<'_> {
             }
             None => PortageVersionSet::any(),
         };
+        let version_set = self.narrow(dep, version_set);
 
         if let Some(slot_dep) = &dep.slot_dep {
             match slot_dep {
@@ -357,6 +394,45 @@ impl ConvertCtx<'_> {
 
         self.collect_post_solve_unslotted(cpn, &version_set, dep);
         self.push_unslotted_or_choice(cpn, version_set);
+    }
+
+    /// Drop the candidates `dep` can never match: a `=V*` glob is exact over them (the range
+    /// alone is approximate), and a USE dep that applies needs its flag in IUSE unless defaulted.
+    fn narrow(&self, dep: &Dep, vs: PortageVersionSet) -> PortageVersionSet {
+        let pattern = dep.version.as_ref().filter(|_| dep.glob);
+        let needed: Vec<Flag> = dep
+            .use_deps
+            .iter()
+            .flatten()
+            .filter(|ud| ud.default.is_none() && self.use_dep_applies(ud))
+            .map(|ud| ud.flag)
+            .collect();
+        if pattern.is_none() && needed.is_empty() {
+            return vs;
+        }
+        let mut ranges = vs.ranges().clone();
+        for (v, iuse) in self.candidates.get(&dep.cpn).iter() {
+            let one = Ranges::singleton(v.clone());
+            if pattern.is_some_and(|p| !v.glob_matches(p))
+                || !needed.iter().all(|f| iuse.contains(f))
+            {
+                ranges = ranges.intersection(&one.complement());
+            } else if pattern.is_some() {
+                ranges = ranges.union(&one);
+            }
+        }
+        PortageVersionSet::from_ranges(ranges)
+    }
+
+    /// Whether `ud` constrains the target at all under the parent's USE (PMS 8.3.4)
+    fn use_dep_applies(&self, ud: &UseDep) -> bool {
+        match ud.kind {
+            UseDepKind::Conditional => self.use_config.get(ud.flag) == UseFlagState::Enabled,
+            UseDepKind::ConditionalInverse => {
+                self.use_config.get(ud.flag) == UseFlagState::Disabled
+            }
+            _ => true,
+        }
     }
 
     fn collect_post_solve(
@@ -1656,7 +1732,9 @@ mod tests {
     fn empty_any_of_unmatches_on_eapi_7() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("|| ( ssl? ( dev-libs/openssl ) )").unwrap();
-        let result = convert_deps_groups(&entries, "test/pkg", &config, &empty_slots(), false);
+        let none = Candidates::new(|_| Vec::new());
+        let result =
+            convert_deps_groups(&entries, "test/pkg", &config, &empty_slots(), &none, false);
         assert_eq!(result.requirements.len(), 1);
         assert!(
             result.virtual_choices[0].versions.is_empty(),
