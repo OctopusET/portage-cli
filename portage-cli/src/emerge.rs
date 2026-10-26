@@ -1552,35 +1552,126 @@ async fn remove_matched_packages(
     let roots = cli.roots();
     let system =
         maint::world::resolve_set(roots.config(), roots.merge_root(), "system").unwrap_or_default();
-    for cpn in system_warning_cps(&matched, &vdb, &system) {
-        crate::style::warn_line!("'{cpn}' is part of your system profile.");
+    for (cpn, virt) in system_warning_cps(&matched, &vdb, &system) {
+        match virt {
+            Some(virt) => {
+                crate::style::warn_line!("'{cpn}' ({virt}) is part of your system profile.")
+            }
+            None => crate::style::warn_line!("'{cpn}' is part of your system profile."),
+        }
         crate::style::warn_line!("Unmerging it may be damaging to your system.");
     }
 
     run_unmerge_batch(cli, &vdb, &matched, &exclude, verb, &gerund).await
 }
 
-/// The packages of `system` that removing `packages` leaves with no installed version
+/// The packages of `system` that removing `packages` leaves with no installed version, each with
+/// the `virtual/*` of `system` that pulled it in, if any
 fn system_warning_cps(
     packages: &[portage_vdb::InstalledPackage],
     vdb: &portage_vdb::Vdb,
     system: &[portage_atom::Dep],
-) -> Vec<portage_atom::Cpn> {
+) -> Vec<(portage_atom::Cpn, Option<portage_atom::Cpn>)> {
+    let system = expand_system_virtuals(system, vdb);
     let removed: std::collections::HashSet<&portage_atom::Cpv> =
         packages.iter().map(|p| p.cpv()).collect();
     let mut cpns: Vec<portage_atom::Cpn> = packages.iter().map(|p| *p.cpn()).collect();
     cpns.sort();
     cpns.dedup();
-    cpns.retain(|cpn| {
-        system.iter().any(|d| d.cpn == *cpn)
-            && vdb.category(cpn.category.as_ref()).is_none_or(|c| {
-                c.packages()
-                    .into_iter()
-                    .filter(|p| p.cpn() == cpn)
-                    .all(|p| removed.contains(p.cpv()))
-            })
-    });
-    cpns
+    cpns.into_iter()
+        .filter_map(|cpn| {
+            let virt = *system.get(&cpn)?;
+            vdb.category(cpn.category.as_ref())
+                .is_none_or(|c| {
+                    c.packages()
+                        .into_iter()
+                        .filter(|p| *p.cpn() == cpn)
+                        .all(|p| removed.contains(p.cpv()))
+                })
+                .then_some((cpn, virt))
+        })
+        .collect()
+}
+
+/// The packages `system` stands for, with new-style virtuals expanded through the installed
+/// virtual's RDEPEND to its installed providers, as emerge's unmerge does; each provider maps to
+/// the virtual of `system` it came from
+fn expand_system_virtuals(
+    system: &[portage_atom::Dep],
+    vdb: &portage_vdb::Vdb,
+) -> std::collections::HashMap<portage_atom::Cpn, Option<portage_atom::Cpn>> {
+    use portage_atom::DepEntry;
+    let installed: Vec<portage_vdb::InstalledPackage> = vdb.packages().into_iter().collect();
+    let best = |dep: &portage_atom::Dep| {
+        installed
+            .iter()
+            .filter(|p| dep.matches_cpv(p.cpv(), p.slot().ok().as_ref()))
+            .max_by(|a, b| a.cpv().cmp(b.cpv()))
+    };
+    fn atoms<'a>(
+        entries: &'a [DepEntry],
+        use_flags: &[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
+        satisfied: &dyn Fn(&DepEntry) -> bool,
+        out: &mut Vec<&'a portage_atom::Dep>,
+    ) {
+        for entry in entries {
+            match entry {
+                DepEntry::Atom(dep) => out.push(dep),
+                DepEntry::UseConditional {
+                    flag,
+                    negate,
+                    children,
+                } => {
+                    if use_flags.contains(flag) != *negate {
+                        atoms(children, use_flags, satisfied, out);
+                    }
+                }
+                DepEntry::AllOf(children) => atoms(children, use_flags, satisfied, out),
+                DepEntry::AnyOf(children)
+                | DepEntry::ExactlyOneOf(children)
+                | DepEntry::AtMostOneOf(children) => {
+                    if let Some(pick) = children.iter().find(|c| satisfied(c)).or(children.first())
+                    {
+                        atoms(std::slice::from_ref(pick), use_flags, satisfied, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for root in system.iter().filter(|d| d.blocker.is_none()) {
+        let mut traversed = std::collections::HashSet::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dep) = stack.pop() {
+            if dep.blocker.is_some() {
+                continue;
+            }
+            let virt = best(&dep).filter(|_| dep.cpn.category.as_str() == "virtual");
+            let Some(virt) = virt else {
+                if dep.cpn == root.cpn {
+                    out.entry(dep.cpn).or_insert(None);
+                } else {
+                    out.insert(dep.cpn, Some(root.cpn));
+                }
+                continue;
+            };
+            if !traversed.insert(virt.cpv().clone()) {
+                continue;
+            }
+            let use_flags = virt.use_flags().unwrap_or_default();
+            let satisfied = |e: &DepEntry| {
+                let mut deps = Vec::new();
+                atoms(std::slice::from_ref(e), &use_flags, &|_| false, &mut deps);
+                deps.iter()
+                    .all(|d| d.blocker.is_some() || best(d).is_some())
+            };
+            let rdepend = virt.rdepend().ok().flatten().unwrap_or_default();
+            let mut deps = Vec::new();
+            atoms(&rdepend, &use_flags, &satisfied, &mut deps);
+            stack.extend(deps.into_iter().cloned());
+        }
+    }
+    out
 }
 
 /// The removal core shared by `-C`/`-P` ([`remove_matched_packages`]) and
@@ -2332,9 +2423,37 @@ mod tests {
             "app-misc/foo-1.0",
         ]);
         let warned = system_warning_cps(&removing, &vdb, &system);
-        assert_eq!(warned, [portage_atom::Cpn::parse("sys-apps/sed").unwrap()]);
+        assert_eq!(
+            warned,
+            [(portage_atom::Cpn::parse("sys-apps/sed").unwrap(), None)]
+        );
         let both = pick(&["dev-lang/python-3.12.1", "dev-lang/python-3.13.1"]);
         assert_eq!(system_warning_cps(&both, &vdb, &system).len(), 1);
+    }
+
+    #[test]
+    fn unmerging_a_system_virtual_provider_names_the_virtual() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_pkg(&vdb_root, "virtual", "libc-1-r1");
+        std::fs::write(
+            vdb_root.join("virtual/libc-1-r1/RDEPEND"),
+            "|| ( sys-libs/musl sys-libs/glibc ) virtual/os-headers",
+        )
+        .unwrap();
+        write_pkg(&vdb_root, "sys-libs", "glibc-2.40");
+        let vdb = open_vdb(tmp.path());
+        let system = [portage_atom::Dep::parse("virtual/libc").unwrap()];
+        let removing: Vec<_> = vdb
+            .packages()
+            .into_iter()
+            .filter(|p| p.cpn().package.as_str() == "glibc")
+            .collect();
+        let cpn = |s| portage_atom::Cpn::parse(s).unwrap();
+        assert_eq!(
+            system_warning_cps(&removing, &vdb, &system),
+            [(cpn("sys-libs/glibc"), Some(cpn("virtual/libc")))]
+        );
     }
 
     #[test]
