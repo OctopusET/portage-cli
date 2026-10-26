@@ -1118,8 +1118,9 @@ mod tests {
             assert!(out.status.success(), "{cmd:?}");
             String::from_utf8(out.stdout).unwrap()
         };
-        let user = output(Command::new("id").arg("-un")).trim().to_owned();
-        if user.chars().all(|c| c.is_ascii_digit()) {
+        let id = Command::new("id").arg("-un").output().unwrap();
+        let user = String::from_utf8(id.stdout).unwrap().trim().to_owned();
+        if !id.status.success() || user.is_empty() || user.chars().all(|c| c.is_ascii_digit()) {
             eprintln!("skipping: uid has no passwd entry");
             return;
         }
