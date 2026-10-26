@@ -185,11 +185,11 @@ pub const C_GOOD: Style = Style::new()
 /// `33m`, plain yellow) — deliberately one shade quieter than [`C_WARN`]'s
 /// bold, since a QA notice is aimed at the ebuild's author, not its user.
 pub const C_QAWARN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
-/// The default answer in a `[Yes/No]` confirm prompt — real portage's
+/// The default answer in a `[Yes/No]` confirm prompt: real portage's
 /// `PROMPT_CHOICE_DEFAULT` (plain green, not bold; `UserQuery.query`'s
 /// default `colours=[PROMPT_CHOICE_DEFAULT, PROMPT_CHOICE_OTHER]`).
 pub const C_CHOICE_DEFAULT: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
-/// The non-default answer in a `[Yes/No]` confirm prompt — real portage's
+/// The non-default answer in a `[Yes/No]` confirm prompt: real portage's
 /// `PROMPT_CHOICE_OTHER` (plain red, not bold).
 pub const C_CHOICE_OTHER: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
 

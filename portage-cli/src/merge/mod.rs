@@ -502,17 +502,17 @@ pub(crate) fn require_ask_tty() -> Result<()> {
     }
 }
 
-/// Ask whether to `action`, the full description ("merge these 3 package(s)") — the
+/// Ask whether to `action`, the full description ("merge these 3 package(s)"); the
 /// caller composes it, since what belongs in it (e.g. PMS 8.3.2 blocker
 /// victims a merge will also unmerge) is caller-specific; this just handles
 /// the prompt itself.
 ///
-/// A "No" prints `>>> Quitting.` and fails with [`crate::error::Declined`].
+/// A "No" prints `Quitting.` between blank lines and fails with [`crate::error::Declined`].
 pub(crate) fn confirm_action(action: &str) -> Result<()> {
     if ask_yes_no(&format!("\n>>> Would you like to {action}?"))? {
         Ok(())
     } else {
-        println!(">>> Quitting.");
+        println!("\nQuitting.\n");
         Err(crate::error::Declined.into())
     }
 }

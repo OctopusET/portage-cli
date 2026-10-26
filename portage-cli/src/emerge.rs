@@ -1874,7 +1874,7 @@ async fn installed_package_shell(
 /// Disk-mutating half of [`run_unmerge_batch`]: profile-env'd shell, one
 /// preserve-libs graph for the batch, per-package removal, `env-update`.
 ///
-/// No `--pretend`/`--ask` — callers that already confirmed (blocker unmerge
+/// No `--pretend`/`--ask`: callers that already confirmed (blocker unmerge
 /// during a real merge) use this directly. `clean_world` drops the world entries a
 /// removal leaves matching nothing; a blocker unmerge keeps them for the replacement.
 async fn execute_unmerge_batch(
