@@ -179,7 +179,7 @@ pub(super) async fn prepare<'a>(
         async {
             let start = Instant::now();
             let result = use_env::build_use_env(
-                set.main(),
+                &set,
                 config_root,
                 roots.config_overlay(),
                 extra_use_override,

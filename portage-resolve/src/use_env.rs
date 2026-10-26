@@ -5,7 +5,7 @@ use portage_atom::Dep;
 use portage_atom::interner::Interned;
 use portage_atom_pubgrub::{ProfileUseNode, UseLayer, UseOverride};
 use portage_repo::{
-    AcceptSet, Environment, LicenseGroupRegistry, MakeConf, ProfileStack, Repository, Settings,
+    AcceptSet, Environment, LicenseGroupRegistry, MakeConf, ProfileStack, RepoSet, Settings,
     SettingsSources,
 };
 
@@ -39,11 +39,11 @@ pub struct UseEnv {
     ///
     /// Parent first — Portage `setcpv` interleave inside `defaults`.
     pub profile_package_use: Vec<ProfileUseNode>,
-    /// Masked packages: repo-global `profiles/package.mask`, the profile
+    /// Masked packages: each repo's `profiles/package.mask`, the profile
     /// stack, and `/etc/portage/package.mask`
     pub package_mask: Vec<Dep>,
-    /// Unmasks from the profiles and `/etc/portage/package.unmask` — a matching
-    /// entry cancels any mask for that package
+    /// Unmasks from each repo's `profiles/package.unmask`, the profiles and
+    /// `/etc/portage/package.unmask` — a matching entry cancels any mask for that package
     pub package_unmask: Vec<Dep>,
     /// Profile USE force/mask policy (global + per-package + stable variants),
     /// applied per package to effective USE and consulted by the Level-C cede gate
@@ -128,17 +128,17 @@ pub struct PendingConfig {
 /// mask) into a resolved [`UseEnv`], the shared input every per-package
 /// policy fold in this crate runs on
 pub async fn build_use_env(
-    repo: &Repository,
+    repos: &RepoSet,
     root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
     extra_use_override: Option<&str>,
     pending: Option<&PendingConfig>,
 ) -> Result<UseEnv> {
-    compute_use_env(repo, root, config_overlay, extra_use_override, pending).await
+    compute_use_env(repos, root, config_overlay, extra_use_override, pending).await
 }
 
 async fn compute_use_env(
-    repo: &Repository,
+    repos: &RepoSet,
     root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
     extra_use_override: Option<&str>,
@@ -182,6 +182,7 @@ async fn compute_use_env(
             .with_user_profile(overlay.join("profile").into_std_path_buf())
             .map_err(|e| anyhow::anyhow!("failed to load the prefix overlay profile: {e}"))?;
     }
+    let repo = repos.main();
     let mut shell = repo
         .shell()
         .await
@@ -412,24 +413,41 @@ async fn compute_use_env(
         package_use.extend(load_package_env_use(overlay).await);
     }
 
-    // Mask sources, in portage's order: the repo-global `profiles/package.mask`
-    // (applies regardless of profile), the profile chain (with `-atom` removals
-    // already resolved), and the site `/etc/portage/package.mask`. A mask is
-    // overridden per package by the profiles' and the site's `package.unmask`.
-    let mut package_mask = repo.repo_package_mask().unwrap_or_default();
-    package_mask.extend(stack.package_mask().unwrap_or_default());
+    // Mask sources, in portage's order: each repo's `profiles/package.mask` (scoped to that
+    // repo), the profile chain (with `-atom` removals already resolved), and the site files,
+    // whose `-atom` lines may cancel an atom from any layer. A mask is overridden per package
+    // by an unmask from the same layers.
+    let mut package_mask = Vec::new();
+    let mut package_unmask = Vec::new();
+    for r in repos.iter() {
+        package_mask.extend(r.repo_package_mask()?);
+        package_unmask.extend(r.repo_package_unmask()?);
+    }
+    package_mask.extend(stack.package_mask()?);
     package_mask.extend(layer.iter().flat_map(|l| l.package_mask.iter().cloned()));
-    package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
-    let mut package_unmask = stack.package_unmask().unwrap_or_default();
+    package_unmask.extend(stack.package_unmask()?);
     package_unmask.extend(layer.iter().flat_map(|l| l.package_unmask.iter().cloned()));
-    package_unmask.extend(load_dep_list(portage_dir.join("package.unmask").as_str()));
+    stack_user_atoms(
+        &mut package_mask,
+        load_atom_lines(portage_dir.join("package.mask").as_str()),
+    );
+    stack_user_atoms(
+        &mut package_unmask,
+        load_atom_lines(portage_dir.join("package.unmask").as_str()),
+    );
     if let Some(pending) = pending {
         package_mask.extend(pending.package_mask.iter().cloned());
         package_unmask.extend(pending.package_unmask.iter().cloned());
     }
     if let Some(overlay) = config_overlay {
-        package_mask.extend(load_dep_list(overlay.join("package.mask").as_str()));
-        package_unmask.extend(load_dep_list(overlay.join("package.unmask").as_str()));
+        stack_user_atoms(
+            &mut package_mask,
+            load_atom_lines(overlay.join("package.mask").as_str()),
+        );
+        stack_user_atoms(
+            &mut package_unmask,
+            load_atom_lines(overlay.join("package.unmask").as_str()),
+        );
     }
 
     // `package.provided` — CPVs the system supplies externally (profile stack,
@@ -700,16 +718,16 @@ fn load_package_license(path: &str, groups: &LicenseGroupRegistry) -> Vec<(Dep, 
     result
 }
 
-/// Load a simple atom list (one dep per line, `#` comments, optionally a directory)
-fn load_dep_list(path: &str) -> Vec<Dep> {
+/// Load a `package.mask`-format atom list as `(is_removal, atom)` lines
+fn load_atom_lines(path: &str) -> Vec<(bool, Dep)> {
     let mut result = Vec::new();
     for line in portage_repo::read_config_lines(path).unwrap_or_default() {
-        // Strip leading '-' for incremental removal entries — skip removals here
-        if line.starts_with('-') {
-            continue;
-        }
-        if let Some(dep) = parse_config_atom(path, &line) {
-            result.push(dep);
+        let (removal, atom) = match line.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, line.as_str()),
+        };
+        if let Some(dep) = parse_config_atom(path, atom) {
+            result.push((removal, dep));
         }
     }
     result
@@ -722,6 +740,25 @@ fn parse_config_atom(path: &str, atom: &str) -> Option<Dep> {
         .ok()
 }
 
+/// Stack site atom lines onto `acc`: `-atom` drops matching atoms from every earlier layer,
+/// and one without `::repo` also drops that atom's repo-scoped forms
+fn stack_user_atoms(acc: &mut Vec<Dep>, lines: Vec<(bool, Dep)>) {
+    for (removal, dep) in lines {
+        if !removal {
+            acc.push(dep);
+            continue;
+        }
+        acc.retain(|d| {
+            if dep.repo.is_some() {
+                return *d != dep;
+            }
+            let mut bare = d.clone();
+            bare.repo = None;
+            bare != dep
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -732,14 +769,16 @@ mod tests {
     use portage_atom::Dep;
     use portage_atom_pubgrub::UseOverride;
 
-    fn make_test_repo(dir: &std::path::Path) -> portage_repo::Repository {
+    fn make_test_repo(dir: &std::path::Path) -> portage_repo::RepoSet {
         std::fs::create_dir_all(dir.join("metadata")).unwrap();
         std::fs::write(dir.join("metadata/layout.conf"), "").unwrap();
         std::fs::create_dir_all(dir.join("profiles")).unwrap();
-        portage_repo::Repository::builder()
-            .in_memory_cache()
-            .open(dir)
-            .unwrap()
+        portage_repo::RepoSet::single(
+            portage_repo::Repository::builder()
+                .in_memory_cache()
+                .open(dir)
+                .unwrap(),
+        )
     }
 
     // Regression: `em crossdev --setup -p` on a target that has never been
@@ -886,6 +925,41 @@ mod tests {
                 .contains(&Dep::parse(">dev-libs/foo-1").unwrap())
         );
         assert_eq!(env.package_unmask, [Dep::parse("=dev-libs/foo-3").unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn a_site_removal_cancels_a_repo_level_mask() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let profiles = repo_dir.path().join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(profiles.join("repo_name"), "gentoo\n").unwrap();
+        std::fs::write(
+            profiles.join("package.mask"),
+            "dev-libs/foo\ndev-libs/bar\n",
+        )
+        .unwrap();
+        let repos = make_test_repo(repo_dir.path());
+        let profile_dir = repo_dir.path().join("test-profile");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(profile_dir.join("make.defaults"), "").unwrap();
+        let pending = PendingConfig {
+            profile: Some(PendingProfile {
+                parents: vec![camino::Utf8PathBuf::try_from(profile_dir).unwrap()],
+                layer: None,
+            }),
+            ..Default::default()
+        };
+        let root_dir = tempfile::tempdir().unwrap();
+        let site = root_dir.path().join("etc/portage");
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::write(site.join("package.mask"), "-dev-libs/foo\n").unwrap();
+        let root = camino::Utf8Path::from_path(root_dir.path()).unwrap();
+
+        let env = build_use_env(&repos, Some(root), None, None, Some(&pending))
+            .await
+            .unwrap();
+        let masks: Vec<_> = env.package_mask.iter().map(|d| d.to_string()).collect();
+        assert_eq!(masks, ["dev-libs/bar::gentoo"]);
     }
 
     // Expected override shorthand

@@ -836,18 +836,59 @@ impl Repository {
         }
     }
 
-    /// Parse the repository-level `profiles/package.mask`
+    /// The repository-level `profiles/package.mask`, stacked on each master's and limited to
+    /// this repository's packages
     ///
-    /// These masks apply across all profiles in the repository and should
-    /// be merged before any profile-stack masks.  Returns an empty `Vec`
-    /// if the file is absent.
+    /// A `-atom` line cancels a master's mask for this repository only. Atoms without a
+    /// `::repo` get this repository's name. Returns an empty `Vec` if no file is present.
     ///
     /// See [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
     pub fn repo_package_mask(&self) -> Result<Vec<Dep>> {
-        let path = self.path.join("profiles").join("package.mask");
+        let own = profile::read_atom_lines(self.profiles_file("package.mask").as_std_path())?;
         let mut acc = Vec::new();
+        if self.masters.is_empty() {
+            profile::stack_atom_lines(&mut acc, own.iter().cloned());
+        }
+        for master in &self.masters {
+            let mut stacked = Vec::new();
+            let master_file = master.profiles_file("package.mask");
+            profile::stack_atom_lines(
+                &mut stacked,
+                profile::read_atom_lines(master_file.as_std_path())?,
+            );
+            profile::stack_atom_lines(&mut stacked, own.iter().cloned());
+            profile::stack_atom_lines(&mut acc, stacked.into_iter().map(|d| (false, d)));
+        }
+        Ok(self.scoped_to_self(acc))
+    }
+
+    /// The repository-level `profiles/package.unmask`, limited to this repository's packages
+    ///
+    /// Read only under a `portage-1`, `portage-1-compat` or `portage-2` `profile-formats`.
+    pub fn repo_package_unmask(&self) -> Result<Vec<Dep>> {
+        let portage1 = self
+            .layout
+            .profile_formats
+            .iter()
+            .any(|f| matches!(f.as_str(), "portage-1" | "portage-1-compat" | "portage-2"));
+        if !portage1 {
+            return Ok(Vec::new());
+        }
+        let mut acc = Vec::new();
+        let path = self.profiles_file("package.unmask");
         profile::stack_atom_lines(&mut acc, profile::read_atom_lines(path.as_std_path())?);
-        Ok(acc)
+        Ok(self.scoped_to_self(acc))
+    }
+
+    fn profiles_file(&self, name: &str) -> Utf8PathBuf {
+        self.path.join("profiles").join(name)
+    }
+
+    fn scoped_to_self(&self, mut deps: Vec<Dep>) -> Vec<Dep> {
+        for dep in &mut deps {
+            dep.repo.get_or_insert(self.name);
+        }
+        deps
     }
 
     /// Build a [`UseExpand`] grouper from this repository's `profiles/desc/` names
@@ -1202,6 +1243,45 @@ mod tests {
         .unwrap();
         let masks = repo.repo_package_mask().unwrap();
         assert_eq!(masks.len(), 2);
+    }
+
+    #[test]
+    fn repo_package_mask_stacks_on_masters_and_scopes_to_the_repo() {
+        let repos_dir = tempfile::tempdir().unwrap();
+        let master_dir = repos_dir.path().join("gentoo");
+        std::fs::create_dir_all(master_dir.join("metadata")).unwrap();
+        std::fs::write(master_dir.join("metadata/layout.conf"), "").unwrap();
+        std::fs::create_dir_all(master_dir.join("profiles")).unwrap();
+        std::fs::write(
+            master_dir.join("profiles/package.mask"),
+            "dev-libs/a\ndev-libs/b\n",
+        )
+        .unwrap();
+        let overlay_dir = tempfile::tempdir().unwrap();
+        make_test_repo(&overlay_dir);
+        let profiles = overlay_dir.path().join("profiles");
+        std::fs::write(profiles.join("repo_name"), "ovl\n").unwrap();
+        std::fs::write(
+            profiles.join("package.mask"),
+            "-dev-libs/a\ndev-libs/c::other\n",
+        )
+        .unwrap();
+        std::fs::write(profiles.join("package.unmask"), "dev-libs/d\n").unwrap();
+
+        let masters = vec!["gentoo".to_string()];
+        let repo = Repository::builder()
+            .in_memory_cache()
+            .open_with_masters(overlay_dir.path(), repos_dir.path(), Some(&masters), None)
+            .unwrap();
+        let masks: Vec<_> = repo
+            .repo_package_mask()
+            .unwrap()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        assert_eq!(masks, ["dev-libs/b::ovl", "dev-libs/c::other"]);
+        // Without a portage-1 style profile-formats there is no repo-level package.unmask.
+        assert!(repo.repo_package_unmask().unwrap().is_empty());
     }
 
     #[test]
