@@ -45,13 +45,17 @@ pub struct Distfile {
     /// EAPI 8+ per-URI prefix (PMS 7.3.2): `Some("fetch")` for `fetch+`,
     /// `Some("mirror")` for `mirror+`. An **exemption** from package-level
     /// `RESTRICT=fetch` / `RESTRICT=mirror`, not a restriction on the URI.
+    ///
+    /// Also `Some("fetch")` when `RESTRICT=fetch` left `urls` holding only a
+    /// `mirror://` URI's named mirrors, which portage still fetches from.
     pub restriction: Option<String>,
 }
 
-/// Package-level `RESTRICT` gate for [`DistfileResolver::resolve_uri_map`],
-/// evaluated with matchnone semantics (`RestrictExpr::has_unconditional`) by
-/// the caller — a client-side USE choice must never change what a mirror
-/// redistributes.
+/// Package-level `RESTRICT` gate for [`DistfileResolver`] and the fetcher
+///
+/// A mirror builds it with [`Self::from_restrict`] (matchnone): a client-side
+/// USE choice must never change what a mirror redistributes. A package fetch
+/// uses [`Self::from_restrict_with_use`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RestrictGate {
     /// `RESTRICT=fetch` (unconditional) — drop every URI without a
@@ -73,6 +77,15 @@ impl RestrictGate {
     pub fn from_restrict(entries: &[RestrictExpr]) -> Self {
         let fetch = RestrictExpr::has_unconditional(entries, "fetch");
         let mirror = fetch || RestrictExpr::has_unconditional(entries, "mirror");
+        Self { fetch, mirror }
+    }
+
+    /// Build the gate from a parsed `RESTRICT` expression under the package's
+    /// enabled USE flags, so `bindist? ( fetch )` applies when `bindist` is set
+    pub fn from_restrict_with_use(entries: &[RestrictExpr], use_flags: &HashSet<String>) -> Self {
+        let active = RestrictExpr::active_tokens(entries, &|f| use_flags.contains(f));
+        let fetch = active.contains(&"fetch");
+        let mirror = fetch || active.contains(&"mirror");
         Self { fetch, mirror }
     }
 
@@ -125,15 +138,40 @@ impl DistfileResolver {
         }
     }
 
-    /// Build a resolver from a live repository + a GENTOO_MIRRORS list
+    /// Build a resolver from the `thirdpartymirrors` of every configured
+    /// repository + a GENTOO_MIRRORS list
     ///
-    /// `gentoo_mirrors` should come from the `GENTOO_MIRRORS` environment
-    /// variable or `make.conf`, split on whitespace.
-    pub fn from_repo(repo: &Repository, gentoo_mirrors: Vec<String>) -> Result<Self> {
-        let thirdparty = repo
-            .thirdpartymirrors()
-            .map_err(|e| Error::Manifest(e.to_string()))?;
-        Ok(Self::new(thirdparty, gentoo_mirrors))
+    /// `repos` is highest priority first. A mirror name's URLs stack across
+    /// repos, and a later repo's `-url` or `-*` removes what came before, as in
+    /// portage. `gentoo_mirrors` comes from `GENTOO_MIRRORS`, split on whitespace.
+    pub fn from_repos(repos: &[&Repository], gentoo_mirrors: Vec<String>) -> Result<Self> {
+        let mut stacked: Vec<(String, Vec<String>)> = Vec::new();
+        for repo in repos {
+            let mirrors = repo
+                .thirdpartymirrors()
+                .map_err(|e| Error::Manifest(e.to_string()))?;
+            for (name, urls) in mirrors {
+                let i = match stacked.iter().position(|(n, _)| *n == name) {
+                    Some(i) => i,
+                    None => {
+                        stacked.push((name, Vec::new()));
+                        stacked.len() - 1
+                    }
+                };
+                let list = &mut stacked[i].1;
+                for url in urls {
+                    if url == "-*" {
+                        list.clear();
+                    } else if let Some(removed) = url.strip_prefix('-') {
+                        list.retain(|u| u != removed);
+                    } else if !list.contains(&url) {
+                        list.push(url);
+                    }
+                }
+            }
+        }
+        stacked.retain(|(_, urls)| !urls.is_empty());
+        Ok(Self::new(stacked, gentoo_mirrors))
     }
 
     /// Resolve `SRC_URI` entries into distfiles given the active USE flags
@@ -209,7 +247,7 @@ impl DistfileResolver {
                 order.push(filename.clone());
                 Vec::new()
             });
-            for candidate in self.expand_url(&url, &filename) {
+            for candidate in self.expand_url(&url, &filename, true) {
                 if !list.contains(&candidate) {
                     list.push(candidate);
                 }
@@ -264,10 +302,12 @@ impl DistfileResolver {
             // package is `RESTRICT=mirror` and this URI is not `mirror+`,
             // and for `mirror://gentoo/` (expanded via thirdpartymirrors —
             // prepending GENTOO_MIRRORS again would double them).
-            let package_blocks_mirrors =
-                gate.mirror && !RestrictGate::uri_exempts_mirror(restriction.as_deref());
+            let package_blocks_mirrors = (gate.mirror || gate.fetch)
+                && !RestrictGate::uri_exempts_mirror(restriction.as_deref());
             let use_gentoo_mirrors =
                 !package_blocks_mirrors && !url.starts_with("mirror://gentoo/");
+            let fetch_blocked =
+                gate.fetch && !RestrictGate::uri_exempts_fetch(restriction.as_deref());
 
             let df = by_filename.entry(filename.clone()).or_insert_with(|| {
                 order.push(filename.clone());
@@ -283,6 +323,19 @@ impl DistfileResolver {
             if df.restriction.is_none() {
                 df.restriction = restriction;
             }
+            // Under RESTRICT=fetch, portage still fetches a `mirror://` URI from
+            // the mirrors it names, never from GENTOO_MIRRORS or a plain URI.
+            if fetch_blocked {
+                if url.starts_with("mirror://") {
+                    for candidate in self.expand_url(&url, &filename, false) {
+                        df.restriction.get_or_insert_with(|| "fetch".to_owned());
+                        if !df.urls.contains(&candidate) {
+                            df.urls.push(candidate);
+                        }
+                    }
+                }
+                continue;
+            }
             if use_gentoo_mirrors {
                 for mirror in &self.gentoo_mirrors {
                     for candidate in gentoo_distfile_urls(mirror, &filename) {
@@ -292,7 +345,7 @@ impl DistfileResolver {
                     }
                 }
             }
-            for candidate in self.expand_url(&url, &filename) {
+            for candidate in self.expand_url(&url, &filename, !package_blocks_mirrors) {
                 if !df.urls.contains(&candidate) {
                     df.urls.push(candidate);
                 }
@@ -311,8 +364,9 @@ impl DistfileResolver {
     /// (matching real emirrordist's `Config.mirrors`), except `gentoo`: its
     /// thirdpartymirrors bases and any `GENTOO_MIRRORS` entries all serve the
     /// GLEP 75 filename-hash layout, so they get [`hash_layout_urls`] instead
-    /// of a flat path-append. Direct URLs are returned as-is.
-    fn expand_url(&self, url: &str, filename: &str) -> Vec<String> {
+    /// of a flat path-append; `public_mirrors` adds `GENTOO_MIRRORS` there.
+    /// Direct URLs are returned as-is.
+    fn expand_url(&self, url: &str, filename: &str, public_mirrors: bool) -> Vec<String> {
         if let Some(rest) = url.strip_prefix("mirror://") {
             let (mirror_name, path) = rest.split_once('/').unwrap_or((rest, filename));
             if mirror_name == "gentoo" {
@@ -325,7 +379,7 @@ impl DistfileResolver {
                         }
                     }
                 }
-                for mirror in &self.gentoo_mirrors {
+                for mirror in self.gentoo_mirrors.iter().filter(|_| public_mirrors) {
                     for candidate in gentoo_distfile_urls(mirror, fname) {
                         if !urls.contains(&candidate) {
                             urls.push(candidate);
@@ -342,8 +396,7 @@ impl DistfileResolver {
                     .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
                     .collect();
             }
-            // Unknown mirror name — no direct URLs; caller may add GENTOO_MIRRORS
-            // as a last-resort fallback (unless mirror-restricted).
+            tracing::warn!("No known mirror by the name: {mirror_name}");
             vec![]
         } else {
             vec![url.to_owned()]
@@ -761,6 +814,86 @@ mod tests {
         };
         let dfs = r.resolve_uri_map(&entries, &opts);
         assert!(dfs.is_empty());
+    }
+
+    fn repo_with_mirrors(dir: &std::path::Path, name: &str, mirrors: &str) -> Repository {
+        std::fs::create_dir_all(dir.join("profiles")).unwrap();
+        std::fs::create_dir_all(dir.join("metadata")).unwrap();
+        std::fs::write(dir.join("profiles/repo_name"), format!("{name}\n")).unwrap();
+        std::fs::write(dir.join("metadata/layout.conf"), "masters =\n").unwrap();
+        if !mirrors.is_empty() {
+            std::fs::write(dir.join("profiles/thirdpartymirrors"), mirrors).unwrap();
+        }
+        Repository::builder().in_memory_cache().open(dir).unwrap()
+    }
+
+    #[test]
+    fn from_repos_expands_a_mirror_only_another_repo_defines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let overlay = repo_with_mirrors(&tmp.path().join("overlay"), "overlay", "");
+        let gentoo = repo_with_mirrors(
+            &tmp.path().join("gentoo"),
+            "gentoo",
+            "foo https://foo.example/pub https://foo2.example\nbar https://bar.example\n",
+        );
+        let r = DistfileResolver::from_repos(&[&overlay, &gentoo], vec![]).unwrap();
+        let entries = SrcUriEntry::parse("mirror://foo/x.tar.gz mirror://nope/y.tar.gz").unwrap();
+        let dfs = r.resolve(&entries, &HashSet::new());
+        assert_eq!(
+            dfs[0].urls,
+            [
+                "https://foo.example/pub/x.tar.gz",
+                "https://foo2.example/x.tar.gz"
+            ]
+        );
+        assert!(dfs[1].urls.is_empty());
+    }
+
+    #[test]
+    fn from_repos_stacks_incrementally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let high = repo_with_mirrors(&tmp.path().join("a"), "a", "foo https://a.example\n");
+        let low = repo_with_mirrors(
+            &tmp.path().join("b"),
+            "b",
+            "foo https://b.example -https://a.example\nbar https://bar.example\nbar -*\n",
+        );
+        let r = DistfileResolver::from_repos(&[&high, &low], vec![]).unwrap();
+        assert_eq!(r.thirdparty["foo"], ["https://b.example"]);
+        assert!(!r.thirdparty.contains_key("bar"));
+    }
+
+    #[test]
+    fn restrict_fetch_still_fetches_a_mirror_uri_from_its_named_mirrors() {
+        let r = resolver(&["https://mirror.gentoo.org"]);
+        let entries =
+            SrcUriEntry::parse("mirror://kde/a.tar.gz https://x.example/b.tar.gz").unwrap();
+        let gate = RestrictGate::from_restrict(&RestrictExpr::parse("fetch").unwrap());
+        let dfs = r.resolve_with(&entries, &HashSet::new(), gate);
+        assert_eq!(dfs[0].filename, "a.tar.gz");
+        assert_eq!(dfs[0].urls, ["https://mirrors.kde.org/a.tar.gz"]);
+        assert!(RestrictGate::uri_exempts_fetch(
+            dfs[0].restriction.as_deref()
+        ));
+        assert_eq!(dfs[1].filename, "b.tar.gz");
+        assert!(dfs[1].urls.is_empty());
+        assert!(!RestrictGate::uri_exempts_fetch(
+            dfs[1].restriction.as_deref()
+        ));
+    }
+
+    #[test]
+    fn restrict_gate_with_use_honours_conditional_fetch() {
+        let entries = RestrictExpr::parse("bindist? ( fetch )").unwrap();
+        let on: HashSet<String> = ["bindist".to_owned()].into();
+        let gate = RestrictGate::from_restrict_with_use(&entries, &on);
+        assert!(gate.fetch && gate.mirror);
+        let gate = RestrictGate::from_restrict_with_use(&entries, &HashSet::new());
+        assert!(!gate.fetch && !gate.mirror);
+        assert_eq!(
+            RestrictGate::from_restrict(&entries),
+            RestrictGate::default()
+        );
     }
 
     #[test]

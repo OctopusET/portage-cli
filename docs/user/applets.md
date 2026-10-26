@@ -223,7 +223,7 @@ particular USE selection can never change what gets mirrored.
 - No GENTOO_MIRRORS peer fallback by default (`--gentoo-mirrors-fallback`
   opts in) — real emirrordist never uses the client's `GENTOO_MIRRORS` at
   all (that would make a mirror-of-a-peer-mirror). `mirror://gentoo/` in
-  `SRC_URI` is still expanded via `profiles/thirdpartymirrors` (the
+  `SRC_URI` is still expanded via the repo's and its masters' `profiles/thirdpartymirrors` (the
   official distfiles hosts), same as real emirrordist's
   `Config.mirrors = thirdpartymirrors()`. When `--gentoo-mirrors-fallback`
   *is* passed, `mirror://gentoo/` candidates get the GLEP 75 hash-layout

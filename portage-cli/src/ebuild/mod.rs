@@ -1225,6 +1225,34 @@ fn resolve_masters(
     out
 }
 
+/// `masters`, then every other repository `conf` lists, highest priority first
+///
+/// Portage stacks `thirdpartymirrors` from all configured repositories, so an
+/// overlay's `mirror://` URI may name a mirror only another repository defines.
+fn fetch_mirror_repos(
+    repo: &Repository,
+    masters: Vec<Repository>,
+    conf: Option<&ReposConf>,
+) -> Vec<Repository> {
+    let mut out = masters;
+    for entry in conf.map(ReposConf::repos).unwrap_or_default().iter().rev() {
+        let Some(path) = entry.location.as_path() else {
+            continue;
+        };
+        let known = std::iter::once(repo)
+            .chain(&out)
+            .any(|r| r.path().as_std_path() == path);
+        if known {
+            continue;
+        }
+        match Repository::builder().in_memory_cache().open(path) {
+            Ok(r) => out.push(r),
+            Err(e) => tracing::debug!("thirdpartymirrors: skipping {}: {e}", path.display()),
+        }
+    }
+    out
+}
+
 /// Core phase-runner inputs (shared by build, binpkg merge, worker, debug)
 struct PhaseGroupRun<'a> {
     ebuild_path: &'a str,
@@ -1304,6 +1332,8 @@ struct GroupRun<'a> {
 struct PackageSetup {
     ebuild: Ebuild,
     repo: Repository,
+    /// The other repositories whose `thirdpartymirrors` a fetch stacks onto `repo`'s
+    mirror_repos: Vec<Repository>,
     /// Carries the profile, `make.conf` and `package.env` variables, the bashrc
     /// hooks, the roots and the effective USE
     shell: portage_repo::EbuildShell,
@@ -1396,6 +1426,11 @@ impl PackageSetup {
             .shell_with_masters(&master_refs)
             .await
             .context("creating shell")?;
+        let mirror_repos = if opts.group.phases().contains(&RunPhase::Fetch) {
+            fetch_mirror_repos(&repo, masters, repos_conf.as_ref())
+        } else {
+            Vec::new()
+        };
         if let Some(dir) = distdir {
             shell.set_distdir(dir.to_owned());
         }
@@ -1532,6 +1567,7 @@ impl PackageSetup {
         Ok(Self {
             ebuild,
             repo,
+            mirror_repos,
             shell,
             work_root,
             features,
@@ -1547,6 +1583,7 @@ impl PackageSetup {
             _builddir_lock,
             mut ebuild,
             repo,
+            mirror_repos,
             mut shell,
             work_root,
             features,
@@ -1684,6 +1721,7 @@ impl PackageSetup {
                         root,
                         PhaseContext {
                             fetch_all_uri,
+                            mirror_repos: &mirror_repos,
                             merge_state: _merge_guard.as_deref_mut(),
                             binpkg_metadata: binpkg_metadata.as_ref(),
                             binpkg_record: &record,
@@ -2014,6 +2052,8 @@ fn post_process_after_install(
 
 struct PhaseContext<'a> {
     fetch_all_uri: bool,
+    /// See [`PackageSetup::mirror_repos`]
+    mirror_repos: &'a [Repository],
     merge_state: Option<&'a mut MergeBatchState>,
     /// The merged binpkg's own metadata, whose dependencies were bound when it was built
     binpkg_metadata: Option<&'a std::collections::BTreeMap<String, String>>,
@@ -2031,7 +2071,14 @@ async fn run_one_phase(
     context: PhaseContext<'_>,
 ) -> Result<()> {
     match phase {
-        RunPhase::Fetch => run_fetch(shell, ebuild, repo, work_root, context.fetch_all_uri).await,
+        RunPhase::Fetch => {
+            let PhaseContext {
+                fetch_all_uri,
+                mirror_repos,
+                ..
+            } = context;
+            run_fetch(shell, ebuild, repo, mirror_repos, work_root, fetch_all_uri).await
+        }
         RunPhase::Clean => run_clean(work_root),
         RunPhase::Qmerge => {
             let PhaseContext {
@@ -2120,6 +2167,7 @@ async fn run_fetch(
     shell: &mut portage_repo::EbuildShell,
     ebuild: &Ebuild,
     repo: &Repository,
+    mirror_repos: &[Repository],
     work_root: &Utf8Path,
     // `-F`/`--fetch-all-uri`: resolve every SRC_URI entry regardless of USE.
     fetch_all_uri: bool,
@@ -2160,9 +2208,12 @@ async fn run_fetch(
         .collect();
 
     let gentoo_mirrors = gentoo_mirrors_list(shell);
-    let resolver = DistfileResolver::from_repo(repo, gentoo_mirrors).context("loading mirrors")?;
-    let restrict_gate = RestrictGate::from_restrict(
+    let all_repos: Vec<&Repository> = std::iter::once(repo).chain(mirror_repos).collect();
+    let resolver =
+        DistfileResolver::from_repos(&all_repos, gentoo_mirrors).context("loading mirrors")?;
+    let restrict_gate = RestrictGate::from_restrict_with_use(
         &RestrictExpr::parse(&shell.get_var("RESTRICT").unwrap_or_default()).unwrap_or_default(),
+        &use_flags,
     );
     let distfiles = if fetch_all_uri {
         resolver.resolve_all_with(&entries, restrict_gate)
@@ -4536,6 +4587,7 @@ mod tests {
             for phase in phases {
                 let context = PhaseContext {
                     fetch_all_uri: false,
+                    mirror_repos: &[],
                     merge_state: None,
                     binpkg_metadata: None,
                     binpkg_record: &[],
@@ -4569,6 +4621,7 @@ mod tests {
             let setup = PackageSetup {
                 ebuild: ebuild.clone(),
                 repo,
+                mirror_repos: Vec::new(),
                 shell,
                 work_root: work.clone(),
                 features: Default::default(),

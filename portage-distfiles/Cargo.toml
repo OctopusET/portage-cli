@@ -31,6 +31,7 @@ tempfile = { workspace = true }
 roxmltree = { workspace = true }
 # Per-distfile flock, matching portage's FEATURES=distlocks.
 rustix = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

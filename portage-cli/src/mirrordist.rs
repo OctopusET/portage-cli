@@ -97,7 +97,8 @@ pub async fn run(cli: &cli::Cli, opts: &MirrorDistOpts) -> Result<()> {
     } else {
         Vec::new()
     };
-    let resolver = DistfileResolver::from_repo(&repo, gentoo_mirrors)
+    let mirror_repos: Vec<&Repository> = std::iter::once(&repo).chain(repo.masters()).collect();
+    let resolver = DistfileResolver::from_repos(&mirror_repos, gentoo_mirrors)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("loading thirdpartymirrors")?;
 
