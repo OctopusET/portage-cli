@@ -1225,24 +1225,28 @@ fn resolve_masters(
     out
 }
 
-/// `masters`, then every other repository `conf` lists, highest priority first
+/// `repo`, `masters` and every repository `conf` lists, by descending `(priority, name)`
 ///
-/// Portage stacks `thirdpartymirrors` from all configured repositories, so an
-/// overlay's `mirror://` URI may name a mirror only another repository defines.
-fn fetch_mirror_repos(
+/// The order `thirdpartymirrors` stack in, as portage's `config.thirdpartymirrors()`: a repo's `-url`
+/// or `-*` removes what a higher-priority one added. A repo missing from `conf` gets priority 0.
+pub(crate) fn fetch_mirror_repos(
     repo: &Repository,
     masters: Vec<Repository>,
     conf: Option<&ReposConf>,
 ) -> Vec<Repository> {
-    let mut out = masters;
-    for entry in conf.map(ReposConf::repos).unwrap_or_default().iter().rev() {
+    let entries = conf.map(ReposConf::repos).unwrap_or_default();
+    let priority = |path: &std::path::Path| {
+        entries
+            .iter()
+            .find(|e| e.location.as_path() == Some(path))
+            .map_or(0, |e| e.priority.unwrap_or(0))
+    };
+    let mut out: Vec<Repository> = std::iter::once(repo.clone()).chain(masters).collect();
+    for entry in entries {
         let Some(path) = entry.location.as_path() else {
             continue;
         };
-        let known = std::iter::once(repo)
-            .chain(&out)
-            .any(|r| r.path().as_std_path() == path);
-        if known {
+        if out.iter().any(|r| r.path().as_std_path() == path) {
             continue;
         }
         match Repository::builder().in_memory_cache().open(path) {
@@ -1250,6 +1254,9 @@ fn fetch_mirror_repos(
             Err(e) => tracing::debug!("thirdpartymirrors: skipping {}: {e}", path.display()),
         }
     }
+    out.sort_by_cached_key(|r| {
+        std::cmp::Reverse((priority(r.path().as_std_path()), r.name().to_string()))
+    });
     out
 }
 
@@ -1332,7 +1339,7 @@ struct GroupRun<'a> {
 struct PackageSetup {
     ebuild: Ebuild,
     repo: Repository,
-    /// The other repositories whose `thirdpartymirrors` a fetch stacks onto `repo`'s
+    /// The repositories whose `thirdpartymirrors` a fetch stacks, in stacking order
     mirror_repos: Vec<Repository>,
     /// Carries the profile, `make.conf` and `package.env` variables, the bashrc
     /// hooks, the roots and the effective USE
@@ -2208,9 +2215,9 @@ async fn run_fetch(
         .collect();
 
     let gentoo_mirrors = gentoo_mirrors_list(shell);
-    let all_repos: Vec<&Repository> = std::iter::once(repo).chain(mirror_repos).collect();
+    let mirror_repos: Vec<&Repository> = mirror_repos.iter().collect();
     let resolver =
-        DistfileResolver::from_repos(&all_repos, gentoo_mirrors).context("loading mirrors")?;
+        DistfileResolver::from_repos(&mirror_repos, gentoo_mirrors).context("loading mirrors")?;
     let restrict_gate = RestrictGate::from_restrict_with_use(
         &RestrictExpr::parse(&shell.get_var("RESTRICT").unwrap_or_default()).unwrap_or_default(),
         &use_flags,
@@ -4287,7 +4294,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_mirror_repos_adds_each_other_configured_repo_once() {
+    fn fetch_mirror_repos_orders_every_repo_by_descending_priority() {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(tmp.path()).unwrap();
         let open = |name: &str| {
@@ -4301,16 +4308,16 @@ mod tests {
         let (own, master) = (open("own"), open("gentoo"));
         open("other");
         let conf_path = root.join("repos.conf");
-        let body: String = ["own", "gentoo", "other"]
+        let body: String = [("own", 10), ("gentoo", -1000), ("other", 50)]
             .iter()
-            .map(|n| format!("[{n}]\nlocation = {root}/{n}\n"))
+            .map(|(n, p)| format!("[{n}]\nlocation = {root}/{n}\npriority = {p}\n"))
             .collect();
         fs::write(&conf_path, body).unwrap();
         let conf = ReposConf::load_from(&[conf_path]).unwrap();
 
         let repos = fetch_mirror_repos(&own, vec![master], Some(&conf));
         let names: Vec<String> = repos.iter().map(|r| r.name().to_string()).collect();
-        assert_eq!(names, ["gentoo", "other"]);
+        assert_eq!(names, ["other", "own", "gentoo"]);
     }
 
     #[test]
