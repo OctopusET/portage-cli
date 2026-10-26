@@ -1151,7 +1151,11 @@ fn dropped_or_branch_keeps_multislot_sibling() {
 // stand in as an empty, satisfied alternative, either in choose_version or on BROOT.
 #[test]
 fn or_branch_with_unavailable_atom_is_not_trivially_satisfied() {
-    for with_host in [false, true] {
+    let groups = [
+        "|| ( app-arch/7zip app-arch/p7zip )",
+        "|| ( || ( app-arch/gone1 app-arch/gone2 ) app-arch/p7zip )",
+    ];
+    for (group, with_host) in groups.into_iter().flat_map(|g| [(g, false), (g, true)]) {
         let mut repo = InMemoryRepository::new();
         for cpv in ["app-arch/p7zip-1.0", "app-misc/hosttool-1.0"] {
             repo.add_version(
@@ -1166,7 +1170,7 @@ fn or_branch_with_unavailable_atom_is_not_trivially_satisfied() {
             Some(Interned::intern("0")),
             None,
             PackageDeps {
-                bdepend: (DepEntry::parse("|| ( app-arch/7zip app-arch/p7zip )").unwrap()).into(),
+                bdepend: (DepEntry::parse(group).unwrap()).into(),
                 ..empty_deps()
             },
         );
@@ -1185,7 +1189,10 @@ fn or_branch_with_unavailable_atom_is_not_trivially_satisfied() {
             .unwrap();
         let p7zip =
             PortagePackage::slotted(Cpn::parse("app-arch/p7zip").unwrap(), Interned::intern("0"));
-        assert!(solution.get(&p7zip).is_some(), "with_host={with_host}");
+        assert!(
+            solution.get(&p7zip).is_some(),
+            "{group} with_host={with_host}"
+        );
     }
 }
 

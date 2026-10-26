@@ -757,6 +757,41 @@ impl PortageDependencyProvider {
                 }
             }
         }
+        // A branch through a nested `||` whose every branch broke is broken too.
+        loop {
+            let dead: HashSet<PortagePackage> = broken_branches
+                .iter()
+                .filter(|(c, b)| {
+                    packages
+                        .get(*c)
+                        .is_some_and(|d| b.len() == d.versions.len())
+                })
+                .map(|(c, _)| c.clone())
+                .collect();
+            let mut newly = Vec::new();
+            for (parent, data) in &packages {
+                if !matches!(parent, PortagePackage::Choice { .. }) {
+                    continue;
+                }
+                let broken = broken_branches.get(parent);
+                for (ver, vd) in &data.versions {
+                    if broken.is_some_and(|b| b.contains(ver)) {
+                        continue;
+                    }
+                    if let Dependencies::Available(constraints) = &vd.merged
+                        && constraints.iter().any(|(pkg, _)| dead.contains(pkg))
+                    {
+                        newly.push((parent.clone(), ver.clone()));
+                    }
+                }
+            }
+            if newly.is_empty() {
+                break;
+            }
+            for (parent, ver) in newly {
+                broken_branches.entry(parent).or_default().push(ver);
+            }
+        }
         // An `||` branch with an unavailable atom cannot be satisfied; left in, it reads as an
         // empty, trivially met alternative. When every branch broke, keep them for autounmask.
         for (choice, broken) in broken_branches {
