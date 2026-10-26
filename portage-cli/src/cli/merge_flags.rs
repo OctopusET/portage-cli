@@ -258,7 +258,7 @@ fn saved_switch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<YesNo>,
 /// Long options whose `y`/`n` value may also be the next word, as in emerge's `--buildpkg n`
 const DETACHED_YES_NO: [&str; 2] = ["--buildpkg", "--getbinpkg"];
 
-/// `args` with a detached `y` or `n` after a [`DETACHED_YES_NO`] option attached to it
+/// `args` with a detached `y` or `n` after `--buildpkg` or `--getbinpkg` attached to it
 ///
 /// Any other next word is left alone, so a bare `--buildpkg` can still precede an atom.
 pub fn attach_yes_no_values(args: Vec<OsString>) -> Vec<OsString> {
