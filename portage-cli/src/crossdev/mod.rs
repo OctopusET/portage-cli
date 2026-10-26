@@ -84,7 +84,7 @@ pub(crate) fn merge_depgraph_flags_fields(
 }
 
 fn with_buildpkg(mut flags: MergeFlags) -> MergeFlags {
-    flags.buildpkg = true;
+    flags.buildpkg = Some(crate::cli::YesNo::Y);
     flags
 }
 

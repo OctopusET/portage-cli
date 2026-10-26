@@ -419,6 +419,11 @@ async fn emerge_atoms_inner(
     if user_flags && let Some(settings) = crate::settings::load(cli).await? {
         merge_flags.apply_features(settings.get("FEATURES").unwrap_or_default());
     }
+    let buildpkg_exclude: Vec<String> = merge_flags
+        .buildpkg_exclude_atoms()
+        .map(str::to_owned)
+        .collect();
+    parse_atoms_strict(&buildpkg_exclude).context("--buildpkg-exclude")?;
     let merge_flags = &merge_flags;
     let repo = crate::repo_open::open(repo_path.as_std_path())?;
     let vdb = open_cli_vdb(cli).ok();

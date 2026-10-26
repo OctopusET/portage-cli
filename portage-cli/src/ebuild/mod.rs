@@ -1865,7 +1865,12 @@ impl PackageSetup {
                     post_process_after_install(&shell, &work_root, &features)?;
                     // The package holds the image as src_install left it: a binary
                     // install runs pkg_preinst itself, on the installing system.
-                    if buildpkg && group.should_buildpkg() {
+                    let wanted = matches!(group, PhaseGroup::BuildOnly)
+                        || live_binpkg_wanted(
+                            &features,
+                            &shell.get_var("PROPERTIES").unwrap_or_default(),
+                        );
+                    if buildpkg && group.should_buildpkg() && wanted {
                         match build_binpkg_standalone(
                             &mut shell,
                             &ebuild,
@@ -1946,6 +1951,12 @@ async fn add_feature(shell: &mut portage_repo::EbuildShell, feature: &str) -> Re
         .run_string(&format!("FEATURES='{}'", features.join(" ")))
         .await
         .with_context(|| format!("adding {feature} to FEATURES"))
+}
+
+/// Whether `--buildpkg` packages this ebuild: not a `PROPERTIES=live` one, unless
+/// `FEATURES=buildpkg-live` (on in make.globals)
+fn live_binpkg_wanted(features: &std::collections::HashSet<String>, properties: &str) -> bool {
+    features.contains("buildpkg-live") || !properties.split_whitespace().any(|p| p == "live")
 }
 
 /// `(require_signature, ignore_signature)` for a binpkg whose origin's
@@ -4967,6 +4978,17 @@ mod tests {
             default_work_base(Some(Utf8Path::new("/p")), portage_tmpdir(Some(&conf))),
             "/p/var/tmp/portage"
         );
+    }
+
+    #[test]
+    fn a_live_ebuild_is_packaged_only_with_buildpkg_live() {
+        let f = |words: &[&str]| words.iter().map(|w| w.to_string()).collect();
+        assert!(!live_binpkg_wanted(&f(&["buildpkg"]), "live test"));
+        assert!(live_binpkg_wanted(
+            &f(&["buildpkg", "buildpkg-live"]),
+            "live"
+        ));
+        assert!(live_binpkg_wanted(&f(&["buildpkg"]), "interactive"));
     }
 
     #[test]

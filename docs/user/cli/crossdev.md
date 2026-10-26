@@ -52,13 +52,22 @@ How the solver and build scheduler behave.
 * `-1, --oneshot` — Build and install packages but do not add them to the world file
 * `-f, --fetchonly` — Only fetch distfiles, do not build or install
 * `-F, --fetch-all-uri` — Instead of building, just fetch every SRC\_URI file (regardless of USE setting) for the resolved packages.
-* `-b, --buildpkg` — Build binary packages for all merged packages
+* `-b, --buildpkg[=<y|n>]` — Build binary packages for all merged packages
+
+  `--buildpkg=n` overrides `FEATURES=buildpkg`.
+  * `y`: Yes
+  * `n`: No
+* `--buildpkg-exclude <ATOMS>...` — Space-separated atoms never to build binary packages for, whatever enables it
 * `-B, --buildpkgonly` — Build binary packages without merging/installing them
 
   All build-time dependencies must already be satisfied on the system -- this does not resolve or install anything to make that true.
 * `-k, --usepkg` — Use binary packages if available, otherwise fall back to source
 * `-K, --usepkgonly` — Only use binary packages, fail if none available
-* `-g, --getbinpkg` — Fetch binary packages for all requested packages
+* `-g, --getbinpkg[=<y|n>]` — Fetch binary packages for all requested packages
+
+  `--getbinpkg=n` overrides `FEATURES=getbinpkg`.
+  * `y`: Yes
+  * `n`: No
 * `-G, --getbinpkgonly` — Only fetch binary packages, do not install
 * `-e, --emptytree` — Treat every atom as not-yet-installed, rebuilding the whole dependency tree from scratch rather than only what is missing or outdated.
 * `-t, --tree` — Show the dependency tree, indenting each package under the one that pulled it in, before merging.

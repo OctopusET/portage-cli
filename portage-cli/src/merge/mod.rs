@@ -301,13 +301,31 @@ struct ActionFlags {
     enforce_no_source: bool,
     quiet: bool,
     self_contained_bootstrap: bool,
+    /// `--buildpkg-exclude`, already validated by the caller
+    buildpkg_exclude: Vec<portage_atom::Dep>,
+}
+
+impl ActionFlags {
+    /// `--buildpkg` for this package: not one `--buildpkg-exclude` names
+    fn buildpkg_for(&self, cpv: &portage_atom::Cpv) -> bool {
+        self.buildpkg
+            && !self
+                .buildpkg_exclude
+                .iter()
+                .any(|d| d.matches_cpv(cpv, None))
+    }
 }
 
 impl MergeRun<'_> {
     fn action_flags(&self) -> ActionFlags {
         ActionFlags {
+            buildpkg_exclude: self
+                .merge_flags
+                .buildpkg_exclude_atoms()
+                .filter_map(|a| a.parse().ok())
+                .collect(),
             keep_going: self.merge_flags.keep_going,
-            buildpkg: self.merge_flags.buildpkg,
+            buildpkg: self.merge_flags.wants_buildpkg(),
             buildpkgonly: self.merge_flags.buildpkgonly,
             fetchonly: self.merge_flags.fetchonly,
             fetch_all_uri: self.merge_flags.fetch_all_uri,
@@ -619,14 +637,14 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
     } else {
         interactive_jobs(plan, jobs, quiet)
     };
-    let buildpkg = merge_flags.buildpkg;
+    let buildpkg = merge_flags.wants_buildpkg();
     let buildpkgonly = merge_flags.buildpkgonly;
     // `-F`/`--fetch-all-uri` is fetch-only too (just a different SRC_URI
     // resolution mode inside the fetch phase — see `merge_flags.fetch_all_uri`'s
     // own doc comment); every top-level "did anything actually get merged"
     // gate below treats the two identically.
     let usepkg = merge_flags.usepkg;
-    let getbinpkg = merge_flags.getbinpkg;
+    let getbinpkg = merge_flags.wants_getbinpkg();
     let getbinpkgonly = merge_flags.getbinpkgonly;
 
     let merge_root = roots.merge_root();
@@ -917,7 +935,6 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         activity_pkg,
     } = a;
     let ActionFlags {
-        buildpkg,
         buildpkgonly,
         fetchonly,
         fetch_all_uri,
@@ -926,6 +943,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         quiet,
         ..
     } = *flags;
+    let buildpkg = flags.buildpkg_for(&planned.cpv);
 
     let BinpkgReuse {
         local: reused,
@@ -1935,6 +1953,35 @@ mod entry_roots_tests {
     }
 
     #[test]
+    fn buildpkg_exclude_overrides_buildpkg() -> Result<()> {
+        let flags = cli::MergeFlags {
+            buildpkg: Some(cli::YesNo::Y),
+            buildpkg_exclude: vec!["dev-python/jinja2 app-misc/other".into()],
+            ..cli::MergeFlags::default()
+        };
+        let excluded = ActionFlags {
+            buildpkg_exclude: flags
+                .buildpkg_exclude_atoms()
+                .map(|a| a.parse().unwrap())
+                .collect(),
+            keep_going: false,
+            buildpkg: flags.wants_buildpkg(),
+            buildpkgonly: false,
+            fetchonly: false,
+            fetch_all_uri: false,
+            ignore_blockers: false,
+            enforce_no_source: false,
+            quiet: false,
+            self_contained_bootstrap: false,
+        };
+        let jinja = portage_atom::Cpv::parse("dev-python/jinja2-3.1.6")?;
+        let other = portage_atom::Cpv::parse("app-misc/screen-4.9.1")?;
+        assert!(!excluded.buildpkg_for(&jinja));
+        assert!(excluded.buildpkg_for(&other));
+        Ok(())
+    }
+
+    #[test]
     fn binpkg_reuse_decision_is_shared_with_action_kind() -> Result<()> {
         let dir = tempfile::tempdir().unwrap();
         seed_index(dir.path());
@@ -1954,6 +2001,7 @@ mod entry_roots_tests {
             enforce_no_source: false,
             quiet: false,
             self_contained_bootstrap: false,
+            buildpkg_exclude: Vec::new(),
         };
 
         let reuse = find_binpkg_reuse(&p, Some(&local), &[remote], "", "");

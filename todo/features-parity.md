@@ -17,7 +17,8 @@ run. Matching Portage's set is this note's work, one feature at a time.
   `nostrip`, `test`, `test-fail-continue`; `sandbox` only in a test.
 
 - **Carried from the settings into the build shell** (`settings::PROVIDED_FEATURES`, 2026-10-26):
-  `binpkg-multi-instance`, `config-protect-if-modified`, `preserve-libs`, `unmerge-orphans`.
+  `binpkg-multi-instance`, `buildpkg-live`, `config-protect-if-modified`, `preserve-libs`,
+  `unmerge-orphans`.
   The VDB `FEATURES` therefore differs from emerge's, which records the whole make.globals set.
 - **Work 3 so far:** `-preserve-libs` and `-binpkg-multi-instance` switch those off; without a
   make.globals em supplies both as its default. `distlocks` stays always on: the same lock keeps
@@ -31,12 +32,11 @@ Always on in em, no FEATURES switch:
 |---|---|
 | `binpkg-docompress`, `binpkg-dostrip` | ecompress/estrip run at the tail of `src_install` (`ebuild/mod.rs` `post_process_image`), before `ebuild/binpkg.rs` packs the image |
 | `binpkg-multi-instance` | `portage-binpkg` writes `cat/pn/pf-build_id.gpkg.tar` |
-| `buildpkg-live` | `-b`/`buildpkg` packs live ebuilds too; nothing checks `PROPERTIES=live` |
 | `distlocks` | `portage-distfiles/src/fetch.rs` `lock_distfile` (`.<name>.portage_lockfile`) |
 | `pkgdir-index-trusted` | `BinpkgIndex::open` trusts `Packages`; it scans PKGDIR only when the index is absent or empty |
 | `preserve-libs` | `preserve_libs.rs`, wired into every merge |
 | `protect-owned` | `ebuild/mod.rs` `check_collisions` refuses a path another installed package owns |
-| `config-protect-if-modified`, `unmerge-orphans` | read from the settings |
+| `buildpkg-live`, `config-protect-if-modified`, `unmerge-orphans` | read from the settings |
 
 Missing in em:
 

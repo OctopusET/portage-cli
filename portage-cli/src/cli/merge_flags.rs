@@ -46,8 +46,20 @@ pub struct MergeFlags {
     pub fetch_all_uri: bool,
 
     /// Build binary packages for all merged packages
-    #[arg(short = 'b', long)]
-    pub buildpkg: bool,
+    ///
+    /// `--buildpkg=n` overrides `FEATURES=buildpkg`.
+    #[arg(
+        short = 'b',
+        long,
+        require_equals,
+        default_missing = "y",
+        value_name = "y|n"
+    )]
+    pub buildpkg: Option<YesNo>,
+
+    /// Space-separated atoms never to build binary packages for, whatever enables it
+    #[arg(long, value_name = "ATOMS")]
+    pub buildpkg_exclude: Vec<String>,
 
     /// Build binary packages without merging/installing them
     ///
@@ -65,8 +77,16 @@ pub struct MergeFlags {
     pub usepkgonly: bool,
 
     /// Fetch binary packages for all requested packages
-    #[arg(short = 'g', long)]
-    pub getbinpkg: bool,
+    ///
+    /// `--getbinpkg=n` overrides `FEATURES=getbinpkg`.
+    #[arg(
+        short = 'g',
+        long,
+        require_equals,
+        default_missing = "y",
+        value_name = "y|n"
+    )]
+    pub getbinpkg: Option<YesNo>,
 
     /// Only fetch binary packages, do not install
     #[arg(short = 'G', long)]
@@ -224,7 +244,7 @@ impl MergeFlags {
             Some(value) => value == YesNo::Y,
             None => {
                 let binpkgs =
-                    self.usepkg || self.usepkgonly || self.getbinpkg || self.getbinpkgonly;
+                    self.usepkg || self.usepkgonly || self.wants_getbinpkg() || self.getbinpkgonly;
                 self.with_bdeps_auto != Some(YesNo::N) && !binpkgs
             }
         }
@@ -235,14 +255,33 @@ impl MergeFlags {
         self.with_bdeps != Some(YesNo::N)
     }
 
-    /// Turn on `--buildpkg`/`--getbinpkg` for the `buildpkg`/`getbinpkg` words of `FEATURES`
+    /// `-b`/`--buildpkg`, given or from `FEATURES`
+    pub fn wants_buildpkg(&self) -> bool {
+        self.buildpkg == Some(YesNo::Y)
+    }
+
+    /// `-g`/`--getbinpkg`, given or from `FEATURES`
+    pub fn wants_getbinpkg(&self) -> bool {
+        self.getbinpkg == Some(YesNo::Y)
+    }
+
+    /// The `--buildpkg-exclude` atoms, one per word
+    pub fn buildpkg_exclude_atoms(&self) -> impl Iterator<Item = &str> {
+        self.buildpkg_exclude
+            .iter()
+            .flat_map(|s| s.split_whitespace())
+    }
+
+    /// Turn on `--buildpkg`/`--getbinpkg` for the `buildpkg`/`getbinpkg` words of `FEATURES`,
+    /// unless the command line set them
     pub fn apply_features(&mut self, features: &str) {
         for feature in features.split_whitespace() {
-            match feature {
-                "buildpkg" => self.buildpkg = true,
-                "getbinpkg" => self.getbinpkg = true,
-                _ => {}
-            }
+            let flag = match feature {
+                "buildpkg" => &mut self.buildpkg,
+                "getbinpkg" => &mut self.getbinpkg,
+                _ => continue,
+            };
+            flag.get_or_insert(YesNo::Y);
         }
     }
 }
@@ -255,10 +294,40 @@ mod tests {
     fn features_turn_on_buildpkg_and_getbinpkg() {
         let mut flags = MergeFlags::default();
         flags.apply_features("binpkg-logs buildpkg-live getbinpkg");
-        assert!(flags.getbinpkg);
-        assert!(!flags.buildpkg);
+        assert!(flags.wants_getbinpkg());
+        assert!(!flags.wants_buildpkg());
         flags.apply_features("buildpkg");
-        assert!(flags.buildpkg);
+        assert!(flags.wants_buildpkg());
+    }
+
+    #[test]
+    fn an_explicit_n_beats_features() {
+        let mut flags = MergeFlags {
+            buildpkg: Some(YesNo::N),
+            getbinpkg: Some(YesNo::N),
+            ..MergeFlags::default()
+        };
+        flags.apply_features("buildpkg getbinpkg");
+        assert!(!flags.wants_buildpkg());
+        assert!(!flags.wants_getbinpkg());
+    }
+
+    #[test]
+    fn buildpkg_and_getbinpkg_take_an_optional_attached_value() {
+        let parse = |args: &[&str]| crate::cli::parse_cli(args).merge_flags();
+        let bare = parse(&["em", "emerge", "-b", "-g", "app-misc/foo"]);
+        assert_eq!(bare.buildpkg, Some(YesNo::Y));
+        assert_eq!(bare.getbinpkg, Some(YesNo::Y));
+        let off = parse(&[
+            "em",
+            "emerge",
+            "--buildpkg=n",
+            "--getbinpkg=n",
+            "app-misc/foo",
+        ]);
+        assert_eq!(off.buildpkg, Some(YesNo::N));
+        assert_eq!(off.getbinpkg, Some(YesNo::N));
+        assert_eq!(parse(&["em", "emerge", "app-misc/foo"]).buildpkg, None);
     }
 
     #[test]
@@ -268,7 +337,7 @@ mod tests {
         assert!(unset.depclean_bdeps());
 
         let binpkgs = MergeFlags {
-            getbinpkg: true,
+            getbinpkg: Some(YesNo::Y),
             ..MergeFlags::default()
         };
         assert!(!binpkgs.install_bdeps());
