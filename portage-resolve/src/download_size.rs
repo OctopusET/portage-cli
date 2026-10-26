@@ -133,9 +133,12 @@ pub fn fetch_restricted(
             restricted_filenames(entry, &enabled, &mut restricted);
         }
         let manifest = load_manifest_sizes(&repo_path_of(&cpv), pkg.cpn());
+        // Like portage's getfetchsizes, a file without a Manifest size is not counted.
         let satisfied = restricted.iter().all(|filename| {
-            std::fs::metadata(distdir.join(filename).as_std_path())
-                .is_ok_and(|m| manifest.get(filename).is_none_or(|&size| m.len() == size))
+            manifest.get(filename).is_none_or(|&size| {
+                std::fs::metadata(distdir.join(filename).as_std_path())
+                    .is_ok_and(|m| m.len() == size)
+            })
         });
         out.insert(cpv, satisfied);
     }
@@ -296,8 +299,10 @@ mod tests {
         let distdir = root.join("distfiles");
         std::fs::create_dir_all(&distdir).unwrap();
         write_manifest(&repo, 3);
-        let repo_path_of = |_: &Cpv| repo.clone();
-        let check = |extra: &str| {
+        let unlisted = root.join("unlisted");
+        std::fs::create_dir_all(unlisted.join("app-misc/foo")).unwrap();
+        let check_in = |repo: &Utf8Path, extra: &str| {
+            let repo_path_of = |_: &Cpv| repo.to_owned();
             let (cpv, data) = foo(extra, "gentoo");
             let order = [(PortagePackage::unslotted(cpv.cpn), cpv.version.clone())];
             with_policy(|policy| {
@@ -306,8 +311,10 @@ mod tests {
             .get(&cpv)
             .copied()
         };
+        let check = |extra: &str| check_in(&repo, extra);
         assert_eq!(check(""), None);
         assert_eq!(check("RESTRICT=fetch\n"), Some(false));
+        assert_eq!(check_in(&unlisted, "RESTRICT=fetch\n"), Some(true));
         std::fs::write(distdir.join("foo-1.tar.gz"), "abc").unwrap();
         assert_eq!(check("RESTRICT=fetch\n"), Some(true));
     }
