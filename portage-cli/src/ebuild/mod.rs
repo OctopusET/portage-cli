@@ -2328,7 +2328,9 @@ async fn run_fetch(
     }
 
     if any_restricted || any_failed {
-        if should_run_nofetch(restrict_gate.fetch, shell.defines_function("pkg_nofetch")) {
+        // Phase defaults are not installed yet, so only an ebuild or eclass definition counts:
+        // a plain network failure never prints the default SRC_URI list.
+        if restrict_gate.fetch || shell.defines_function("pkg_nofetch") {
             shell
                 .run_phase(ebuild, "nofetch", work_root.as_std_path(), Path::new("/"))
                 .await
@@ -2337,12 +2339,6 @@ async fn run_fetch(
         bail!("one or more distfiles could not be fetched");
     }
     Ok(())
-}
-
-/// Whether a failed fetch runs `pkg_nofetch`: only under `RESTRICT=fetch` or when
-/// the ebuild defines it, so a network failure never prints the default SRC_URI list
-fn should_run_nofetch(restrict_fetch: bool, defines_nofetch: bool) -> bool {
-    restrict_fetch || defines_nofetch
 }
 
 /// `PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS`, or `default` when it is unset or not a positive integer
@@ -4292,6 +4288,9 @@ fn read_fetch_commands(shell: &portage_repo::EbuildShell) -> (Option<String>, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use portage_vdb::ContentsKind;
+    use std::fs;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn fetch_mirror_repos_orders_every_repo_by_descending_priority() {
@@ -4327,16 +4326,6 @@ mod tests {
         assert_eq!(checksum_try_mirrors(Some("0"), 5), 5);
         assert_eq!(checksum_try_mirrors(Some("many"), 5), 5);
     }
-
-    #[test]
-    fn nofetch_runs_only_for_restrict_fetch_or_an_ebuild_definition() {
-        assert!(!should_run_nofetch(false, false));
-        assert!(should_run_nofetch(true, false));
-        assert!(should_run_nofetch(false, true));
-    }
-    use portage_vdb::ContentsKind;
-    use std::fs;
-    use std::os::unix::fs::symlink;
 
     #[tokio::test]
     async fn portage_tmpdir_counts_only_above_make_globals() {
@@ -4741,6 +4730,45 @@ mod tests {
     }
 
     const BUILD_AND_MERGE: &[RunPhase] = &[RunPhase::SETUP, RunPhase::INSTALL, RunPhase::Qmerge];
+
+    /// Fetch `body`'s one distfile, which has no Manifest entry and so fails without a download;
+    /// returns whether `pkg_nofetch` is defined afterwards
+    async fn failed_fetch(probe: &Probe, body: &str) -> bool {
+        let src_uri = "SRC_URI=\"http://example.invalid/probe.tar.gz\"\n";
+        let ebuild = probe.ebuild("probe", "1", &format!("{src_uri}{body}"));
+        let repo = probe.repo();
+        let mut shell = repo.shell().await.unwrap();
+        shell.set_distdir(probe.path("distfiles"));
+        let work = probe.path("work");
+        let mirror_repos = [repo.clone()];
+        let err = run_fetch(&mut shell, &ebuild, &repo, &mirror_repos, &work, false).await;
+        assert!(err.is_err());
+        shell.defines_function("pkg_nofetch")
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_runs_nofetch_only_when_restricted_or_defined() {
+        let probe = Probe::new();
+        assert!(!failed_fetch(&probe, "").await, "the default nofetch ran");
+
+        let probe = Probe::new();
+        assert!(failed_fetch(&probe, "pkg_nofetch() { note nofetch; }\n").await);
+        assert_eq!(probe.log(), "nofetch");
+
+        let probe = Probe::new();
+        fs::create_dir_all(probe.path("repo/eclass")).unwrap();
+        fs::write(
+            probe.path("repo/eclass/nf.eclass"),
+            "pkg_nofetch() { note eclass; }\n",
+        )
+        .unwrap();
+        assert!(failed_fetch(&probe, "inherit nf\n").await);
+        assert_eq!(probe.log(), "eclass");
+
+        let probe = Probe::new();
+        let restricted = failed_fetch(&probe, "RESTRICT=\"fetch\"\n").await;
+        assert!(restricted, "the default nofetch did not run");
+    }
 
     #[tokio::test]
     async fn pkg_pretend_leaves_nothing_for_pkg_setup() {
