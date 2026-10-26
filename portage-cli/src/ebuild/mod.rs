@@ -5550,7 +5550,7 @@ mod tests {
         let blocked = vdb
             .packages()
             .into_iter()
-            .find(|p| p.pf().to_string() == "old-1")
+            .find(|p| p.pf() == "old-1")
             .unwrap();
         let file = Utf8Path::new("/usr/share/probe/file");
         assert!(!blocked.contents().unwrap().iter().any(|e| e.path == file));
