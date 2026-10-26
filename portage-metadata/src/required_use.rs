@@ -79,11 +79,11 @@ impl RequiredUseExpr {
     /// [PMS 7.3.4](https://projects.gentoo.org/pms/9/pms.html#use-state-constraints):
     ///
     /// - a bare flag is satisfied when enabled (a negated flag when disabled);
-    /// - `|| ( ... )` — at least one child satisfied;
-    /// - `^^ ( ... )` — exactly one child satisfied (an empty `||` or `^^` is
-    ///   satisfied in EAPI 0–6, unmatched in EAPI 7–9 — see [`Self::is_satisfied_groups`]);
-    /// - `?? ( ... )` — at most one child satisfied;
-    /// - `flag? ( ... )` / `!flag? ( ... )` — when the guard is active, all
+    /// - `|| ( ... )`: at least one child satisfied;
+    /// - `^^ ( ... )`: exactly one child satisfied (an empty `||` or `^^` is
+    ///   satisfied in EAPI 0-6, unmatched in EAPI 7-9, see [`Self::is_satisfied_groups`]);
+    /// - `?? ( ... )`: at most one child satisfied;
+    /// - `flag? ( ... )` / `!flag? ( ... )`: when the guard is active, all
     ///   children must be satisfied; otherwise vacuously satisfied.
     pub fn is_satisfied(&self, enabled: &dyn Fn(&str) -> bool) -> bool {
         self.is_satisfied_groups(enabled, true)
