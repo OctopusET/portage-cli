@@ -200,23 +200,39 @@ impl PreservedLibsRegistry {
         }
     }
 
-    /// Register (or clear, if `paths` is empty) the preserved-lib set for
-    /// one `cp:slot` — matching real portage's `register`/`unregister`
-    /// (the same call; empty paths means unregister).
+    /// Register (or clear, if `paths` is empty) the preserved-lib set for one `cp:slot`,
+    /// matching portage's `register`
+    ///
+    /// New paths are added to the key's existing ones: preserved files are in no CONTENTS,
+    /// so an earlier replacement's stay registered until [`Self::reclaim`] finds them unneeded.
+    /// An empty set clears only the entry `cpv` itself registered, as portage does.
     pub fn register(&mut self, cpv: &Cpv, slot: &str, counter: u64, paths: Vec<Utf8PathBuf>) {
         let key = format!("{}:{slot}", cpv.cpn);
+        let cpv = cpv.to_string();
         if paths.is_empty() {
-            self.data.remove(&key);
-        } else {
-            self.data.insert(
-                key,
-                RegistryEntry {
-                    cpv: cpv.to_string(),
-                    counter,
-                    paths: paths.into_iter().map(Utf8PathBuf::into_string).collect(),
-                },
-            );
+            if self
+                .data
+                .get(&key)
+                .is_some_and(|e| e.cpv == cpv && e.counter == counter)
+            {
+                self.data.remove(&key);
+            }
+            return;
         }
+        let mut merged = self.data.remove(&key).map(|e| e.paths).unwrap_or_default();
+        for path in paths {
+            if !merged.iter().any(|p| p == path.as_str()) {
+                merged.push(path.into_string());
+            }
+        }
+        self.data.insert(
+            key,
+            RegistryEntry {
+                cpv,
+                counter,
+                paths: merged,
+            },
+        );
     }
 
     /// Reclaim preserved-libs after a merge or unmerge batch:
@@ -806,6 +822,31 @@ mod tests {
         reg2.store();
         let reloaded2 = PreservedLibsRegistry::load(&root);
         assert_eq!(reloaded2.all_paths().count(), 0);
+    }
+
+    #[test]
+    fn registering_a_slot_again_keeps_its_earlier_preserved_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(dir.path().to_owned()).unwrap();
+        let first = Cpv::parse("sys-libs/foo-1.0").unwrap();
+        let second = Cpv::parse("sys-libs/foo-2.0").unwrap();
+        let mut reg = PreservedLibsRegistry::load(&root);
+        reg.register(
+            &first,
+            "0",
+            1,
+            vec![Utf8PathBuf::from("/usr/lib64/libfoo.so.1")],
+        );
+        reg.register(&second, "0", 2, vec![]);
+        reg.register(
+            &second,
+            "0",
+            2,
+            vec![Utf8PathBuf::from("/usr/lib64/libfoo.so.2")],
+        );
+        let mut paths: Vec<_> = reg.all_paths().map(|p| p.into_string()).collect();
+        paths.sort();
+        assert_eq!(paths, ["/usr/lib64/libfoo.so.1", "/usr/lib64/libfoo.so.2"]);
     }
 
     #[test]
