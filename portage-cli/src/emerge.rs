@@ -1540,6 +1540,9 @@ async fn execute_unmerge_batch(
     if let Err(e) = maint::env::env_update(&root) {
         crate::style::warn_line!("env-update after {verb} failed: {e:#}");
     }
+    if let Err(e) = maint::infodir::update_info_dirs(&root) {
+        crate::style::warn_line!("info directory index update after {verb} failed: {e:#}");
+    }
 
     if failures > 0 {
         bail!(
