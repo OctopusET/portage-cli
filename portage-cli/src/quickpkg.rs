@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, Vdb};
 
-use crate::binpkg::{read_make_conf_var, resolve_pkgdir};
+use crate::binpkg::resolve_pkgdir;
 use crate::cli::Cli;
 use crate::ebuild::ConfigProtect;
 use crate::emerge::expand_sets;
@@ -110,10 +110,8 @@ async fn run_inner(globals: &Cli, opts: &QuickpkgOpts) -> Result<()> {
 
     // Refresh the Packages index so `-k`/`-g` consumers see new containers.
     if !successes.is_empty() {
-        let chost = read_make_conf_var(globals, "CHOST")
-            .await
-            .unwrap_or_default();
-        match portage_binpkg::index_pkgdir(&pkgdir, &chost) {
+        let index = crate::binpkg::cli_index_config(globals).await;
+        match portage_binpkg::index_pkgdir(&pkgdir, &index) {
             Ok((n, skipped)) => {
                 if skipped > 0 {
                     println!(">>> Packages index: {n} entries ({skipped} skipped)");

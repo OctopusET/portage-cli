@@ -85,11 +85,10 @@ multi-instance (`cpv → Vec<entry>`), and `find_reusable` picks the newest
 A target atom with a build id, `=cat/pkg-1.0-3`, merges that `BUILD_ID` only. It needs `-k`/`-K`
 and a local `PKGDIR` that holds the build, and never falls back to a source build.
 
-Boards may build into it at the same time: em locks `PKGDIR/.em-pkgdir.lock`
-while it allocates a `BUILD_ID`, writes a container and rewrites `Packages`,
-and writes both under a temporary name before renaming them into place.
-Portage's own index lock is a different one, so do not mix in a concurrent
-`emerge -b`.
+Boards may build into it at the same time: em takes Portage's index lock,
+`PKGDIR/.Packages.portage_lockfile`, while it allocates a `BUILD_ID`, writes a
+container and rewrites `Packages`, and writes both under a temporary name before
+renaming them into place, so a concurrent `emerge -b` waits too.
 
 ```bash
 export PKGDIR=/var/cache/em-binpkgs/shared

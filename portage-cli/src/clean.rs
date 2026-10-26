@@ -463,10 +463,8 @@ async fn clean_pkgs(globals: &Cli, opts: &CleanOpts, filters: &Filters) -> Resul
         return Ok(());
     }
     // The index must stop offering what was just removed to `-k`/`-g`.
-    let chost = crate::binpkg::read_make_conf_var(globals, "CHOST")
-        .await
-        .unwrap_or_default();
-    portage_binpkg::index_pkgdir(&pkgdir, &chost)
+    let index = crate::binpkg::cli_index_config(globals).await;
+    portage_binpkg::index_pkgdir(&pkgdir, &index)
         .with_context(|| format!("refreshing the Packages index in {pkgdir}"))?;
     Ok(())
 }

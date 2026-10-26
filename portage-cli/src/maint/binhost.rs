@@ -5,7 +5,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::binpkg::{read_make_conf_var, resolve_pkgdir};
+use crate::binpkg::resolve_pkgdir;
 use crate::cli::Cli;
 
 /// Dispatch `em maint binhost`
@@ -14,11 +14,9 @@ pub async fn run(globals: &Cli) -> Result<()> {
     if !pkgdir.exists() {
         bail!("PKGDIR does not exist: {}", pkgdir);
     }
-    let chost = read_make_conf_var(globals, "CHOST")
-        .await
-        .unwrap_or_default();
+    let index = crate::binpkg::cli_index_config(globals).await;
     let _lock = crate::binpkg::lock_pkgdir(&pkgdir)?;
-    let (count, skipped) = portage_binpkg::index_pkgdir(&pkgdir, &chost)?;
+    let (count, skipped) = portage_binpkg::index_pkgdir(&pkgdir, &index)?;
     println!(
         "emaint binhost: indexed {} package(s){} -> {}/Packages",
         count,

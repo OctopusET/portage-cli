@@ -36,5 +36,5 @@ pub use index::{
     encode_build_env_key, parse_index_blocks, parse_index_header, parse_packages_entries,
     use_compatible,
 };
-pub use regen::index_pkgdir;
+pub use regen::{IndexConfig, index_pkgdir};
 pub use scan::{checksum, find_gpkg_containers, parse_build_id_from_name};

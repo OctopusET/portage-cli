@@ -12,9 +12,7 @@ use humansize::{BINARY, format_size};
 use portage_binpkg::gpg;
 use portage_binpkg::maint::{PruneReport, SignatureStatus, VerifyReport};
 
-use crate::binpkg::{
-    DesiredBuildEnv, read_make_conf_var, resolve_gpg_verify_home_for_roots, resolve_pkgdir,
-};
+use crate::binpkg::{DesiredBuildEnv, resolve_gpg_verify_home_for_roots, resolve_pkgdir};
 use crate::cli::{BinpkgAction, Cli};
 use crate::style::C_ERROR;
 
@@ -26,17 +24,13 @@ pub async fn run(action: &BinpkgAction, globals: &Cli) -> Result<()> {
             fix,
             require_signature,
         } => {
-            let chost = read_make_conf_var(globals, "CHOST")
-                .await
-                .unwrap_or_default();
-            verify(globals, &pkgdir, &chost, *fix, *require_signature).await
+            let index = crate::binpkg::cli_index_config(globals).await;
+            verify(globals, &pkgdir, &index, *fix, *require_signature).await
         }
         BinpkgAction::List => list(&pkgdir),
         BinpkgAction::Prune { dry_run } => {
-            let chost = read_make_conf_var(globals, "CHOST")
-                .await
-                .unwrap_or_default();
-            prune(&pkgdir, &chost, *dry_run)
+            let index = crate::binpkg::cli_index_config(globals).await;
+            prune(&pkgdir, &index, *dry_run)
         }
         BinpkgAction::Fingerprint { full, host } => fingerprint(globals, *full, *host).await,
         BinpkgAction::GpgImport { keyfile } => gpg_import(globals, keyfile).await,
@@ -46,7 +40,7 @@ pub async fn run(action: &BinpkgAction, globals: &Cli) -> Result<()> {
 async fn verify(
     globals: &Cli,
     pkgdir: &camino::Utf8Path,
-    chost: &str,
+    index: &portage_binpkg::IndexConfig,
     fix: bool,
     require_signature: bool,
 ) -> Result<()> {
@@ -63,7 +57,7 @@ async fn verify(
         .then(|| crate::binpkg::lock_pkgdir(pkgdir))
         .transpose()?;
     let report: VerifyReport =
-        portage_binpkg::maint::verify(pkgdir, chost, fix, require_signature, keyring.as_ref())?;
+        portage_binpkg::maint::verify(pkgdir, index, fix, require_signature, keyring.as_ref())?;
 
     use std::io::Write;
     let mut out = anstream::stdout();
@@ -229,11 +223,15 @@ async fn fingerprint(globals: &Cli, full: bool, host: bool) -> Result<()> {
     Ok(())
 }
 
-fn prune(pkgdir: &camino::Utf8Path, chost: &str, dry_run: bool) -> Result<()> {
+fn prune(
+    pkgdir: &camino::Utf8Path,
+    index: &portage_binpkg::IndexConfig,
+    dry_run: bool,
+) -> Result<()> {
     let _lock = (!dry_run)
         .then(|| crate::binpkg::lock_pkgdir(pkgdir))
         .transpose()?;
-    let report: PruneReport = portage_binpkg::maint::prune(pkgdir, chost, dry_run)?;
+    let report: PruneReport = portage_binpkg::maint::prune(pkgdir, index, dry_run)?;
 
     for kept in &report.kept {
         println!(

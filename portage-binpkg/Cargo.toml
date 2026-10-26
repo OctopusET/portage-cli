@@ -26,6 +26,8 @@ pgp = "0.21.0"
 # pgp 0.21 still requires rand 0.8; do not bump until pgp does.
 rand = "0.8"
 tracing = { workspace = true }
+serde_json = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -49,6 +49,7 @@ pub(crate) async fn build_binpkg_standalone(
     work_root: &Utf8Path,
     root: &Utf8Path,
     build_env_key: &str,
+    index: &portage_binpkg::IndexConfig,
 ) -> Result<(Utf8PathBuf, BinpkgRecord)> {
     shell.apply_iuse_effective();
     let mut env = shell.collect_env();
@@ -110,7 +111,7 @@ pub(crate) async fn build_binpkg_standalone(
     std::fs::write(key_file.as_std_path(), format!("{key}\n"))
         .with_context(|| format!("writing {key_file}"))?;
 
-    let written = write_binpkg(shell, ebuild, &image_dir, root, installed.path());
+    let written = write_binpkg(shell, ebuild, &image_dir, root, installed.path(), index);
     if image_dir != ed {
         let _ = std::fs::remove_dir_all(image_dir.as_std_path());
     }
@@ -215,6 +216,7 @@ fn write_binpkg(
     image_dir: &Utf8Path,
     root: &Utf8Path,
     metadata_dir: &Utf8Path,
+    index: &portage_binpkg::IndexConfig,
 ) -> Result<(Utf8PathBuf, Option<u32>)> {
     let cat = ebuild.category();
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
@@ -288,8 +290,7 @@ fn write_binpkg(
     written?;
     // Keep `Packages` coherent for `-k`/`-g` without a separate
     // `em maint binhost` (quickpkg already reindexes; normal `-b`/`-B` did not).
-    let chost = shell.get_var("CHOST").unwrap_or_default();
-    if let Err(e) = portage_binpkg::index_pkgdir(&pkgdir, &chost) {
+    if let Err(e) = portage_binpkg::index_pkgdir(&pkgdir, index) {
         crate::style::warn_line!("could not refresh Packages index after {out}: {e:#}");
     }
     Ok((out, build_id))

@@ -1451,6 +1451,8 @@ struct PackageSetup {
     /// The key of the flags this package is configured to build with, before
     /// the ebuild has had a chance to change them
     build_env_key: String,
+    /// The `Packages` header and compression for a binary package of this build
+    index: portage_binpkg::IndexConfig,
     /// Portage `EbuildBuildDir`: exclusive use of this package tree for the
     /// whole phase chain (also blocks a second concurrent `em` on the same path).
     _builddir_lock: Option<std::fs::File>,
@@ -1676,6 +1678,14 @@ impl PackageSetup {
             &flags("LDFLAGS"),
             &flags("RUSTFLAGS"),
         );
+        let index = match settings.as_deref() {
+            Some(s) => crate::binpkg::index_config(s, config_root.unwrap_or(Utf8Path::new("/"))),
+            None => {
+                let mut index = portage_binpkg::IndexConfig::default();
+                index.header.insert("CHOST".to_owned(), flags("CHOST"));
+                index
+            }
+        };
 
         Ok(Self {
             ebuild,
@@ -1685,6 +1695,7 @@ impl PackageSetup {
             work_root,
             features,
             build_env_key,
+            index,
             _builddir_lock: builddir_lock,
         })
     }
@@ -1701,6 +1712,7 @@ impl PackageSetup {
             work_root,
             features,
             build_env_key,
+            index,
         } = self;
         let GroupRun {
             group,
@@ -1877,6 +1889,7 @@ impl PackageSetup {
                             &work_root,
                             root,
                             &build_env_key,
+                            &index,
                         )
                         .await
                         {
@@ -5346,6 +5359,7 @@ mod tests {
                 work_root: work.clone(),
                 features: Default::default(),
                 build_env_key: String::new(),
+                index: Default::default(),
                 _builddir_lock: None,
             };
             setup

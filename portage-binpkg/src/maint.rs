@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::gpg::Keyring;
 use crate::gpkg::VerifyPolicy;
 use crate::index::parse_index_blocks;
-use crate::regen::index_pkgdir;
+use crate::regen::{IndexConfig, index_pkgdir};
 use crate::scan::{ContainerFacts, checksum, find_gpkg_containers};
 
 /// One `Packages` index entry, with the digest/size fields [`verify`]/
@@ -54,7 +54,7 @@ pub struct IndexRow {
     pub size: Option<u64>,
     /// Recorded `BUILD_ID`, if the index has one
     pub build_id: Option<u32>,
-    /// Recorded `CHOST` ("" if the index omitted it)
+    /// Recorded `CHOST`, else the header's ("" if neither has one)
     pub chost: String,
     /// Recorded `CFLAGS` ("" if absent) — display only
     pub cflags: String,
@@ -64,6 +64,8 @@ pub struct IndexRow {
 }
 
 fn parse_index_rows(text: &str) -> Vec<IndexRow> {
+    let header = crate::index::parse_index_header(text);
+    let header_chost = header.get("CHOST").map(String::as_str).unwrap_or("");
     parse_index_blocks(text)
         .into_iter()
         .map(|fields| IndexRow {
@@ -73,7 +75,11 @@ fn parse_index_rows(text: &str) -> Vec<IndexRow> {
             sha1: fields.get("SHA1").map(|s| s.to_string()),
             size: fields.get("SIZE").and_then(|s| s.parse().ok()),
             build_id: fields.get("BUILD_ID").and_then(|s| s.parse().ok()),
-            chost: fields.get("CHOST").copied().unwrap_or("").to_string(),
+            chost: fields
+                .get("CHOST")
+                .copied()
+                .unwrap_or(header_chost)
+                .to_string(),
             cflags: fields.get("CFLAGS").copied().unwrap_or("").to_string(),
             build_env_key: crate::index::build_env_key_from_fields(&fields),
         })
@@ -201,7 +207,7 @@ impl VerifyReport {
 /// not a corrupt one.
 pub fn verify(
     pkgdir: &Utf8Path,
-    chost: &str,
+    config: &IndexConfig,
     fix: bool,
     require_signature: bool,
     keyring: Option<&Keyring>,
@@ -308,7 +314,7 @@ pub fn verify(
     }
 
     let reindexed = if fix && problems.iter().any(|p| p.quarantined_to.is_some()) {
-        Some(index_pkgdir(pkgdir, chost)?.0)
+        Some(index_pkgdir(pkgdir, config)?.0)
     } else {
         None
     };
@@ -351,7 +357,7 @@ pub struct PruneReport {
 /// build_env_key), delete the rest, and regenerate the index.
 ///
 /// `dry_run`: report what would be deleted without touching anything.
-pub fn prune(pkgdir: &Utf8Path, chost: &str, dry_run: bool) -> Result<PruneReport> {
+pub fn prune(pkgdir: &Utf8Path, config: &IndexConfig, dry_run: bool) -> Result<PruneReport> {
     if !pkgdir.exists() {
         return Err(Error::NoPkgdir(pkgdir.as_std_path().to_path_buf()));
     }
@@ -406,7 +412,7 @@ pub fn prune(pkgdir: &Utf8Path, chost: &str, dry_run: bool) -> Result<PruneRepor
     }
 
     let reindexed = if !dry_run && !removed.is_empty() {
-        Some(index_pkgdir(pkgdir, chost)?.0)
+        Some(index_pkgdir(pkgdir, config)?.0)
     } else {
         None
     };
@@ -502,9 +508,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pkgdir = camino::Utf8Path::from_path(tmp.path()).unwrap();
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
-        index_pkgdir(pkgdir, "x86_64-pc-linux-gnu").unwrap();
+        index_pkgdir(pkgdir, &crate::regen::chost_config("x86_64-pc-linux-gnu")).unwrap();
 
-        let report = verify(pkgdir, "x86_64-pc-linux-gnu", false, false, None).unwrap();
+        let report = verify(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(report.is_clean());
         assert_eq!(report.ok, 1);
         assert_eq!(report.total, 1);
@@ -515,14 +528,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pkgdir = camino::Utf8Path::from_path(tmp.path()).unwrap();
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
-        index_pkgdir(pkgdir, "x86_64-pc-linux-gnu").unwrap();
+        index_pkgdir(pkgdir, &crate::regen::chost_config("x86_64-pc-linux-gnu")).unwrap();
 
         let container = pkgdir.join("app-test/foo-1.0-1.gpkg.tar");
         let mut bytes = std::fs::read(&container).unwrap();
         bytes.push(0xff);
         std::fs::write(&container, bytes).unwrap();
 
-        let report = verify(pkgdir, "x86_64-pc-linux-gnu", false, false, None).unwrap();
+        let report = verify(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(!report.is_clean());
         assert_eq!(report.corrupt_count(), 1);
         assert_eq!(report.missing_count(), 0);
@@ -538,7 +558,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let pkgdir = camino::Utf8Path::from_path(tmp.path()).expect("utf8 tempdir");
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
-        index_pkgdir(pkgdir, "x86_64-pc-linux-gnu").expect("index");
+        index_pkgdir(pkgdir, &crate::regen::chost_config("x86_64-pc-linux-gnu")).expect("index");
 
         let index_path = pkgdir.join("Packages");
         let stripped: String = std::fs::read_to_string(&index_path)
@@ -554,7 +574,14 @@ mod tests {
         bytes.push(0xff);
         std::fs::write(&container, bytes).expect("corrupt container");
 
-        let report = verify(pkgdir, "x86_64-pc-linux-gnu", false, false, None).expect("verify");
+        let report = verify(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            false,
+            false,
+            None,
+        )
+        .expect("verify");
         assert!(!report.is_clean());
         assert_eq!(report.corrupt_count(), 1);
         assert!(report.problems[0].size_mismatch.is_none());
@@ -566,14 +593,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pkgdir = camino::Utf8Path::from_path(tmp.path()).unwrap();
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
-        index_pkgdir(pkgdir, "x86_64-pc-linux-gnu").unwrap();
+        index_pkgdir(pkgdir, &crate::regen::chost_config("x86_64-pc-linux-gnu")).unwrap();
 
         let container = pkgdir.join("app-test/foo-1.0-1.gpkg.tar");
         let mut bytes = std::fs::read(&container).unwrap();
         bytes.push(0xff);
         std::fs::write(&container, bytes).unwrap();
 
-        let report = verify(pkgdir, "x86_64-pc-linux-gnu", true, false, None).unwrap();
+        let report = verify(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            true,
+            false,
+            None,
+        )
+        .unwrap();
 
         assert!(!container.exists());
         assert!(pkgdir.join("app-test/foo-1.0-1.gpkg.tar.corrupt").exists());
@@ -587,10 +621,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pkgdir = camino::Utf8Path::from_path(tmp.path()).unwrap();
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
-        index_pkgdir(pkgdir, "x86_64-pc-linux-gnu").unwrap();
+        index_pkgdir(pkgdir, &crate::regen::chost_config("x86_64-pc-linux-gnu")).unwrap();
         std::fs::remove_file(pkgdir.join("app-test/foo-1.0-1.gpkg.tar")).unwrap();
 
-        let report = verify(pkgdir, "x86_64-pc-linux-gnu", false, false, None).unwrap();
+        let report = verify(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(report.missing_count(), 1);
         assert_eq!(report.corrupt_count(), 0);
     }
@@ -602,7 +643,12 @@ mod tests {
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 2);
 
-        let report = prune(pkgdir, "x86_64-pc-linux-gnu", false).unwrap();
+        let report = prune(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            false,
+        )
+        .unwrap();
 
         assert!(!pkgdir.join("app-test/foo-1.0-1.gpkg.tar").exists());
         assert!(pkgdir.join("app-test/foo-1.0-2.gpkg.tar").exists());
@@ -622,7 +668,12 @@ mod tests {
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 2);
 
-        let report = prune(pkgdir, "x86_64-pc-linux-gnu", true).unwrap();
+        let report = prune(
+            pkgdir,
+            &crate::regen::chost_config("x86_64-pc-linux-gnu"),
+            true,
+        )
+        .unwrap();
 
         assert!(pkgdir.join("app-test/foo-1.0-1.gpkg.tar").exists());
         assert!(pkgdir.join("app-test/foo-1.0-2.gpkg.tar").exists());
@@ -635,7 +686,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pkgdir = camino::Utf8Path::from_path(tmp.path()).unwrap();
         seed_container(tmp.path(), pkgdir, "app-test", "foo-1.0", 1);
-        index_pkgdir(pkgdir, "x86_64-pc-linux-gnu").unwrap();
+        index_pkgdir(pkgdir, &crate::regen::chost_config("x86_64-pc-linux-gnu")).unwrap();
 
         let rows = list_index(pkgdir).unwrap();
         assert_eq!(rows.len(), 1);

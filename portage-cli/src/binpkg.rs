@@ -445,23 +445,46 @@ fn parse_binrepo_bool(v: Option<&String>) -> Option<bool> {
     v.map(|s| matches!(s.to_lowercase().as_str(), "true" | "yes"))
 }
 
+/// A held [`lock_pkgdir`]; the lock file is removed on release, as Portage removes its own
+pub(crate) struct PkgdirLock {
+    path: Utf8PathBuf,
+    _file: std::fs::File,
+}
+
+impl Drop for PkgdirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.path.as_std_path());
+    }
+}
+
 /// Exclusive lock on `pkgdir`, held while em allocates a build id, writes or removes containers,
-/// or rewrites the index; another em run on the same `PKGDIR` waits
+/// or rewrites the index; another em run or an emerge on the same `PKGDIR` waits
 ///
-/// Portage locks its index with fcntl locks on another file, which this does not exclude.
-pub(crate) fn lock_pkgdir(pkgdir: &Utf8Path) -> anyhow::Result<std::fs::File> {
+/// The file is Portage's index lock, `.Packages.portage_lockfile`: the record lock excludes
+/// emerge, the `flock` other em threads, which record locks of one process do not.
+pub(crate) fn lock_pkgdir(pkgdir: &Utf8Path) -> anyhow::Result<PkgdirLock> {
     use anyhow::Context;
+    use rustix::fs::FlockOperation::LockExclusive;
     std::fs::create_dir_all(pkgdir.as_std_path()).with_context(|| format!("creating {pkgdir}"))?;
-    let path = pkgdir.join(".em-pkgdir.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path.as_std_path())
-        .with_context(|| format!("opening {path}"))?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-        .with_context(|| format!("locking {path}"))?;
-    Ok(file)
+    let path = pkgdir.join(".Packages.portage_lockfile");
+    loop {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.as_std_path())
+            .with_context(|| format!("opening {path}"))?;
+        rustix::fs::flock(&file, LockExclusive).with_context(|| format!("locking {path}"))?;
+        while rustix::fs::fcntl_lock(&file, LockExclusive) == Err(rustix::io::Errno::INTR) {}
+        // The previous holder unlinks the file before releasing it; retry on the new one.
+        let held = rustix::fs::fstat(&file).with_context(|| format!("checking {path}"))?;
+        if let Ok(now) = rustix::fs::stat(path.as_std_path())
+            && (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino)
+        {
+            return Ok(PkgdirLock { path, _file: file });
+        }
+    }
 }
 
 /// The next free build id for `<cat>/<pf>`: past every container of it, in Portage's `<cat>/<pn>/`
@@ -521,6 +544,89 @@ pub(crate) fn reserve_container(
     }
 }
 
+/// Settings Portage's `_update_pkgindex_header` copies into the `Packages` header
+const INDEX_HEADER_KEYS: &[&str] = &[
+    "ACCEPT_KEYWORDS",
+    "ACCEPT_LICENSE",
+    "ACCEPT_PROPERTIES",
+    "ACCEPT_RESTRICT",
+    "CBUILD",
+    "CONFIG_PROTECT",
+    "CONFIG_PROTECT_MASK",
+    "FEATURES",
+    "GENTOO_MIRRORS",
+    "INSTALL_MASK",
+    "IUSE_IMPLICIT",
+    "USE",
+    "USE_EXPAND",
+    "USE_EXPAND_HIDDEN",
+    "USE_EXPAND_IMPLICIT",
+    "USE_EXPAND_UNPREFIXED",
+];
+
+/// The `Packages` header and `compress-index` for an index written under `settings`
+///
+/// As in Portage, a config root whose profile lacks `IUSE_IMPLICIT` gets only `CHOST`.
+pub(crate) fn index_config(
+    settings: &portage_repo::Settings,
+    config_root: &Utf8Path,
+) -> portage_binpkg::IndexConfig {
+    let get = |key: &str| settings.get(key).filter(|v| !v.is_empty());
+    let mut header = std::collections::BTreeMap::new();
+    let mut set = |key: &str, value: Option<&str>| {
+        if let Some(value) = value {
+            header.insert(key.to_owned(), value.to_owned());
+        }
+    };
+    set("CHOST", get("CHOST"));
+    let profile = std::fs::canonicalize(config_root.join("etc/portage/make.profile"));
+    if let (Ok(profile), Some(_)) = (profile, get("IUSE_IMPLICIT")) {
+        let relative = profile
+            .ancestors()
+            .find(|dir| dir.file_name().is_some_and(|n| n == "profiles"))
+            .and_then(|base| profile.strip_prefix(base).ok())
+            .unwrap_or(&profile);
+        set("PROFILE", relative.to_str());
+        set("URI", get("PORTAGE_BINHOST_HEADER_URI"));
+        set("TTL", get("PORTAGE_BINHOST_TTL"));
+        let implicit = get("USE_EXPAND_IMPLICIT").unwrap_or_default();
+        let unprefixed = get("USE_EXPAND_UNPREFIXED").unwrap_or_default();
+        for key in INDEX_HEADER_KEYS
+            .iter()
+            .copied()
+            .chain(implicit.split_whitespace())
+            .chain(unprefixed.split_whitespace())
+        {
+            set(key, get(key));
+        }
+        for name in implicit.split_whitespace() {
+            let key = format!("USE_EXPAND_VALUES_{name}");
+            set(&key, get(&key));
+        }
+    }
+    let compress =
+        get("FEATURES").is_some_and(|f| f.split_whitespace().any(|w| w == "compress-index"));
+    portage_binpkg::IndexConfig { header, compress }
+}
+
+/// [`index_config`] for the config root `globals` selects, or only make.conf's `CHOST` when it
+/// has no profile to evaluate
+pub(crate) async fn cli_index_config(globals: &Cli) -> portage_binpkg::IndexConfig {
+    match crate::settings::load(globals).await {
+        Ok(Some(settings)) => {
+            let roots = globals.roots();
+            index_config(&settings, roots.config().unwrap_or(Utf8Path::new("/")))
+        }
+        _ => {
+            let mut config = portage_binpkg::IndexConfig::default();
+            if let Some(chost) = read_make_conf_var(globals, "CHOST").await {
+                config.header.insert("CHOST".to_owned(), chost);
+            }
+            config
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +676,82 @@ mod tests {
             reserve_container(&pkgdir, "sys-libs", "glibc", "glibc-2.42", false).unwrap();
         assert_eq!(id, None);
         assert_eq!(path, pkgdir.join("sys-libs/glibc-2.42.gpkg.tar"));
+    }
+
+    #[test]
+    fn the_pkgdir_lock_is_portages_index_lock_and_goes_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkgdir = Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let lock_file = pkgdir.join(".Packages.portage_lockfile");
+        let lock = lock_pkgdir(&pkgdir).unwrap();
+        assert!(lock_file.is_file());
+        drop(lock);
+        assert!(!lock_file.exists());
+    }
+
+    async fn settings_of(repo_dir: &std::path::Path, defaults: &str) -> portage_repo::Settings {
+        let profile = repo_dir.join("profiles/default/linux");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(repo_dir.join("metadata")).unwrap();
+        std::fs::write(repo_dir.join("metadata/layout.conf"), "").unwrap();
+        std::fs::write(profile.join("make.defaults"), defaults).unwrap();
+        let repo = portage_repo::Repository::builder()
+            .in_memory_cache()
+            .open(repo_dir)
+            .unwrap();
+        let stack = portage_repo::ProfileStack::build(profile).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        portage_repo::Settings::evaluate(
+            &mut shell,
+            portage_repo::SettingsSources {
+                stack: &stack,
+                env_d: None,
+                globals: None,
+                confs: &[],
+                env: &portage_repo::Environment::default(),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_index_header_follows_portages_update_pkgindex_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        let config_root = Utf8PathBuf::from_path_buf(dir.path().join("root")).unwrap();
+        std::fs::create_dir_all(config_root.join("etc/portage").as_std_path()).unwrap();
+        std::os::unix::fs::symlink(
+            repo_dir.join("profiles/default/linux"),
+            config_root.join("etc/portage/make.profile"),
+        )
+        .unwrap();
+
+        let full = settings_of(
+            &repo_dir,
+            "CHOST=\"x86_64-pc-linux-gnu\"\nARCH=\"amd64\"\nIUSE_IMPLICIT=\"prefix\"\n\
+             USE_EXPAND_IMPLICIT=\"ARCH\"\nUSE_EXPAND_UNPREFIXED=\"ARCH\"\n\
+             USE_EXPAND_VALUES_ARCH=\"amd64 arm64\"\nFEATURES=\"compress-index\"\n\
+             PORTAGE_BINHOST_HEADER_URI=\"https://example.invalid/\"\n",
+        )
+        .await;
+        let config = index_config(&full, &config_root);
+        let get = |k: &str| config.header.get(k).map(String::as_str);
+        assert_eq!(get("PROFILE"), Some("default/linux"));
+        assert_eq!(get("CHOST"), Some("x86_64-pc-linux-gnu"));
+        assert_eq!(get("ARCH"), Some("amd64"));
+        assert_eq!(get("USE_EXPAND_VALUES_ARCH"), Some("amd64 arm64"));
+        assert_eq!(get("URI"), Some("https://example.invalid/"));
+        assert_eq!(get("FEATURES"), Some("compress-index"));
+        assert!(config.compress);
+
+        let bare = settings_of(&repo_dir, "CHOST=\"x86_64-pc-linux-gnu\"\nARCH=\"amd64\"\n").await;
+        let config = index_config(&bare, &config_root);
+        assert_eq!(
+            config.header.keys().collect::<Vec<_>>(),
+            ["CHOST"],
+            "without IUSE_IMPLICIT only CHOST"
+        );
     }
 
     // Regression test for the stage3 --buildpkg failure: a non-host root

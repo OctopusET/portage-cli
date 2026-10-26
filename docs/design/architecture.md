@@ -260,6 +260,8 @@ Gentoo binary package (GPKG) read/write per [GLEP 78](https://www.gentoo.org/gle
   outer members needed for a check are staged in one `tar` pass. The detached
   OpenPGP API still requires a contiguous member buffer.
 - `struct GpkgInput` — input specification for writing
+- `fn index_pkgdir()` + `struct IndexConfig` — write `Packages` (and `Packages.gz`) in the
+  shape of portage's `PackageIndex.write`; the header comes from the caller's settings
 - Used by `em` for `-b`/`--buildpkg`, `-k`/`--usepkg`, and `-g`/`--getbinpkg`
 
 ### `portage-distfiles` (v0.1.0)
@@ -765,6 +767,11 @@ count a version whose dependency field fails to parse.
 **`em ebuild <ebuild> manifest`.** It hashes the distfiles of the one ebuild it runs for and keeps
 every other `DIST` entry, where portage rebuilds the Manifest from all ebuilds in the package and
 drops entries none of them reference. There is no `--force` to replace a `DIST` entry whose file changed.
+
+**Binpkg `Packages` index.** The header's `REPO_REVISIONS` is, per repository, the
+revision of its newest indexed build, since em keeps no sync history to check it against;
+`PROFILE` is relative to the nearest `profiles` directory, also for an overlay's profile.
+Entries keep the `CFLAGS` family and `BUILD_ENV_KEY` for em's reuse check.
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
