@@ -505,6 +505,7 @@ mod tests {
             auto_sync: false,
             volatile: None,
             priority: None,
+            sync_options: Default::default(),
         };
 
         let mut set = RepoSet::single(main);
@@ -555,6 +556,7 @@ mod tests {
             auto_sync: false,
             volatile: None,
             priority: None,
+            sync_options: Default::default(),
         };
 
         let mut set = RepoSet::single(main);

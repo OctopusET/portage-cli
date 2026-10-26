@@ -155,11 +155,15 @@ async fn sync_one(entry: &RepoEntry, globals: &Cli) -> Result<SyncOutcome> {
     };
 
     let volatile = resolve_volatile(entry, path.as_std_path());
+    let rsync_opts = match kind {
+        SyncKind::Git => Vec::new(),
+        SyncKind::Rsync => rsync_options(entry, globals).await?,
+    };
 
     if globals.pretend() {
         let action = match kind {
             SyncKind::Git => git_pretend(&path, sync_uri, volatile),
-            SyncKind::Rsync => rsync_cmd::pretend(&path, sync_uri),
+            SyncKind::Rsync => rsync_cmd::pretend(&path, sync_uri, &rsync_opts),
         };
         return Ok(SyncOutcome::Pretend(action));
     }
@@ -186,12 +190,31 @@ async fn sync_one(entry: &RepoEntry, globals: &Cli) -> Result<SyncOutcome> {
     let uri = sync_uri.to_string();
     let changed = tokio::task::spawn_blocking(move || match kind {
         SyncKind::Git => git_sync(&path_c, &uri, volatile, quiet),
-        SyncKind::Rsync => rsync_cmd::sync(&path_c, &uri, quiet),
+        SyncKind::Rsync => rsync_cmd::sync(&path_c, &uri, &rsync_opts, quiet),
     })
     .await
     .context("sync task join")??;
 
     Ok(SyncOutcome::Synced { changed })
+}
+
+async fn rsync_options(entry: &RepoEntry, globals: &Cli) -> Result<Vec<String>> {
+    // A first sync has no main repo to evaluate make.conf in; Portage's defaults apply then.
+    let settings = crate::settings::load(globals).await.unwrap_or_else(|e| {
+        tracing::debug!("no settings for rsync options: {e:#}");
+        None
+    });
+    let var = |name| settings.as_ref().and_then(|s| s.get(name)).unwrap_or("");
+    let extra = entry
+        .sync_options
+        .get("sync-rsync-extra-opts")
+        .map_or_else(|| var("PORTAGE_RSYNC_EXTRA_OPTS"), String::as_str);
+    rsync_cmd::options(
+        var("PORTAGE_RSYNC_OPTS"),
+        extra,
+        globals.quiet(),
+        globals.verbose() > 0,
+    )
 }
 
 fn backend_label(kind: SyncKind) -> &'static str {

@@ -3309,6 +3309,7 @@ mod tests {
             auto_sync: false,
             volatile: None,
             priority: None,
+            sync_options: Default::default(),
         };
         let mut set = portage_repo::RepoSet::single(repo);
         set.set_aliases(vec![alias_entry]);
@@ -3395,6 +3396,7 @@ mod tests {
             auto_sync: false,
             volatile: None,
             priority: None,
+            sync_options: Default::default(),
         };
 
         let mut set = portage_repo::RepoSet::single(repo);

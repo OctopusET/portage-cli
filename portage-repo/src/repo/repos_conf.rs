@@ -75,6 +75,9 @@ pub struct RepoEntry {
     /// field stays `None` until then, distinguishing "explicitly `0`" from
     /// "unset".
     pub priority: Option<i64>,
+    /// The sync module's own `sync-*` keys (`sync-openpgp-key-path`, `sync-rsync-extra-opts`, ...),
+    /// everything but `sync-type` and `sync-uri`
+    pub sync_options: HashMap<String, String>,
 }
 
 impl RepoEntry {
@@ -179,6 +182,7 @@ impl ReposConf {
                         auto_sync: false,
                         volatile: None,
                         priority: s.get("priority").and_then(|v| v.trim().parse().ok()),
+                        sync_options: HashMap::new(),
                     });
                 }
                 let location = s.get("location")?;
@@ -200,6 +204,13 @@ impl ReposConf {
                     // unset, matching real portage's own `try: priority =
                     // int(priority) except ValueError: priority = None`.
                     priority: s.get("priority").and_then(|v| v.trim().parse().ok()),
+                    sync_options: s
+                        .iter()
+                        .filter(|(k, _)| {
+                            k.starts_with("sync-") && *k != "sync-type" && *k != "sync-uri"
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
                 })
             })
             .collect();
@@ -296,6 +307,7 @@ impl ReposConf {
                 auto_sync: false,
                 volatile: None,
                 priority: Some(i as i64),
+                sync_options: HashMap::new(),
             });
         }
         self.repos.sort_by(|a, b| {
@@ -376,6 +388,21 @@ mod tests {
         assert_eq!(rc.repos()[0].priority, Some(0));
         assert_eq!(rc.repos()[1].name, "aaa");
         assert_eq!(rc.repos()[1].priority, Some(1));
+    }
+
+    #[test]
+    fn sync_options_hold_module_keys_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("repos.conf");
+        write(
+            &conf,
+            "[gentoo]\nlocation = /a\nsync-type = rsync\nsync-uri = rsync://x/y\n\
+             sync-openpgp-key-path = /k.asc\npriority = 3\n",
+        );
+        let rc = ReposConf::load_from(&[&conf]).unwrap();
+        let opts = &rc.repos()[0].sync_options;
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts["sync-openpgp-key-path"], "/k.asc");
     }
 
     #[test]
