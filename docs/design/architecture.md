@@ -227,7 +227,7 @@ patch/pin workflow.
 
 Installed package database reader/writer for `/var/db/pkg`.
 
-- `struct Vdb` — Main entry point: `open()`, `open_default()`, `owner()`, `find_collisions()`, `register()`, `unregister()`, `find_slot_occupant()`; owns the run-scoped field-cache handle
+- `struct Vdb` — Main entry point: `open()`, `open_default()`, `owner()`, `find_collisions()`, `register()`, `unregister()`, `remove_from_contents()`, `find_slot_occupant()`; owns the run-scoped field-cache handle
 - `struct InstalledPackage` — Rich accessor: cpv, slot, eapi, USE flags, deps, contents, etc.; shares parsed field values with other live handles from the same VDB root
 - `FieldCache` / `PackageFields` — Weak-root run cache for raw and typed fields; package registration/unregistration clears one package's values without a global cache scan. External writers are not observed while a live cache exists, matching the existing push-invalidation policy
 - `VdbSnapshotCache` / `VdbSnapshot` — Invocation-scoped raw package snapshots shared by target, sysroot, and BROOT adapters; each adapter keeps its own root-selection and merge semantics
@@ -696,6 +696,9 @@ metadata parse error, so em drops the ebuild. Portage keeps it visible and fails
 PMS 8.3.2: hard blocker conflicts (`PlannedCoexistence`, strong `StillNeeded`)
 fail with exit 1 after classify. `WouldUnmerge` victims are unmerged on a real
 merge — strong `!!` before the merge loop, weak `!` after. `-p` still exits 0.
+A weak victim still installed when its blocker merges may own the same files: as in
+portage, the collision check skips it and the paths the new package installs leave its
+CONTENTS, so its later unmerge keeps them.
 
 **`@profile` / `profile-set` (package-set semantics).** Real portage's `@profile`
 set (`ProfilePackageSet`) reads only the *non-`*`* `packages` entries, and only

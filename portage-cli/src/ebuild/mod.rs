@@ -2581,17 +2581,66 @@ fn allow_missing_digests(shell: &portage_repo::EbuildShell, repo: &Repository) -
         || shell.get_var("EBUILD_SKIP_MANIFEST").as_deref() == Some("1")
 }
 
-/// Refuse the merge when another installed package owns one of `planned`'s paths
+/// Installed packages that the package being merged blocks at runtime or that block it, as
+/// portage's `findInstalledBlockers` finds them: the merge may take over their files
+///
+/// `env` holds the reduced dependencies. Its slot occupant and a same-cpv instance are not
+/// counted. A blocker with USE deps is left out rather than evaluated.
+fn installed_blockers(vdb: &Vdb, env: &EbuildEnv, cpv: &Cpv) -> Vec<InstalledPackage> {
+    fn runtime_blockers<'a>(
+        deps: impl IntoIterator<Item = &'a [portage_atom::DepEntry]>,
+    ) -> Vec<portage_atom::Dep> {
+        let mut found = vec![];
+        for entries in deps {
+            portage_atom::DepEntry::walk_atoms(entries, &mut |dep| {
+                if dep.blocker.is_some() && dep.use_deps.is_none() {
+                    found.push(dep.clone());
+                }
+            });
+        }
+        found
+    }
+    let parse = |raw: &Option<String>| {
+        raw.as_deref()
+            .and_then(|r| portage_atom::DepEntry::parse(r).ok())
+            .unwrap_or_default()
+    };
+    let own = [&env.idepend, &env.pdepend, &env.rdepend].map(parse);
+    let own = runtime_blockers(own.iter().map(Vec::as_slice));
+    let slot = portage_atom::Slot::parse(&env.slot).ok();
+    vdb.packages()
+        .into_iter()
+        .filter(|p| {
+            p.cpv() != cpv
+                && !(p.cpn() == &cpv.cpn
+                    && p.slot_main().is_ok_and(|s| s.as_ref() == env.slot_main()))
+        })
+        .filter(|p| {
+            own.iter()
+                .any(|b| b.matches_cpv(p.cpv(), p.slot().ok().as_ref()))
+                || {
+                    let theirs = [p.idepend(), p.pdepend(), p.rdepend()]
+                        .map(|d| d.ok().flatten().unwrap_or_default());
+                    runtime_blockers(theirs.iter().map(Vec::as_slice))
+                        .iter()
+                        .any(|b| b.matches_cpv(cpv, slot.as_ref()))
+                }
+        })
+        .collect()
+}
+
+/// Refuse the merge when an installed package other than those in `exclude` owns one of
+/// `planned`'s paths
 fn check_collisions(
     planned: &[ContentsEntry],
     vdb: &Vdb,
     index: Option<&OwnershipIndex>,
-    replaced: Option<&portage_atom::Cpv>,
+    exclude: &[Cpv],
 ) -> Result<()> {
     let collisions = match index {
-        Some(index) => index.find_collisions(planned, replaced),
+        Some(index) => index.find_collisions(planned, exclude),
         None => vdb
-            .find_collisions(planned, replaced)
+            .find_collisions(planned, exclude)
             .context("collision check failed")?,
     };
     if collisions.is_empty() {
@@ -2796,18 +2845,18 @@ async fn run_merge(
             blocked.len()
         );
     }
-    let exclude_cpv = old_pkg.as_ref().map(|p| p.cpv().clone());
+    let victims = installed_blockers(&vdb, &env, ebuild.cpv());
+    let exclude: Vec<Cpv> = old_pkg
+        .iter()
+        .chain(&victims)
+        .map(|p| p.cpv().clone())
+        .collect();
     let mut ownership_index = if let Some(state) = merge_state.as_deref_mut() {
         state.take_or_build(root, &vdb)?
     } else {
         None
     };
-    check_collisions(
-        &planned,
-        &vdb,
-        ownership_index.as_ref(),
-        exclude_cpv.as_ref(),
-    )?;
+    check_collisions(&planned, &vdb, ownership_index.as_ref(), &exclude)?;
 
     shell
         .run_phase(
@@ -2891,6 +2940,23 @@ async fn run_merge(
         preserve.package_added(&installed);
         if let Some(index) = ownership_index.as_mut() {
             index.add_package(&installed, &spec.contents);
+        }
+        // What the blocked packages shared with this one is its own now: their later removal
+        // must not delete it.
+        let taken: HashSet<&Utf8Path> = spec.contents.iter().map(|e| e.path.as_path()).collect();
+        for victim in victims.iter().filter(|v| v.path().is_dir()) {
+            match vdb.remove_from_contents(victim, &taken) {
+                Ok(left) => {
+                    if let Some(index) = ownership_index.as_mut() {
+                        index.add_package(victim, &left);
+                    }
+                }
+                Err(e) => {
+                    crate::style::warn_line!("could not update the CONTENTS of {victim}: {e}")
+                }
+            }
+        }
+        if let Some(index) = ownership_index.as_mut() {
             index.refresh(&vdb);
         }
         if preserve_is_local {
@@ -5319,6 +5385,52 @@ mod tests {
         let file = fs::read_to_string(probe.path("root/usr/share/probe/file")).unwrap();
         assert_eq!(file.trim(), "1");
         assert!(!probe.path("root/var/db/pkg/app-misc/intruder-7").exists());
+    }
+
+    #[tokio::test]
+    async fn a_blocking_package_takes_over_the_files_of_the_one_it_blocks() {
+        takes_over_from_blocked("", "RDEPEND=\"!app-misc/old\"\n").await;
+    }
+
+    #[tokio::test]
+    async fn a_package_takes_over_the_files_of_an_installed_one_blocking_it() {
+        takes_over_from_blocked("RDEPEND=\"!app-misc/new\"\n", "").await;
+    }
+
+    async fn takes_over_from_blocked(old_head: &str, new_head: &str) {
+        let probe = Probe::new();
+        let old = probe.ebuild("old", "1", &format!("{old_head}{INSTALLS_A_FILE}"));
+        let new = probe.ebuild("new", "1", &format!("{new_head}{INSTALLS_A_FILE}"));
+        probe.run(&old, BUILD_AND_MERGE).await.unwrap();
+
+        probe.run(&new, BUILD_AND_MERGE).await.unwrap();
+
+        let root = probe.path("root");
+        let vdb = Vdb::open(root.join("var/db/pkg")).unwrap();
+        let blocked = vdb
+            .packages()
+            .into_iter()
+            .find(|p| p.pf().to_string() == "old-1")
+            .unwrap();
+        let file = Utf8Path::new("/usr/share/probe/file");
+        assert!(!blocked.contents().unwrap().iter().any(|e| e.path == file));
+        let repo = probe.repo();
+        let mut shell = repo.shell().await.unwrap();
+        shell.save_profile_session();
+        let mut registry = preserve_libs::PreservedLibsRegistry::load(&root);
+        let graph = preserve_libs::build_link_graph(&vdb, &HashSet::new(), &registry, &root);
+        unmerge_standalone(
+            &mut shell,
+            &blocked,
+            &probe.path("work"),
+            &root,
+            &vdb,
+            &graph,
+            &mut registry,
+        )
+        .await
+        .unwrap();
+        assert!(root.join("usr/share/probe/file").exists());
     }
 
     const NOTES_ITS_PHASES: &str = "PLAIN=global\n\

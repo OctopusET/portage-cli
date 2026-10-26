@@ -78,7 +78,7 @@ fn legacy_find_collisions(vdb: &Vdb, planned: &[ContentsEntry]) -> usize {
 }
 
 fn indexed_find_collisions(index: &OwnershipIndex, planned: &[ContentsEntry]) -> usize {
-    index.find_collisions(planned, None).len()
+    index.find_collisions(planned, &[]).len()
 }
 
 fn bench_ownership(c: &mut Criterion) {
@@ -187,7 +187,7 @@ fn bench_real_vdb(c: &mut Criterion) {
                     .iter()
                     .map(|entry| {
                         index
-                            .find_collisions(std::slice::from_ref(entry), None)
+                            .find_collisions(std::slice::from_ref(entry), &[])
                             .len()
                     })
                     .sum::<usize>(),
