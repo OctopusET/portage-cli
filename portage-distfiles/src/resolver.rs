@@ -91,8 +91,8 @@ pub struct Distfile {
     /// `Some("mirror")` for `mirror+`. An **exemption** from package-level
     /// `RESTRICT=fetch` / `RESTRICT=mirror`, not a restriction on the URI.
     ///
-    /// Also `Some("fetch")` when `RESTRICT=fetch` left `urls` holding only a
-    /// `mirror://` URI's named mirrors, which portage still fetches from.
+    /// Under `RESTRICT=fetch` without it, `urls` holds only the user's own mirrors and a
+    /// `mirror://` URI's named mirrors, which portage still tries.
     pub restriction: Option<String>,
 }
 
@@ -422,12 +422,6 @@ impl DistfileResolver {
             } else if !fetch_blocked {
                 push_unique(&mut src.plain, [url.clone()]);
             }
-            if fetch_blocked {
-                if !(src.fs.is_empty() && src.mirrors.is_empty() && src.expanded.is_empty()) {
-                    src.restriction.get_or_insert_with(|| "fetch".to_owned());
-                }
-                continue;
-            }
             if use_gentoo_mirrors {
                 for mirror in &public {
                     push_unique(&mut src.mirrors, mirror_root_urls(mirror, &filename));
@@ -683,9 +677,7 @@ mod tests {
             dfs[0].urls,
             gentoo_distfile_urls("https://lan.example", "secret.tar.gz")
         );
-        assert!(RestrictGate::uri_exempts_fetch(
-            dfs[0].restriction.as_deref()
-        ));
+        assert_eq!(dfs[0].restriction, None);
     }
 
     #[test]
@@ -1124,14 +1116,8 @@ mod tests {
         let dfs = r.resolve_with(&entries, &HashSet::new(), gate);
         assert_eq!(dfs[0].filename, "a.tar.gz");
         assert_eq!(dfs[0].urls, ["https://mirrors.kde.org/a.tar.gz"]);
-        assert!(RestrictGate::uri_exempts_fetch(
-            dfs[0].restriction.as_deref()
-        ));
         assert_eq!(dfs[1].filename, "b.tar.gz");
         assert!(dfs[1].urls.is_empty());
-        assert!(!RestrictGate::uri_exempts_fetch(
-            dfs[1].restriction.as_deref()
-        ));
     }
 
     #[test]

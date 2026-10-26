@@ -281,10 +281,12 @@ impl Fetcher {
             return Ok(FetchStatus::AlreadyPresent);
         }
 
-        // PMS 7.3.2: `fetch+`/`mirror+` exempt a URI from RESTRICT=fetch.
-        // A file already in DISTDIR was handled above; missing + not exempt
-        // means the caller should run pkg_nofetch.
-        if self.restrict.fetch && !RestrictGate::uri_exempts_fetch(df.restriction.as_deref()) {
+        // PMS 7.3.2: `fetch+`/`mirror+` exempt a URI from RESTRICT=fetch. Without that, the
+        // resolver left only the user's own and named mirrors; when none has the file, the
+        // caller should run pkg_nofetch.
+        let restricted =
+            self.restrict.fetch && !RestrictGate::uri_exempts_fetch(df.restriction.as_deref());
+        if restricted && df.urls.is_empty() {
             return Ok(FetchStatus::FetchRestricted);
         }
 
@@ -332,6 +334,9 @@ impl Fetcher {
             }
         }
 
+        if restricted {
+            return Ok(FetchStatus::FetchRestricted);
+        }
         Err(last_err.unwrap_or(Error::AllFailed {
             filename: df.filename.clone(),
         }))
@@ -1417,6 +1422,32 @@ mod tests {
         };
         let status = fetcher
             .fetch_distfile_digests(&df, &DistDigests::new())
+            .await
+            .unwrap();
+        assert_eq!(status, FetchStatus::FetchRestricted);
+    }
+
+    #[tokio::test]
+    async fn restrict_fetch_with_a_local_mirror_lacking_the_file_is_fetch_restricted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        let mirror = tmp.path().join("mirror").display().to_string();
+        let gate = RestrictGate {
+            fetch: true,
+            mirror: true,
+            primaryuri: false,
+        };
+        let entries =
+            portage_metadata::SrcUriEntry::parse("https://example.com/secret.tar.gz").unwrap();
+        let dfs = crate::DistfileResolver::new(vec![], vec![mirror]).resolve_with(
+            &entries,
+            &Default::default(),
+            gate,
+        );
+        assert!(dfs[0].urls[0].starts_with("file://"));
+        let fetcher = Fetcher::new(distdir, FetchConfig::default()).with_restrict(gate);
+        let status = fetcher
+            .fetch_distfile_digests(&dfs[0], &DistDigests::new())
             .await
             .unwrap();
         assert_eq!(status, FetchStatus::FetchRestricted);
