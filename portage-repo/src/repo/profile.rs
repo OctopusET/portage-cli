@@ -281,17 +281,9 @@ impl Profile {
     ///
     /// See [PMS 5.2.8](https://projects.gentoo.org/pms/9/pms.html#packagemask).
     pub fn package_mask(&self) -> Result<Vec<Dep>> {
-        let lines = util::read_lines(self.path.join("package.mask"))?;
-        let mut result = Vec::new();
-        for line in lines {
-            if let Some(stripped) = line.strip_prefix('-') {
-                let dep = Dep::parse(stripped.trim())?;
-                result.retain(|d| d != &dep);
-            } else {
-                result.push(Dep::parse(line.trim())?);
-            }
-        }
-        Ok(result)
+        merge_atom_list(std::iter::once(read_atom_lines(
+            &self.path.join("package.mask"),
+        )))
     }
 
     /// Parse `package.use`
@@ -516,7 +508,7 @@ impl ProfileStack {
         merge_atom_list(
             self.profiles
                 .iter()
-                .map(|p| read_profile_file(&p.path().join("package.mask"))),
+                .map(|p| read_atom_lines(&p.path().join("package.mask"))),
         )
     }
 
@@ -529,7 +521,7 @@ impl ProfileStack {
             self.profiles
                 .iter()
                 .filter(|p| p.allows_directories())
-                .map(|p| read_profile_file(&p.path().join("package.unmask"))),
+                .map(|p| read_atom_lines(&p.path().join("package.unmask"))),
         )
     }
 
@@ -545,16 +537,20 @@ impl ProfileStack {
     pub fn package_provided(&self) -> Result<Vec<Cpv>> {
         let mut acc: Vec<Cpv> = Vec::new();
         for p in &self.profiles {
-            for line in read_profile_file(&p.path().join("package.provided"))? {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix('-') {
-                    let cpv = parse_provided_cpv(rest.trim())?;
+            let path = p.path().join("package.provided");
+            for line in read_profile_file(&path)? {
+                let line = strip_inline_comment(&line);
+                let (removal, entry) = match line.strip_prefix('-') {
+                    Some(rest) => (true, rest),
+                    None => (false, line.as_str()),
+                };
+                let Some(cpv) = warn_invalid(&path, parse_provided_cpv(entry)) else {
+                    continue;
+                };
+                if removal {
                     acc.retain(|c| c != &cpv);
-                } else {
-                    let cpv = parse_provided_cpv(line)?;
-                    if !acc.contains(&cpv) {
-                        acc.push(cpv);
-                    }
+                } else if !acc.contains(&cpv) {
+                    acc.push(cpv);
                 }
             }
         }
@@ -1031,27 +1027,56 @@ fn parse_provided_cpv(s: &str) -> Result<Cpv> {
     Ok(Cpv::parse(s)?)
 }
 
+/// Drop a trailing comment: a token starting with `#` ends the line, as in portage's `grabfile`
+fn strip_inline_comment(line: &str) -> String {
+    line.split_whitespace()
+        .take_while(|t| !t.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Warn about and drop an entry of `path` that does not parse, keeping the rest of the file
+fn warn_invalid<T>(path: &Path, parsed: Result<T>) -> Option<T> {
+    parsed
+        .map_err(|e| tracing::warn!("invalid entry in {}: {e}", path.display()))
+        .ok()
+}
+
+/// Read a `package.mask`-format file as `(is_removal, atom)` lines, skipping invalid atoms
+pub(crate) fn read_atom_lines(path: &Path) -> Result<Vec<(bool, Dep)>> {
+    let mut out = Vec::new();
+    for line in util::read_lines(path)? {
+        let line = strip_inline_comment(&line);
+        let (removal, atom) = match line.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, line.as_str()),
+        };
+        if let Some(dep) = warn_invalid(path, Dep::parse(atom).map_err(Into::into)) {
+            out.push((removal, dep));
+        }
+    }
+    Ok(out)
+}
+
+/// Fold `(is_removal, atom)` lines onto `acc`; a removal drops that exact atom
+pub(crate) fn stack_atom_lines(acc: &mut Vec<Dep>, lines: impl IntoIterator<Item = (bool, Dep)>) {
+    for (removal, dep) in lines {
+        if removal {
+            acc.retain(|d| d != &dep);
+        } else if !acc.contains(&dep) {
+            acc.push(dep);
+        }
+    }
+}
+
 /// Merge incremental atom lists (`package.mask` format)
-///
-/// A line prefixed with `-` causes that atom to be removed from the
-/// accumulated set.
 fn merge_atom_list<I>(iter: I) -> Result<Vec<Dep>>
 where
-    I: Iterator<Item = Result<Vec<String>>>,
+    I: Iterator<Item = Result<Vec<(bool, Dep)>>>,
 {
     let mut acc: Vec<Dep> = Vec::new();
     for chunk in iter {
-        for line in chunk? {
-            if let Some(stripped) = line.strip_prefix('-') {
-                let dep = Dep::parse(stripped.trim())?;
-                acc.retain(|d| d != &dep);
-            } else {
-                let dep = Dep::parse(line.trim())?;
-                if !acc.contains(&dep) {
-                    acc.push(dep);
-                }
-            }
-        }
+        stack_atom_lines(&mut acc, chunk?);
     }
     Ok(acc)
 }
@@ -1078,9 +1103,12 @@ fn parse_atom_flags_list(path: &Path) -> Result<Vec<(Dep, Vec<String>)>> {
     let lines = util::read_lines(path)?;
     let mut result = Vec::new();
     for line in lines {
+        let line = strip_inline_comment(&line);
         let mut parts = line.split_whitespace();
         if let Some(atom_str) = parts.next() {
-            let dep = Dep::parse(atom_str)?;
+            let Some(dep) = warn_invalid(path, Dep::parse(atom_str).map_err(Into::into)) else {
+                continue;
+            };
             let flags: Vec<String> = parts.map(String::from).collect();
             result.push((dep, flags));
         }
@@ -1379,6 +1407,29 @@ mod tests {
         let names: Vec<_> = masked.iter().map(|d| d.to_string()).collect();
         assert!(!names.iter().any(|n| n.contains("foo")), "foo unmasked");
         assert!(names.iter().any(|n| n.contains("bar")));
+    }
+
+    #[test]
+    fn package_mask_and_provided_skip_an_invalid_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = make_profile(&dir, "leaf", &[]);
+        std::fs::write(
+            leaf.join("package.mask"),
+            "dev-libs/foo # reason\nnot an atom\n>=dev-libs/bar-2\n",
+        )
+        .unwrap();
+        std::fs::write(leaf.join("package.provided"), "bogus\ndev-lang/perl-5.40\n").unwrap();
+
+        let stack = ProfileStack::build(leaf).unwrap();
+        let masked: Vec<_> = stack
+            .package_mask()
+            .unwrap()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        assert_eq!(masked, ["dev-libs/foo", ">=dev-libs/bar-2"]);
+        let provided = stack.package_provided().unwrap();
+        assert_eq!(provided, [Cpv::parse("dev-lang/perl-5.40").unwrap()]);
     }
 
     #[test]

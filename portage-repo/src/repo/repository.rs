@@ -206,7 +206,7 @@ pub enum ProfileUpdate {
 
 use super::category::Category;
 use super::layout::LayoutConf;
-use super::profile::{Profile, ProfileDesc, ProfileStack};
+use super::profile::{self, Profile, ProfileDesc, ProfileStack};
 use super::use_expand::UseExpand;
 use super::util;
 use crate::error::{Error, Result};
@@ -844,11 +844,10 @@ impl Repository {
     ///
     /// See [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
     pub fn repo_package_mask(&self) -> Result<Vec<Dep>> {
-        let lines = util::read_lines(self.path.join("profiles").join("package.mask"))?;
-        lines
-            .into_iter()
-            .map(|l| Dep::parse(&l).map_err(Into::into))
-            .collect()
+        let path = self.path.join("profiles").join("package.mask");
+        let mut acc = Vec::new();
+        profile::stack_atom_lines(&mut acc, profile::read_atom_lines(path.as_std_path())?);
+        Ok(acc)
     }
 
     /// Build a [`UseExpand`] grouper from this repository's `profiles/desc/` names
