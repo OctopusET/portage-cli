@@ -1463,8 +1463,38 @@ async fn remove_matched_packages(
         println!(" {pkg}");
     }
     println!();
+    let roots = cli.roots();
+    let system =
+        maint::world::resolve_set(roots.config(), roots.merge_root(), "system").unwrap_or_default();
+    for cpn in system_warning_cps(&matched, &vdb, &system) {
+        crate::style::warn_line!("'{cpn}' is part of your system profile.");
+        crate::style::warn_line!("Unmerging it may be damaging to your system.");
+    }
 
     run_unmerge_batch(cli, &vdb, &matched, &exclude, verb, &gerund).await
+}
+
+/// The packages of `system` that removing `packages` leaves with no installed version
+fn system_warning_cps(
+    packages: &[portage_vdb::InstalledPackage],
+    vdb: &portage_vdb::Vdb,
+    system: &[portage_atom::Dep],
+) -> Vec<portage_atom::Cpn> {
+    let removed: std::collections::HashSet<&portage_atom::Cpv> =
+        packages.iter().map(|p| p.cpv()).collect();
+    let mut cpns: Vec<portage_atom::Cpn> = packages.iter().map(|p| *p.cpn()).collect();
+    cpns.sort();
+    cpns.dedup();
+    cpns.retain(|cpn| {
+        system.iter().any(|d| d.cpn == *cpn)
+            && vdb.category(cpn.category.as_ref()).is_none_or(|c| {
+                c.packages()
+                    .into_iter()
+                    .filter(|p| p.cpn() == cpn)
+                    .all(|p| removed.contains(p.cpv()))
+            })
+    });
+    cpns
 }
 
 /// The removal core shared by `-C`/`-P` ([`remove_matched_packages`]) and
@@ -2110,6 +2140,36 @@ mod tests {
             },
         ];
         assert!(select_world_set_refs(&atoms).is_empty());
+    }
+
+    #[test]
+    fn unmerging_the_last_installed_system_package_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_pkg(&vdb_root, "sys-apps", "sed-4.9");
+        write_pkg(&vdb_root, "dev-lang", "python-3.12.1");
+        write_pkg(&vdb_root, "dev-lang", "python-3.13.1");
+        write_pkg(&vdb_root, "app-misc", "foo-1.0");
+        let vdb = open_vdb(tmp.path());
+        let system: Vec<portage_atom::Dep> = ["sys-apps/sed", "dev-lang/python"]
+            .iter()
+            .map(|s| portage_atom::Dep::parse(s).unwrap())
+            .collect();
+        let pick = |cpvs: &[&str]| -> Vec<portage_vdb::InstalledPackage> {
+            vdb.packages()
+                .into_iter()
+                .filter(|p| cpvs.contains(&p.cpv().to_string().as_str()))
+                .collect()
+        };
+        let removing = pick(&[
+            "sys-apps/sed-4.9",
+            "dev-lang/python-3.12.1",
+            "app-misc/foo-1.0",
+        ]);
+        let warned = system_warning_cps(&removing, &vdb, &system);
+        assert_eq!(warned, [portage_atom::Cpn::parse("sys-apps/sed").unwrap()]);
+        let both = pick(&["dev-lang/python-3.12.1", "dev-lang/python-3.13.1"]);
+        assert_eq!(system_warning_cps(&both, &vdb, &system).len(), 1);
     }
 
     #[test]
