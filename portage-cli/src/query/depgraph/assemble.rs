@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use portage_atom::{Cpn, Cpv};
-use portage_atom_pubgrub::{DepClass, MergeRoot, PortagePackage, UseFlagRequirement};
+use portage_atom::{Cpn, Cpv, Version};
+use portage_atom_pubgrub::{DepClass, DepEdge, MergeRoot, PortagePackage, UseFlagRequirement};
 
 use portage_resolve::{conflicts, download_size, effective_use, repo, required_use, root_aware};
 
@@ -390,8 +390,11 @@ pub(super) fn assemble(
             output::report_masked_installed(&masked);
         }
 
-        let mut ru_violations = required_use::find_violations(&data, &order, &final_policy, &ceded);
-        // emerge aborts on the first package whose REQUIRED_USE fails.
+        // emerge checks REQUIRED_USE as it adds each package to the graph and aborts on the
+        // first failure, so walk in graph-add order (targets, then deps), not merge order.
+        let add_order = graph_add_order(&root_pkgs, &edges, &order);
+        let mut ru_violations =
+            required_use::find_violations(&data, &add_order, &final_policy, &ceded);
         ru_violations.truncate(1);
         if !ru_violations.is_empty() {
             output::report_required_use(&ru_violations);
@@ -705,4 +708,35 @@ pub(super) fn assemble(
         #[cfg(test)]
         required_use_reported,
     })
+}
+
+/// `order` re-sorted breadth-first from the targets, in argument order; unreached entries keep their place at the end.
+fn graph_add_order(
+    root_pkgs: &[PortagePackage],
+    edges: &[DepEdge],
+    order: &[(PortagePackage, Version)],
+) -> Vec<(PortagePackage, Version)> {
+    let mut out: Vec<(PortagePackage, Version)> = Vec::with_capacity(order.len());
+    let mut seen: HashSet<&(PortagePackage, Version)> = HashSet::new();
+    for root in root_pkgs {
+        if let Some(entry) = order.iter().find(|(p, _)| p == root)
+            && seen.insert(entry)
+        {
+            out.push(entry.clone());
+        }
+    }
+    let mut next = 0;
+    while next < out.len() {
+        let parent = out[next].clone();
+        next += 1;
+        for e in edges.iter().filter(|e| e.from == parent) {
+            if let Some(entry) = order.iter().find(|o| **o == e.to)
+                && seen.insert(entry)
+            {
+                out.push(entry.clone());
+            }
+        }
+    }
+    out.extend(order.iter().filter(|o| !seen.contains(o)).cloned());
+    out
 }

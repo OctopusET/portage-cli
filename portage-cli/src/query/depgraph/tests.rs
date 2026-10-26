@@ -1371,3 +1371,26 @@ fn only_the_first_required_use_failure_is_reported() {
     assert_eq!(outcome.required_use_reported.len(), 1);
     assert_eq!(outcome.exit_code, 1);
 }
+
+#[test]
+fn a_required_use_failure_is_reported_on_the_target_before_its_deps() {
+    let pkg = |cpv, depend| Pkg {
+        cpv,
+        keywords: "amd64",
+        depend,
+        iuse: "x",
+        slot: "0",
+        required_use: "x",
+    };
+    let fix = fixture(
+        &[pkg("app-misc/a-1", "app-misc/b"), pkg("app-misc/b-1", "")],
+        &[],
+    );
+    let atoms = [TargetAtom::explicit("app-misc/a")];
+    let outcome = solve(&fix, Solve::new(&atoms));
+    assert_eq!(
+        outcome.required_use_reported,
+        ["app-misc/a-1".parse::<Cpv>().unwrap()]
+    );
+    assert_eq!(outcome.exit_code, 1);
+}
