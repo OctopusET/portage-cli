@@ -4484,3 +4484,53 @@ fn or_group_skips_an_excluded_branch() {
     assert!(solution.get(&slotted("dev-libs/a")).is_none());
     assert!(solution.get(&slotted("dev-libs/b")).is_some());
 }
+
+#[test]
+fn or_group_skips_a_branch_whose_nested_choices_all_need_an_excluded_package() {
+    let mut repo = InMemoryRepository::new();
+    for (cpv, slot) in [
+        ("dev-libs/a-1.0", "1"),
+        ("dev-libs/a-2.0", "2"),
+        ("dev-libs/c-1.0", "0"),
+        ("dev-libs/b-1.0", "0"),
+    ] {
+        let cpv = portage_atom::Cpv::parse(cpv).unwrap();
+        repo.add_version(cpv, Some(Interned::intern(slot)), None, empty_deps());
+    }
+    let pkg = |cpn: &str, slot: &str| {
+        PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern(slot))
+    };
+    let solve = |rdepend: &str| {
+        let mut repo = repo.clone();
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/consumer-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: (DepEntry::parse(rdepend).unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        provider.set_exclude(&[Dep::parse("dev-libs/a").unwrap()]);
+        provider
+            .resolve_targets(vec![(
+                pkg("app-misc/consumer", "0"),
+                PortageVersionSet::any(),
+            )])
+            .unwrap()
+    };
+    // `dev-libs/a` spans two slots, so its branch is a slot choice, not a direct package.
+    for rdepend in [
+        "|| ( dev-libs/a dev-libs/b )",
+        "|| ( || ( dev-libs/a ) dev-libs/b )",
+    ] {
+        let solution = solve(rdepend);
+        assert!(solution.get(&pkg("dev-libs/a", "2")).is_none(), "{rdepend}");
+        assert!(solution.get(&pkg("dev-libs/b", "0")).is_some(), "{rdepend}");
+    }
+    // A nested `||` with a non-excluded alternative keeps its branch.
+    let solution = solve("|| ( || ( dev-libs/a dev-libs/c ) dev-libs/b )");
+    assert!(solution.get(&pkg("dev-libs/c", "0")).is_some());
+    assert!(solution.get(&pkg("dev-libs/b", "0")).is_none());
+}

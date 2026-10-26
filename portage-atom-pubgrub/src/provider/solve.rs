@@ -321,13 +321,24 @@ impl DependencyProvider for PortageDependencyProvider {
 }
 
 impl PortageDependencyProvider {
-    /// Whether a choice branch's direct target can only be met by installing an `--exclude`d version
+    /// Whether a choice branch can only be met by installing an `--exclude`d version
     fn branch_needs_excluded(&self, vd: &VersionData) -> bool {
         let Dependencies::Available(ref cs) = vd.merged else {
             return false;
         };
-        cs.iter().filter(|(p, _)| !p.is_virtual()).any(|(p, vs)| {
-            if self.installed.get(p).is_some_and(|(v, _)| vs.contains(v)) {
+        cs.iter().any(|(p, vs)| {
+            // A nested `||` or multi-slot atom needs an excluded package only if all its branches do.
+            if matches!(
+                p,
+                PortagePackage::Choice { .. } | PortagePackage::SlotChoice { .. }
+            ) {
+                return self.package_data(p).is_some_and(|d| {
+                    let mut in_range = d.versions.iter().filter(|(v, _)| vs.contains(v)).peekable();
+                    in_range.peek().is_some()
+                        && in_range.all(|(_, bvd)| self.branch_needs_excluded(bvd))
+                });
+            }
+            if p.is_virtual() || self.installed.get(p).is_some_and(|(v, _)| vs.contains(v)) {
                 return false;
             }
             let slot = p.slot().map(portage_atom::Slot::from_name);
