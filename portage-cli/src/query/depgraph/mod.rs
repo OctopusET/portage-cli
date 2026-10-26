@@ -1054,24 +1054,34 @@ fn rebuild_visible(
     policy: &repo::ResolvePolicy,
     rb: &subslot::SubslotRebuild,
 ) -> bool {
-    data.versions.get(&rb.cpn).is_some_and(|entries| {
-        entries.iter().any(|(cpv, cache)| {
-            cpv.version >= rb.version
-                && rb.slot.is_none_or(|s| cache.metadata.slot.slot == s)
-                && policy.accept_keywords.accepts(
-                    &cache.metadata.keywords,
-                    cpv,
-                    Some(cache.metadata.slot.slot),
-                )
-                && !repo::is_masked(
-                    policy.package_mask,
-                    policy.package_unmask,
-                    cpv,
-                    &cache.metadata.slot,
-                    repo::repo_name_of(data, cpv),
-                )
-        })
+    visible_versions(data, policy, &rb.cpn).any(|(cpv, cache)| {
+        cpv.version >= rb.version && rb.slot.is_none_or(|s| cache.metadata.slot.slot == s)
     })
+}
+
+/// The keyword-accepted, unmasked tree versions of `cpn`
+fn visible_versions<'a>(
+    data: &'a repo::RepoData,
+    policy: &'a repo::ResolvePolicy,
+    cpn: &Cpn,
+) -> impl Iterator<Item = &'a (Cpv, portage_metadata::CacheEntry)> {
+    data.versions
+        .get(cpn)
+        .into_iter()
+        .flatten()
+        .filter(move |(cpv, cache)| {
+            policy.accept_keywords.accepts(
+                &cache.metadata.keywords,
+                cpv,
+                Some(cache.metadata.slot.slot),
+            ) && !repo::is_masked(
+                policy.package_mask,
+                policy.package_unmask,
+                cpv,
+                &cache.metadata.slot,
+                repo::repo_name_of(data, cpv),
+            )
+        })
 }
 
 /// Re-solve until no round finds another `:=` consumer to rebuild

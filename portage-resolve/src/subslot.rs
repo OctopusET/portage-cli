@@ -73,21 +73,26 @@ fn is_unslotted_equal(dep: &portage_atom::Dep) -> bool {
     )
 }
 
-/// The consumer's tree-ebuild dependencies, `None` when it is outside the solve graph or the tree
-pub type TreeDeps<'a> = &'a dyn Fn(&VdbEntry) -> Option<Vec<DepEntry>>;
+/// What `--update --deep` rebuild detection reads from the tree
+pub struct DeepUpdate<'a> {
+    /// The consumer's tree-ebuild dependencies, `None` when it is outside the solve graph or the tree
+    pub tree_deps: &'a dyn Fn(&VdbEntry) -> Option<Vec<DepEntry>>,
+    /// The visible tree versions of a package, with their slots
+    pub available: &'a dyn Fn(&Cpn) -> Vec<(Version, Slot)>,
+}
 
 /// Find installed packages whose recorded `:=` bindings are invalidated by the plan
 ///
 /// `planned_slots` maps each in-plan CPN to its planned versions and their tree
 /// slots; owners already in the plan are skipped (they are being upgraded or
 /// rebuilt anyway). `deep_update` (`--update --deep`) also invalidates a binding
-/// the installed provider's subslot no longer matches, and one a planned newer
+/// the installed provider's subslot no longer matches, and one a planned or visible newer
 /// slot satisfies through the tree ebuild's unslotted `:=` (`--rebuild-if-new-slot`).
 pub fn find_rebuilds(
     installed: &[VdbEntry],
     planned_slots: &HashMap<Cpn, Vec<(Version, Slot)>>,
     in_plan: &HashSet<Cpn>,
-    deep_update: Option<TreeDeps<'_>>,
+    deep_update: Option<&DeepUpdate<'_>>,
 ) -> Vec<SubslotRebuild> {
     let mut installed_slots: HashMap<Cpn, Vec<(Version, Slot)>> = HashMap::new();
     for e in installed {
@@ -116,7 +121,7 @@ pub fn find_rebuilds(
             continue;
         }
         let tree_deps = deep_update
-            .and_then(|f| f(entry))
+            .and_then(|d| (d.tree_deps)(entry))
             .map(|deps| DepEntry::evaluate_use(&deps, &active));
 
         let mut triggers: Vec<Cpn> = Vec::new();
@@ -147,7 +152,7 @@ pub fn find_rebuilds(
                 tree_deps.is_some() && current.is_some_and(moved)
             };
             let new_slot = || {
-                let (Some(tree), Some(planned)) = (&tree_deps, planned) else {
+                let (Some(tree), Some(deep)) = (&tree_deps, deep_update) else {
                     return false;
                 };
                 let bound_ver = current.and_then(|c| {
@@ -162,11 +167,16 @@ pub fn find_rebuilds(
                         ranges.push(dep_to_version_set(a));
                     }
                 });
-                planned.iter().any(|(ver, ps)| {
+                if ranges.is_empty() {
+                    return false;
+                }
+                let newer = |(ver, ps): &(Version, Slot)| {
                     ps.slot != s.slot
                         && bound_ver.is_some_and(|b| ver > b)
                         && ranges.iter().any(|r| r.contains(ver))
-                })
+                };
+                planned.unwrap_or_default().iter().any(newer)
+                    || (deep.available)(&dep.cpn).iter().any(newer)
             };
             if (invalidated || new_slot()) && !triggers.contains(&dep.cpn) {
                 triggers.push(dep.cpn);
@@ -366,9 +376,22 @@ mod tests {
         plan: &HashMap<Cpn, Vec<(Version, Slot)>>,
         tree: Option<&str>,
     ) -> Vec<String> {
+        rebuilt_with_available(installed, plan, tree, &HashMap::new())
+    }
+
+    fn rebuilt_with_available(
+        installed: &[VdbEntry],
+        plan: &HashMap<Cpn, Vec<(Version, Slot)>>,
+        tree: Option<&str>,
+        available: &HashMap<Cpn, Vec<(Version, Slot)>>,
+    ) -> Vec<String> {
         let tree_deps = |_: &VdbEntry| tree.map(|t| DepEntry::parse(t).unwrap());
-        let deep_update: Option<TreeDeps<'_>> = tree.map(|_| &tree_deps as TreeDeps<'_>);
-        find_rebuilds(installed, plan, &HashSet::new(), deep_update)
+        let available = |cpn: &Cpn| available.get(cpn).cloned().unwrap_or_default();
+        let deep = DeepUpdate {
+            tree_deps: &tree_deps,
+            available: &available,
+        };
+        find_rebuilds(installed, plan, &HashSet::new(), tree.map(|_| &deep))
             .into_iter()
             .map(|r| r.cpn.to_string())
             .collect()
@@ -401,5 +424,22 @@ mod tests {
         );
         assert!(rebuilt(&installed, &plan, Some("dev-lang/lua:5.1=")).is_empty());
         assert!(rebuilt(&installed, &plan, None).is_empty());
+    }
+
+    #[test]
+    fn deep_update_moves_an_unslotted_slot_operator_to_a_visible_unplanned_slot() {
+        let installed = vec![
+            vdb("app-misc/consumer", "1.0", "dev-lang/lua:5.1/5.1="),
+            provider("dev-lang/lua", "5.1.5", "5.1", "5.1"),
+        ];
+        let tree = Some("dev-lang/lua:=");
+        let plan = HashMap::new();
+        let newer = planned(&[("dev-lang/lua", "5.4.6", "5.4", None)]);
+        assert_eq!(
+            rebuilt_with_available(&installed, &plan, tree, &newer),
+            ["app-misc/consumer"]
+        );
+        let older = planned(&[("dev-lang/lua", "5.0.3", "5.0", None)]);
+        assert!(rebuilt_with_available(&installed, &plan, tree, &older).is_empty());
     }
 }

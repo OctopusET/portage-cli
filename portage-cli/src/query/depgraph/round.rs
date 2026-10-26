@@ -18,7 +18,8 @@ use portage_resolve::{
 
 use super::{
     ResolveMetrics, apply_order_filters, installed_package, package_needs_use_reinstall,
-    package_use, rebuild_visible, target_conflicts, widened_autounmask_candidates,
+    package_use, rebuild_visible, target_conflicts, visible_versions,
+    widened_autounmask_candidates,
 };
 
 /// Inputs shared by every solve round of one [`super::depgraph`] call.
@@ -818,7 +819,16 @@ pub(super) fn solve_round(
             let meta = &repo::find_cache(data, &pkg, &e.version)?.metadata;
             Some([&meta.depend.list()[..], &meta.rdepend.list()[..]].concat())
         };
-        let deep_update: Option<subslot::TreeDeps<'_>> = (update && deep).then_some(&tree_deps);
+        let available = |cpn: &Cpn| {
+            visible_versions(data, target_policy, cpn)
+                .map(|(cpv, cache)| (cpv.version.clone(), cache.metadata.slot))
+                .collect()
+        };
+        let deep_update = subslot::DeepUpdate {
+            tree_deps: &tree_deps,
+            available: &available,
+        };
+        let deep_update = (update && deep).then_some(&deep_update);
         let found = subslot::find_rebuilds(target_installed, &planned_slots, &in_plan, deep_update);
         // An excluded consumer is never selected, so it must not become a target that pulls in deps.
         let excluded = |rb: &subslot::SubslotRebuild| {

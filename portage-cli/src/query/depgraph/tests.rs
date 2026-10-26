@@ -1064,8 +1064,11 @@ fn deep_update_rebuilds_a_consumer_for_a_new_slot() {
         plant_vdb_slot(root, "dev-lang/lua-5.1.5", "5.1", "");
         plant_vdb_slot(root, "app-misc/consumer-1", "0", "dev-lang/lua:5.1/5.1=");
     };
-    assert_eq!(
-        deep_update_of_top(&lua, "app-misc/consumer dev-lang/lua:5.4", plant, true),
-        ["dev-lang/lua-5.4.6", "app-misc/consumer-1"]
-    );
+    for top_rdepend in ["app-misc/consumer dev-lang/lua:5.4", "app-misc/consumer"] {
+        assert_eq!(
+            deep_update_of_top(&lua, top_rdepend, plant, true),
+            ["dev-lang/lua-5.4.6", "app-misc/consumer-1"],
+            "{top_rdepend}"
+        );
+    }
 }
