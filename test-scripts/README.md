@@ -214,6 +214,10 @@ to `portage`) and `bwrap` overlays. No `sudo`, no crossdev-stages; needs
 - `merge-diff.sh ATOM` installs the dependencies once with emerge, merges
   `ATOM` with each tool on top, and diffs the two uppers (`treediff.py`):
   files, modes, owners, links, and each VDB key.
+- `scenario.sh NAME ATOM < steps` replays a step list (`T args` runs as
+  `emerge args` and `em args`, `! cmd` runs on both) on `ATOM`'s dependency
+  layer and diffs the final states; `scenarios/` holds config-protect,
+  unmerge and binpkg cases.
 
 ```sh
 ./test-scripts/parity/mkbase.sh stage3-amd64-openrc-*.tar.xz /var/db/repos/gentoo
