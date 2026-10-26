@@ -45,13 +45,14 @@ pub fn compute(
         }
 
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+        let repo = crate::repo::repo_name_of(data, &cpv);
         let stable = policy.accept_keywords.is_stable(
             &cache.metadata.keywords,
             &cpv,
             pkg.slot(),
-            Some(crate::repo::repo_name_of(data, &cpv)),
+            Some(repo),
         );
-        let effective = effective_use(policy, pkg, ver, cache, stable, ceded);
+        let effective = effective_use(policy, pkg, ver, cache, repo, stable, ceded);
         let enabled = |flag: &str| -> bool {
             matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled)
         };

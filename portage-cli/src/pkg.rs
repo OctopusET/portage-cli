@@ -465,7 +465,15 @@ async fn resolve_active_use(
         Some(repo.name()),
     );
     let pkg = PortagePackage::slotted(cpv.cpn, entry.metadata.slot.slot);
-    let cfg = effective_use(&policy, &pkg, &cpv.version, &entry, stable, &[]);
+    let cfg = effective_use(
+        &policy,
+        &pkg,
+        &cpv.version,
+        &entry,
+        repo.name(),
+        stable,
+        &[],
+    );
 
     let flags: Vec<String> = entry
         .metadata

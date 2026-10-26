@@ -378,6 +378,7 @@ pub(super) fn solve_round(
                             &pkg,
                             &cpv.version,
                             cache,
+                            repo::repo_name_of(data, cpv),
                             true,
                             &[],
                         );

@@ -142,6 +142,7 @@ pub(crate) fn effective_use_metadata(
     cpv: &Cpv,
     meta: &EbuildMetadata,
     slot: Option<Interned<DefaultInterner>>,
+    repo: Interned<DefaultInterner>,
 ) -> UseConfig {
     let iuse_defaults = iuse_defaults_from_metadata(meta);
     let (iuse, stable) = if policy.force_mask.is_empty() {
@@ -151,7 +152,7 @@ pub(crate) fn effective_use_metadata(
             iuse_set_from_metadata(meta, &policy.force_mask.iuse_injection),
             policy
                 .accept_keywords
-                .is_stable(&meta.keywords, cpv, slot, None),
+                .is_stable(&meta.keywords, cpv, slot, Some(repo)),
         )
     };
     fold_effective_use(policy, cpv, slot, &iuse_defaults, &iuse, stable)
@@ -188,17 +189,21 @@ pub(crate) fn pinned_package_use(
 /// Force/mask is applied post-fold (not as synthetic `package.use`) so a
 /// process-env `USE="-* …"` cannot clear forced flags — matching
 /// `Adapter::desired_use` and real Portage.
+///
+/// `repo` is the version's own repo; with a policy-fact cache attached it
+/// decides `stable` there and the `stable` argument is not used.
 pub fn effective_use(
     policy: &ResolvePolicy,
     pkg: &PortagePackage,
     ver: &Version,
     cache: &CacheEntry,
+    repo: Interned<DefaultInterner>,
     stable: bool,
     ceded: &[CededFlag],
 ) -> UseConfig {
     let mut cfg = policy
         .facts
-        .map(|facts| facts.effective(*policy, pkg, ver, cache))
+        .map(|facts| facts.effective(*policy, pkg, ver, cache, repo))
         .unwrap_or_else(|| effective_use_base(policy, pkg, ver, cache, stable));
     apply_ceded(&mut cfg, *pkg.cpn(), ceded);
     cfg
@@ -297,7 +302,8 @@ pub fn evaluated_deps<'a>(
     // Pre-/mid-solve utility (feeds the solver's own dependency-graph
     // construction) — the solver's ceded (`--autosolve-use`) decisions don't
     // exist yet at this point, so there is nothing to apply here.
-    let effective = effective_use(policy, pkg, ver, cache, stable, &[]);
+    let repo = repo::repo_name_of(data, &Cpv::new(*pkg.cpn(), ver.clone()));
+    let effective = effective_use(policy, pkg, ver, cache, repo, stable, &[]);
     Some(EvaluatedDeps {
         cache,
         effective,

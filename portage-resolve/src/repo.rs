@@ -615,7 +615,7 @@ fn license_ok_for(
     if let Some(cfg) = effective {
         return license_accepted(lic, &accept, &use_predicate(cfg));
     }
-    let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
+    let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot, repo);
     license_accepted(lic, &accept, &use_predicate(&cfg))
 }
 
@@ -654,7 +654,7 @@ fn restrict_family_ok_for(
     if let Some(cfg) = effective {
         return a.accepts_restrict(entries, &use_predicate(cfg));
     }
-    let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
+    let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot, repo);
     a.accepts_restrict(entries, &use_predicate(&cfg))
 }
 
@@ -821,6 +821,7 @@ pub fn repo_name_of(data: &RepoData, cpv: &Cpv) -> Interned<DefaultInterner> {
 ///
 /// The generation changes only when the co-solve's `package.use` vector
 /// changes; repository metadata and parsed cache entries remain shared.
+/// Facts are keyed by cpv alone: [`RepoData`] gives each cpv exactly one repo.
 #[derive(Debug, Clone, Copy)]
 pub struct PolicyFactsRef<'a> {
     cache: &'a PolicyFactsCache,
@@ -947,6 +948,7 @@ impl<'a> PolicyFactsRef<'a> {
         policy: ResolvePolicy<'_>,
         cpv: &Cpv,
         cache: &CacheEntry,
+        repo: Interned<DefaultInterner>,
     ) -> PolicyVersionFacts {
         let key = (self.generation, cpv.clone());
         if let Some(facts) = self.cache.lock().facts.get(&key) {
@@ -958,10 +960,12 @@ impl<'a> PolicyFactsRef<'a> {
             ..policy
         };
         let meta = &cache.metadata;
-        let stable =
-            raw_policy
-                .accept_keywords
-                .is_stable(&meta.keywords, cpv, Some(meta.slot.slot), None);
+        let stable = raw_policy.accept_keywords.is_stable(
+            &meta.keywords,
+            cpv,
+            Some(meta.slot.slot),
+            Some(repo),
+        );
         let facts = PolicyVersionFacts {
             accepted: None,
             stable,
@@ -988,7 +992,7 @@ impl<'a> PolicyFactsRef<'a> {
         {
             return accepted;
         }
-        let facts = self.version(policy, cpv, cache);
+        let facts = self.version(policy, cpv, cache, repo);
         if let Some(accepted) = facts.accepted {
             return accepted;
         }
@@ -1021,6 +1025,7 @@ impl<'a> PolicyFactsRef<'a> {
                     cpv,
                     meta,
                     Some(meta.slot.slot),
+                    repo,
                 ))
             } else {
                 None
@@ -1047,12 +1052,13 @@ impl<'a> PolicyFactsRef<'a> {
         policy: ResolvePolicy<'_>,
         cpv: &Cpv,
         cache: &CacheEntry,
+        repo: Interned<DefaultInterner>,
     ) -> bool {
         let key = (self.generation, cpv.clone());
         if let Some(stable) = self.cache.lock().facts.get(&key).map(|facts| facts.stable) {
             return stable;
         }
-        self.version(policy, cpv, cache).stable
+        self.version(policy, cpv, cache, repo).stable
     }
 
     pub(crate) fn effective(
@@ -1061,6 +1067,7 @@ impl<'a> PolicyFactsRef<'a> {
         pkg: &portage_atom_pubgrub::PortagePackage,
         ver: &Version,
         cache: &CacheEntry,
+        repo: Interned<DefaultInterner>,
     ) -> UseConfig {
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
         let key = (self.generation, cpv.clone());
@@ -1082,7 +1089,7 @@ impl<'a> PolicyFactsRef<'a> {
                     &cache.metadata.keywords,
                     &cpv,
                     Some(cache.metadata.slot.slot),
-                    None,
+                    Some(repo),
                 );
                 (stable, None)
             }
@@ -1546,14 +1553,21 @@ impl PackageRepository for Adapter<'_> {
                     .accept_keywords
                     .is_stable(&meta.keywords, cpv, slot, repo)
             },
-            |facts| facts.is_stable(policy, cpv, cache),
+            |facts| facts.is_stable(policy, cpv, cache, repo_name_of(self.data, cpv)),
         );
         let pkg = match slot {
             Some(slot) => portage_atom_pubgrub::PortagePackage::slotted(cpv.cpn, slot),
             None => portage_atom_pubgrub::PortagePackage::unslotted(cpv.cpn),
         };
-        let mut cfg =
-            crate::effective_use::effective_use(&policy, &pkg, &cpv.version, cache, stable, &[]);
+        let mut cfg = crate::effective_use::effective_use(
+            &policy,
+            &pkg,
+            &cpv.version,
+            cache,
+            repo_name_of(self.data, cpv),
+            stable,
+            &[],
+        );
 
         // Level-C: cede this package's REQUIRED_USE flags to the solver after
         // the shared pre-cede base has been materialized.
@@ -2145,7 +2159,8 @@ pub fn filter_reasons_for(
             // Evaluate `use? ( … )` branches against the version's effective
             // USE so a non-FREE license behind a disabled flag is not flagged.
             let needed = if license_has_conditional(lic) {
-                let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
+                let cfg =
+                    crate::effective_use::effective_use_metadata(policy, cpv, meta, slot, repo);
                 licenses_needed(lic, &accept, &use_predicate(&cfg))
             } else {
                 licenses_needed(lic, &accept, &|_| false)
@@ -2159,7 +2174,8 @@ pub fn filter_reasons_for(
                 .accept_properties
                 .effective_for(cpv, slot, Some(repo));
             let needed = if restrict_has_conditional(&meta.properties) {
-                let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
+                let cfg =
+                    crate::effective_use::effective_use_metadata(policy, cpv, meta, slot, repo);
                 accept.restrict_needed(&meta.properties, &use_predicate(&cfg))
             } else {
                 accept.restrict_needed(&meta.properties, &|_| false)
@@ -2171,7 +2187,8 @@ pub fn filter_reasons_for(
         if !meta.restrict.is_empty() {
             let accept = policy.accept_restrict.effective_for(cpv, slot, Some(repo));
             let needed = if restrict_has_conditional(&meta.restrict) {
-                let cfg = crate::effective_use::effective_use_metadata(policy, cpv, meta, slot);
+                let cfg =
+                    crate::effective_use::effective_use_metadata(policy, cpv, meta, slot, repo);
                 accept.restrict_needed(&meta.restrict, &use_predicate(&cfg))
             } else {
                 accept.restrict_needed(&meta.restrict, &|_| false)
@@ -2413,6 +2430,28 @@ mod tests {
         );
         assert!(licenses.effective_for(&foo, None, overlay).accepts("GPL-2"));
         assert!(!licenses.effective_for(&foo, None, gentoo).accepts("GPL-2"));
+    }
+
+    #[test]
+    fn policy_facts_stability_honours_the_version_repo() {
+        let (data, cpv) = repo_with(
+            "dev-libs/foo-1",
+            "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+        );
+        let tok = |s: &str| AcceptToken::parse(s).unwrap();
+        let ak = AcceptKeywords::new(
+            &Arch::intern("amd64"),
+            &[tok("amd64")],
+            vec![(atom("dev-libs/foo::overlay"), vec![tok("~amd64")])],
+        );
+        let cache = PolicyFactsCache::new();
+        let policy = ResolvePolicy {
+            facts: Some(cache.generation_for(&[])),
+            ..permissive_policy(&ak, &[], &[])
+        };
+        let entry = &data.versions[&cpv.cpn][0].1;
+        let facts = policy.facts.unwrap();
+        assert!(facts.is_stable(policy, &cpv, entry, repo_name_of(&data, &cpv)));
     }
 
     #[test]
@@ -3139,8 +3178,15 @@ mod tests {
             Some(entry.metadata.slot.slot),
             None,
         );
-        let base =
-            crate::effective_use::effective_use(&policy, &pkg, &cpv.version, entry, stable, &[]);
+        let base = crate::effective_use::effective_use(
+            &policy,
+            &pkg,
+            &cpv.version,
+            entry,
+            repo_name_of(&data, &cpv),
+            stable,
+            &[],
+        );
         assert_eq!(base.get(Interned::intern("a")), UseFlagState::Enabled);
         assert_eq!(base.get(Interned::intern("b")), UseFlagState::Enabled);
 
@@ -3154,8 +3200,15 @@ mod tests {
             UseFlagState::SolverDecided { .. }
         ));
 
-        let base_again =
-            crate::effective_use::effective_use(&policy, &pkg, &cpv.version, entry, stable, &[]);
+        let base_again = crate::effective_use::effective_use(
+            &policy,
+            &pkg,
+            &cpv.version,
+            entry,
+            repo_name_of(&data, &cpv),
+            stable,
+            &[],
+        );
         assert_eq!(base_again.get(Interned::intern("a")), UseFlagState::Enabled);
         assert_eq!(base_again.get(Interned::intern("b")), UseFlagState::Enabled);
     }

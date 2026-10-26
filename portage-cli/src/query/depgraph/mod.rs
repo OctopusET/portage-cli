@@ -1243,7 +1243,8 @@ fn package_needs_use_reinstall(
     // Stable-keyword decision is approximate here (any stable token); force
     // mask's stable sets rarely change reinstall detection vs the main USE fold.
     let stable = true;
-    let cfg = effective_use::effective_use(policy, pkg, &plan_ver, cache, stable, &[]);
+    let repo = repo::repo_name_of(data, &Cpv::new(*pkg.cpn(), plan_ver.clone()));
+    let cfg = effective_use::effective_use(policy, pkg, &plan_ver, cache, repo, stable, &[]);
     let cur_iuse = effective_use::iuse_set(cache, &policy.force_mask.iuse_injection);
     let cur_enabled: HashSet<_> = cur_iuse
         .iter()
