@@ -205,6 +205,11 @@ pub(crate) fn has_feature(features: &str, name: &str) -> bool {
     features.split_whitespace().any(|f| f == name)
 }
 
+/// The FEATURES em acts on: the settings' own, or [`EM_FEATURES`] without settings (no profile)
+pub(crate) fn features(settings: Option<&Settings>) -> &str {
+    settings.map_or(EM_FEATURES, |s| s.get("FEATURES").unwrap_or_default())
+}
+
 /// Give a build shell the [`SEEDED`] values and the stacked `FEATURES` (make.globals included)
 /// for `package.env` to stack onto; without settings (no profile), em's own default features
 pub(crate) async fn seed_build_shell(
@@ -349,6 +354,12 @@ mod tests {
             features("FEATURES=\"-preserve-libs\"\n").await,
             "binpkg-multi-instance"
         );
+    }
+
+    #[test]
+    fn without_a_profile_em_still_acts_on_its_default_features() {
+        assert!(has_feature(features(None), "preserve-libs"));
+        assert!(has_feature(features(None), "binpkg-multi-instance"));
     }
 
     #[test]

@@ -53,12 +53,11 @@ async fn run_inner(globals: &Cli, opts: &QuickpkgOpts) -> Result<()> {
         .map(|t| t.atom)
         .collect();
     let protect = ConfigProtectLists::load(globals).await;
-    let multi_instance = crate::settings::load(globals).await?.is_none_or(|s| {
-        crate::settings::has_feature(
-            s.get("FEATURES").unwrap_or_default(),
-            "binpkg-multi-instance",
-        )
-    });
+    let settings = crate::settings::load(globals).await?;
+    let multi_instance = crate::settings::has_feature(
+        crate::settings::features(settings.as_deref()),
+        "binpkg-multi-instance",
+    );
 
     let mut successes: Vec<(String, u64)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();

@@ -1432,10 +1432,7 @@ pub(crate) async fn run_unmerge_batch(
         let registry = preserve_libs::PreservedLibsRegistry::load(&root);
         let graph = preserve_libs::build_link_graph(vdb, exclude, &registry, &root);
         let settings = crate::settings::load(cli).await?;
-        let features = settings
-            .as_deref()
-            .and_then(|s| s.get("FEATURES"))
-            .unwrap_or_default();
+        let features = crate::settings::features(settings.as_deref());
         for pkg in packages {
             if let Ok(old_contents) = pkg.contents() {
                 let preserved =
