@@ -34,23 +34,25 @@ needed under the default profile).
 
 ## Merge (`merge-diff.sh`, 16 packages)
 
-- VDB `USE` not filtered to IUSE_EFFECTIVE.
-- VDB `DEFINED_PHASES` includes em's default stubs.
-- VDB `*DEPEND`/`LICENSE`/`RESTRICT` written raw: not USE-reduced, `:=` not bound.
-- No implicit `>=sys-libs/glibc-<installed>` in RDEPEND (portage `_inject_libc_dep`).
-- VDB lacks `CC`, `CXX`, `FEATURES`, `REPO_REVISIONS`.
-- setgid lost: app-misc/screen `/usr/bin/screen-4.9.1` 2755 (emerge) vs 0755 (em).
+- done: VDB `USE` filtered to IUSE_EFFECTIVE (phase env too).
+- done: VDB `DEFINED_PHASES` no longer includes em's default stubs.
+- done: VDB `*DEPEND`/`LICENSE`/`RESTRICT`/`PROPERTIES` USE-reduced with `:=` bound (binpkg: as built).
+- done: implicit `>=<libc provider>` RDEPEND for packages with NEEDED.ELF.2.
+- done: VDB `CC`, `CXX`, `FEATURES`, `REPO_REVISIONS`.
+- done: setgid lost on merge (chown before chmod).
 - done `49fcae32`: sys-apps/pciutils `libpci.so.3.15.0` 0755 (emerge) vs 0644 (em); portage's
   install QA makes `.so` in library dirs executable and `.a`/`.la` not.
 - done `40bb85d8`: econf argument order (`--libdir` after the probed flags, only for
   LIBDIR_${ABI}, under the ebuild's `--exec-prefix`/`--prefix`; CONF_PREFIX exported).
 - done `6bddd350`: global counter in `var/db/pkg/COUNTER`; portage uses `/var/cache/edb/counter`.
-- env-update: no `/etc/csh.env`, no `/etc/environment.d/10-gentoo-env.conf`, `profile.env`
-  lacks `export GCC_SPECS=''`.
-- No `/usr/share/info/dir` regeneration after merging info pages.
+- done: env-update writes `/etc/csh.env`, `/etc/environment.d/10-gentoo-env.conf`; content matches
+  emerge except the header comment.
+- done `9acddd23`: `/usr/share/info/dir` regenerated after a merge (mtimedb `info` record).
 - `/var/lib/portage/config` (config-protect-if-modified md5s) never written.
 - done `2cb80dc4`: `preserved_libs_registry` written 0600 in em's own JSON shape; now portage's
   `[cpv, "counter", [paths]]`, keeping the file's mode/owner, never rewriting an unparsable file.
-- Two tools fetching one distfile into a shared DISTDIR: emerge's verified file was
-  truncated under it; em writes the final name in place.
+- done: distfiles download to `.__download__` and rename after verify, under portage's distlocks lock.
+- Remaining after the fix batch (17 packages): NEEDED/NEEDED.ELF.2 line order; `metadata` (portage's
+  VDB field cache, safe to omit: em replaces entry dirs by rename); `/var/lib/portage/config`
+  (config-protect-if-modified md5s); binpkg extraction drops owners (`tar --no-same-owner`).
 - SIZE: portage measures `${D}` before compression, em after; left as is.
