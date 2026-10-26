@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use memchr::memmem;
-use portage_atom::{Cpn, Dep, Slot, SlotDep};
+use portage_atom::interner::{DefaultInterner, Interned};
+use portage_atom::{Cpn, Dep, DepEntry, Slot, SlotDep};
 use portage_vdb::{ContentsKind, ContentsRef, InstalledPackage};
 
 /// Names of all known Portage sets, collected from:
@@ -39,6 +40,9 @@ impl KnownSets {
             "deprecated-live-rebuild",
             "module-rebuild",
             "x11-module-rebuild",
+            "installed",
+            "golang-rebuild",
+            "rust-rebuild",
             "security",
         ] {
             names.insert(name.to_string());
@@ -95,6 +99,9 @@ enum VdbSet {
     DeprecatedLive,
     Module,
     X11Module,
+    Installed,
+    GolangRebuild,
+    RustRebuild,
 }
 
 fn vdb_set_kind(name: &str) -> Option<VdbSet> {
@@ -104,15 +111,16 @@ fn vdb_set_kind(name: &str) -> Option<VdbSet> {
         "deprecated-live-rebuild" => VdbSet::DeprecatedLive,
         "module-rebuild" => VdbSet::Module,
         "x11-module-rebuild" => VdbSet::X11Module,
+        "installed" => VdbSet::Installed,
+        "golang-rebuild" => VdbSet::GolangRebuild,
+        "rust-rebuild" => VdbSet::RustRebuild,
         _ => return None,
     })
 }
 
 /// Resolve a VDB-aware built-in set under `eroot`
 ///
-/// These sets (`@preserved-rebuild`, `@live-rebuild`,
-/// `@deprecated-live-rebuild`, and — to follow — `@module-rebuild`/
-/// `@x11-module-rebuild`) query the installed-package database and/or
+/// These sets (see [`vdb_set_kind`]) query the installed-package database and/or
 /// related registries, so they can't go through `portage_repo::SetResolver`
 /// (profile/config-only, no VDB access). Both `emerge::expand_sets` and
 /// `maint::world::resolve_set` route VDB-aware names through here first.
@@ -154,7 +162,56 @@ pub(crate) fn resolve_vdb_set(name: &str, eroot: &Utf8Path) -> Option<Result<Vec
         VdbSet::X11Module => {
             owner_set_atoms(&vdb, &["/usr/lib*/xorg/modules"], &["/usr/bin/Xorg"], eroot)
         }
+        VdbSet::Installed => Ok(vdb
+            .packages()
+            .into_iter()
+            .filter_map(|p| slot_member(&p))
+            .map(set_atom)
+            .collect()),
+        VdbSet::GolangRebuild => Ok(bdepend_set_atoms(
+            &vdb,
+            &["dev-lang/go"],
+            &["dev-lang/go", "dev-lang/go-bootstrap"],
+        )),
+        VdbSet::RustRebuild => Ok(bdepend_set_atoms(
+            &vdb,
+            &["dev-lang/rust", "dev-lang/rust-bin"],
+            &["dev-lang/rust", "dev-lang/rust-bin"],
+        )),
     })
+}
+
+/// `@golang-rebuild` / `@rust-rebuild` core (portage's `VariableSet` on `BDEPEND`): every
+/// installed package, except the `excludes_output` ones, whose `BDEPEND` under its own `USE`
+/// names one of `includes` in any branch.
+fn bdepend_set_atoms(
+    vdb: &portage_vdb::Vdb,
+    includes: &[&str],
+    excludes_output: &[&str],
+) -> Vec<Dep> {
+    let names = |list: &[&str]| -> HashSet<Cpn> {
+        list.iter().filter_map(|c| Cpn::parse(c).ok()).collect()
+    };
+    let (includes, excludes_output) = (names(includes), names(excludes_output));
+    let mut out = Vec::new();
+    for pkg in vdb.packages() {
+        if excludes_output.contains(pkg.cpn()) {
+            continue;
+        }
+        let Some(bdepend) = pkg.bdepend().ok().flatten() else {
+            continue;
+        };
+        let use_set: HashSet<Interned<DefaultInterner>> =
+            pkg.use_flags().unwrap_or_default().into_iter().collect();
+        let mut hit = false;
+        DepEntry::walk_atoms(&DepEntry::evaluate_use(&bdepend, &use_set), &mut |d| {
+            hit |= d.blocker.is_none() && includes.contains(&d.cpn);
+        });
+        if hit && let Some(member) = slot_member(&pkg) {
+            out.push(set_atom(member));
+        }
+    }
+    out
 }
 
 /// `@preserved-rebuild`: packages owning a shared lib whose last provider was
@@ -751,6 +808,53 @@ mod tests {
             .map(|d| d.to_string())
             .collect();
         assert_eq!(atoms, vec!["app-misc/live-one:0"]);
+    }
+
+    #[test]
+    fn installed_lists_every_package_by_main_slot() {
+        let (_keep, eroot) = vdb_eroot();
+        write_vdb_pkg(&eroot, "dev-lang/python-3.12.4", &[("SLOT", "3.12/3.12t")]);
+        write_vdb_pkg(&eroot, "app-misc/foo-1.0", &[("SLOT", "0")]);
+        let mut atoms: Vec<String> = resolve_vdb_set("installed", &eroot)
+            .expect("Some")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.to_string())
+            .collect();
+        atoms.sort();
+        assert_eq!(atoms, ["app-misc/foo:0", "dev-lang/python:3.12"]);
+    }
+
+    #[test]
+    fn rust_rebuild_follows_use_and_excludes_rust_itself() {
+        let (_keep, eroot) = vdb_eroot();
+        let bdep = "rust? ( || ( dev-lang/rust-bin >=dev-lang/rust-1.80 ) )";
+        write_vdb_pkg(
+            &eroot,
+            "app-misc/with-1.0",
+            &[("SLOT", "0"), ("USE", "rust"), ("BDEPEND", bdep)],
+        );
+        write_vdb_pkg(
+            &eroot,
+            "app-misc/without-1.0",
+            &[("SLOT", "0"), ("USE", ""), ("BDEPEND", bdep)],
+        );
+        write_vdb_pkg(
+            &eroot,
+            "dev-lang/rust-1.80.0",
+            &[("SLOT", "1.80.0"), ("USE", "rust"), ("BDEPEND", bdep)],
+        );
+        let atoms: Vec<String> = resolve_vdb_set("rust-rebuild", &eroot)
+            .expect("Some")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.to_string())
+            .collect();
+        assert_eq!(atoms, ["app-misc/with:0"]);
+        let go = resolve_vdb_set("golang-rebuild", &eroot)
+            .expect("Some")
+            .unwrap();
+        assert!(go.is_empty());
     }
 
     #[test]
