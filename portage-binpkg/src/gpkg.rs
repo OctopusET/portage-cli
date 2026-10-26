@@ -10,7 +10,7 @@
 //!    member (must be last).
 //!
 //! `<basename>` is the package `PF` (e.g. `gentoo-functions-1.7.6`). The two inner
-//! tars are produced with GNU `tar` (`--numeric-owner`, pax `--xattrs` for the
+//! tars are produced with GNU `tar` (pax, owner names kept, `--xattrs` for the
 //! image so file capabilities/ACLs and device nodes survive) and compressed with
 //! zstd — the Portage default. Requires `tar` and `zstd` on `PATH`.
 
@@ -175,8 +175,8 @@ fn tar_tree(dir: &Path, prefix: &str, out: &Path, xattrs: bool) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let mut cmd = Command::new("tar");
+    // Owner names are recorded, as Portage's tarfile does, so an extract maps them to local ids.
     cmd.arg("--zstd")
-        .arg("--numeric-owner")
         .arg("--format=pax")
         // Rename the `.`-rooted members to `<prefix>/…`: member names and
         // hard link targets, but not symlink targets, which are not paths in
@@ -727,13 +727,11 @@ pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Res
         }
     }
 
-    // Extract with the `image/` prefix stripped, preserving mode/xattrs, and the recorded
-    // owners when run as root (tar's default then; an unprivileged extract keeps its own).
+    // Strip `image/`, keep mode/xattrs; as root tar also restores owners, by name else by id.
     std::fs::create_dir_all(dest)?;
     run(
         "tar",
         Command::new("tar")
-            .arg("--numeric-owner")
             .arg("--xattrs")
             .arg("--xattrs-include=*")
             .arg("--strip-components=1")
