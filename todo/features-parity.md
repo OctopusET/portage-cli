@@ -12,9 +12,9 @@ run. Matching Portage's set is this note's work, one feature at a time.
 
 ## Where em stands (grep of `features.contains(…)`, 2026-10-22)
 
-- **Read from FEATURES:** `binpkg-request-signature`, `binpkg-signing`, `candy`, `ccache`,
-  `config-protect-if-modified` (seeded from the settings), `keeptemp`, `keepwork`, `noclean`,
-  `nostrip`, `test`, `test-fail-continue`; `sandbox` only in a test.
+- **Read from FEATURES:** `binpkg-request-signature`, `binpkg-signing`, `buildpkg-live`,
+  `candy`, `ccache`, `compress-index`, `config-protect-if-modified` (seeded from the settings),
+  `keeptemp`, `keepwork`, `noclean`, `nostrip`, `test`, `test-fail-continue`; `sandbox` only in a test.
 
 - **Carried from the settings into the build shell** (`settings::PROVIDED_FEATURES`, 2026-10-26):
   `binpkg-multi-instance`, `buildpkg-live`, `config-protect-if-modified`, `preserve-libs`,
@@ -48,7 +48,6 @@ Missing in em:
 | `merge-wait` | `--jobs` merges each package as soon as it builds (`merge/mod.rs`) |
 | `merge-sync` | no fsync after merge or unmerge |
 | `parallel-fetch` | no background fetch of later packages' distfiles |
-| `compress-index` | no `Packages.gz` |
 | `news` | no news update or notice after sync; only `em select news` |
 | `fixlafiles`, `multilib-strict`, `qa-unresolved-soname-deps` | none of these install QA passes |
 | `strict` | no switch; a distfile without a digest is refused unless the repo layout or `digest` allows it |
