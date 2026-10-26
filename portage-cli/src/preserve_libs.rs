@@ -1,12 +1,10 @@
 //! portage's `preserve-libs`: never physically delete a shared library that
 //! another still-installed object's `NEEDED.ELF.2` genuinely requires and
-//! that no other installed copy still provides — matching real portage's
+//! loads from its directory, while no other installed copy sits in that
+//! object's runpath or the loader's default path, matching real portage's
 //! `_find_libs_to_preserve`/`PreservedLibsRegistry`
 //! (`portage/dbapi/vartree.py`, `util/_dyn_libs/{LinkageMapELF,
-//! PreservedLibsRegistry}.py`), simplified to match by (multilib category,
-//! soname) alone rather than full RPATH/RUNPATH-directory resolution. That
-//! can only make `em` preserve a file real portage would have deleted,
-//! never the reverse — the safe direction for a deletion guard.
+//! PreservedLibsRegistry}.py`).
 //!
 //! Hooked into `ebuild::unmerge_package`, the one function both `-C` and
 //! ordinary version-bump replacement funnel through, so both benefit.
@@ -30,6 +28,8 @@ pub(crate) struct NeededRecord {
     pub(crate) path: Utf8PathBuf,
     pub(crate) soname: Option<String>,
     pub(crate) needed: Vec<String>,
+    /// `DT_RUNPATH`/`DT_RPATH` directories, `$ORIGIN` expanded.
+    pub(crate) runpath: Vec<Utf8PathBuf>,
 }
 
 fn parse_needed_line(line: &str) -> Option<NeededRecord> {
@@ -37,13 +37,23 @@ fn parse_needed_line(line: &str) -> Option<NeededRecord> {
     let _machine = parts.next()?;
     let path = parts.next()?;
     let soname = parts.next()?;
-    let _rpath = parts.next()?;
+    let rpath = parts.next()?;
     let needed = parts.next()?;
     let category = parts.next()?;
+    let origin = Utf8Path::new(path).parent().map_or("/", Utf8Path::as_str);
     Some(NeededRecord {
         category: category.to_string(),
         path: Utf8PathBuf::from(path),
         soname: (!soname.is_empty()).then(|| soname.to_string()),
+        runpath: rpath
+            .split(':')
+            .filter(|d| !d.trim().is_empty() && d.trim() != "-")
+            .map(|d| {
+                d.replace("${ORIGIN}", origin)
+                    .replace("$ORIGIN", origin)
+                    .into()
+            })
+            .collect(),
         needed: needed
             .split(',')
             .filter(|s| !s.is_empty())
@@ -405,9 +415,9 @@ impl PreservedLibsRegistry {
 /// The `@preserved-rebuild` special set: every installed package whose own
 /// `NEEDED.ELF.2` still requires a soname that no live package provides
 /// anymore, but that `registry` is only keeping on disk because of that
-/// requirement — real portage's `PreservedLibraryConsumerSet`. Simplified
-/// the same way [`find_libs_to_preserve`] already is: matched by (multilib
-/// category, soname) alone, no RPATH/RUNPATH directory disambiguation.
+/// requirement @ real portage's `PreservedLibraryConsumerSet`. Simplified
+/// to match by (multilib category, soname) alone, no RPATH/RUNPATH directory
+/// disambiguation.
 ///
 /// That costs little in practice — a registry entry only exists because
 /// the replacing package's own copy dropped that exact soname, so a live
@@ -485,49 +495,108 @@ pub struct PreserveEntry {
 /// minus the packages currently being replaced. Expensive to build (a full
 /// VDB scan), cheap to query and update as a merge changes its package set.
 pub struct LinkGraph {
-    providers: HashSet<(String, String)>,
-    consumer_files: HashMap<(String, String), Vec<Utf8PathBuf>>,
-    provider_counts: HashMap<(String, String), usize>,
-    package_records: HashMap<Cpv, Vec<NeededRecord>>,
-    preserved_providers: HashSet<(String, String)>,
+    /// Canonical root, so directories compare by what they resolve to.
+    root: Utf8PathBuf,
+    /// The loader's default directories (`ld.so.conf` plus the system ones).
+    defpath: HashSet<Utf8PathBuf>,
+    dir_cache: HashMap<Utf8PathBuf, Utf8PathBuf>,
+    /// Directory of each installed provider, one per providing object.
+    providers: HashMap<(String, String), Vec<Utf8PathBuf>>,
+    consumers: HashMap<(String, String), Vec<Consumer>>,
+    package_records: HashMap<Cpv, Vec<(NeededRecord, Utf8PathBuf)>>,
+    preserved_providers: HashMap<(String, String), Vec<Utf8PathBuf>>,
+}
+
+/// An object that needs a soname, with the runpath its loader searches before the defaults
+struct Consumer {
+    path: Utf8PathBuf,
+    runpath: Vec<Utf8PathBuf>,
 }
 
 impl LinkGraph {
-    fn new() -> Self {
+    fn new(root: &Utf8Path) -> Self {
+        let root = root.canonicalize_utf8().unwrap_or_else(|_| root.to_owned());
+        let conf = ldconfig::SearchPaths::from_file("/etc/ld.so.conf", Some(&root))
+            .unwrap_or_default()
+            .with_system();
+        let defpath = conf.iter().map(|d| canonical_dir(&root, d)).collect();
         Self {
-            providers: HashSet::new(),
-            consumer_files: HashMap::new(),
-            provider_counts: HashMap::new(),
+            root,
+            defpath,
+            dir_cache: HashMap::new(),
+            providers: HashMap::new(),
+            consumers: HashMap::new(),
             package_records: HashMap::new(),
-            preserved_providers: HashSet::new(),
+            preserved_providers: HashMap::new(),
         }
     }
 
-    fn refresh_providers(&mut self) {
-        self.providers.clear();
-        self.providers.extend(self.provider_counts.keys().cloned());
+    fn dir_key(&mut self, dir: &Utf8Path) -> Utf8PathBuf {
+        if let Some(key) = self.dir_cache.get(dir) {
+            return key.clone();
+        }
+        let key = canonical_dir(&self.root, dir);
+        self.dir_cache.insert(dir.to_owned(), key.clone());
+        key
+    }
+
+    /// Whether a provider other than the excluded packages is in `runpath` or the defaults.
+    fn provided_in(&self, key: &(String, String), runpath: &[Utf8PathBuf]) -> bool {
         self.providers
-            .extend(self.preserved_providers.iter().cloned());
+            .get(key)
+            .into_iter()
+            .chain(self.preserved_providers.get(key))
+            .flatten()
+            .any(|d| self.defpath.contains(d) || runpath.contains(d))
+    }
+
+    /// Consumers of `key` that load it from `lib_dir` and would find no other provider.
+    fn stranded_consumers(&self, key: &(String, String), lib_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
+        let Some(consumers) = self.consumers.get(key) else {
+            return Vec::new();
+        };
+        consumers
+            .iter()
+            .filter(|c| self.defpath.contains(lib_dir) || c.runpath.iter().any(|d| d == lib_dir))
+            .filter(|c| !self.provided_in(key, &c.runpath))
+            .map(|c| c.path.clone())
+            .collect()
     }
 
     /// Add a package's dynamic-link records to the graph.
     pub(crate) fn add_package(&mut self, pkg: &InstalledPackage) {
         self.remove_package(pkg.cpv());
         let records = package_needed(pkg);
+        let own = own_providers(&records);
+        let mut keyed = Vec::with_capacity(records.len());
         for rec in &records {
+            let dir = self.dir_key(rec.path.parent().unwrap_or(Utf8Path::new("/")));
             if let Some(soname) = &rec.soname {
-                let key = (rec.category.clone(), soname.clone());
-                *self.provider_counts.entry(key.clone()).or_insert(0) += 1;
-                self.providers.insert(key);
+                self.providers
+                    .entry((rec.category.clone(), soname.clone()))
+                    .or_default()
+                    .push(dir.clone());
             }
+            let runpath = self.runpath(rec, &own);
             for needed in &rec.needed {
-                self.consumer_files
+                self.consumers
                     .entry((rec.category.clone(), needed.clone()))
                     .or_default()
-                    .push(rec.path.clone());
+                    .push(Consumer {
+                        path: rec.path.clone(),
+                        runpath: runpath.clone(),
+                    });
             }
+            keyed.push((rec.clone(), dir));
         }
-        self.package_records.insert(pkg.cpv().clone(), records);
+        self.package_records.insert(pkg.cpv().clone(), keyed);
+    }
+
+    fn runpath(&mut self, rec: &NeededRecord, own: &OwnProviders) -> Vec<Utf8PathBuf> {
+        search_dirs(rec, own)
+            .iter()
+            .map(|d| self.dir_key(d))
+            .collect()
     }
 
     /// Remove a package's dynamic-link records from the graph.
@@ -535,32 +604,29 @@ impl LinkGraph {
         let Some(records) = self.package_records.remove(cpv) else {
             return;
         };
-        for rec in records {
+        for (rec, dir) in records {
             if let Some(soname) = rec.soname {
                 let key = (rec.category.clone(), soname);
-                let remove_provider = if let Some(count) = self.provider_counts.get_mut(&key) {
-                    *count -= 1;
-                    *count == 0
-                } else {
-                    false
-                };
-                if remove_provider {
-                    self.provider_counts.remove(&key);
-                    if !self.preserved_providers.contains(&key) {
-                        self.providers.remove(&key);
+                let emptied = self.providers.get_mut(&key).is_some_and(|dirs| {
+                    if let Some(index) = dirs.iter().position(|d| d == &dir) {
+                        dirs.remove(index);
                     }
+                    dirs.is_empty()
+                });
+                if emptied {
+                    self.providers.remove(&key);
                 }
             }
             for needed in rec.needed {
                 let key = (rec.category.clone(), needed);
-                let remove_consumers = self.consumer_files.get_mut(&key).is_some_and(|files| {
-                    if let Some(index) = files.iter().position(|path| path == &rec.path) {
+                let emptied = self.consumers.get_mut(&key).is_some_and(|files| {
+                    if let Some(index) = files.iter().position(|c| c.path == rec.path) {
                         files.remove(index);
                     }
                     files.is_empty()
                 });
-                if remove_consumers {
-                    self.consumer_files.remove(&key);
+                if emptied {
+                    self.consumers.remove(&key);
                 }
             }
         }
@@ -574,11 +640,64 @@ impl LinkGraph {
             if let Some(info) = elfscan::scan_file(root.join(rel).as_std_path())
                 && let Some(soname) = info.soname
             {
-                self.preserved_providers.insert((info.category, soname));
+                let dir = self.dir_key(path.parent().unwrap_or(Utf8Path::new("/")));
+                self.preserved_providers
+                    .entry((info.category, soname))
+                    .or_default()
+                    .push(dir);
             }
         }
-        self.refresh_providers();
     }
+}
+
+/// `dir` as it resolves inside `root`, or lexically normalized when it does not exist there
+fn canonical_dir(root: &Utf8Path, dir: &Utf8Path) -> Utf8PathBuf {
+    root.join(dir.as_str().trim_start_matches('/'))
+        .canonicalize_utf8()
+        .ok()
+        .and_then(|real| {
+            real.strip_prefix(root)
+                .ok()
+                .map(|rel| Utf8Path::new("/").join(rel))
+        })
+        .unwrap_or_else(|| {
+            let mut out = Utf8PathBuf::from("/");
+            for c in dir.components() {
+                match c {
+                    camino::Utf8Component::Normal(s) => out.push(s),
+                    camino::Utf8Component::ParentDir => {
+                        out.pop();
+                    }
+                    _ => {}
+                }
+            }
+            out
+        })
+}
+
+/// One package's providers: (category, soname) to the directories of the objects carrying it
+type OwnProviders<'a> = HashMap<(&'a str, &'a str), Vec<&'a Utf8Path>>;
+
+fn own_providers(records: &[NeededRecord]) -> OwnProviders<'_> {
+    let mut own: OwnProviders<'_> = HashMap::new();
+    for rec in records {
+        if let (Some(soname), Some(dir)) = (&rec.soname, rec.path.parent()) {
+            own.entry((&rec.category, soname)).or_default().push(dir);
+        }
+    }
+    own
+}
+
+/// `rec`'s runpath plus, as portage assumes, the directories of the same-package
+/// objects that provide what it needs
+fn search_dirs(rec: &NeededRecord, own: &OwnProviders) -> Vec<Utf8PathBuf> {
+    let implicit = rec
+        .needed
+        .iter()
+        .filter_map(|n| own.get(&(rec.category.as_str(), n.as_str())))
+        .flatten()
+        .map(|d| d.to_path_buf());
+    rec.runpath.iter().cloned().chain(implicit).collect()
 }
 
 /// Build the [`LinkGraph`] for a removal batch: every installed package
@@ -596,7 +715,7 @@ pub fn build_link_graph(
     registry: &PreservedLibsRegistry,
     root: &Utf8Path,
 ) -> LinkGraph {
-    let mut graph = LinkGraph::new();
+    let mut graph = LinkGraph::new(root);
     for pkg in vdb.packages() {
         if !exclude.contains(pkg.cpv()) {
             graph.add_package(&pkg);
@@ -676,29 +795,28 @@ impl MergePreserveState {
 
 /// Which of `old_contents`' own files must survive `old_pkg`'s removal,
 /// because something outside the batch `graph` was built for still needs
-/// them via `DT_NEEDED`, and no other installed copy of that soname
-/// remains; plus the providers inside `old_pkg` a preserved library itself
-/// needs, so the preserved copy still loads. Cheap: only reads `old_pkg`'s own `NEEDED.ELF.2` and queries
-/// the already-built `graph` — call once per removed package, reusing the
-/// same `graph` for the whole batch (see [`build_link_graph`]'s doc).
+/// them via `DT_NEEDED`, and no other installed copy of that soname is in
+/// its search path; plus the providers inside `old_pkg` a preserved library
+/// itself needs, so the preserved copy still loads. Cheap: only reads
+/// `old_pkg`'s own `NEEDED.ELF.2` and queries the already-built `graph`;
+/// call once per removed package, reusing the same `graph` for the whole
+/// batch (see [`build_link_graph`]'s doc).
 pub fn find_libs_to_preserve(
     graph: &LinkGraph,
     old_pkg: &InstalledPackage,
     old_contents: &[ContentsEntry],
 ) -> Vec<PreserveEntry> {
     let records = package_needed(old_pkg);
+    let own = own_providers(&records);
     // External consumers are queued first, so a library both kinds need reports those.
     let mut queue: VecDeque<(&NeededRecord, Vec<Utf8PathBuf>)> = VecDeque::new();
     for rec in &records {
         let Some(soname) = &rec.soname else { continue };
         let key = (rec.category.clone(), soname.clone());
-        // Another installed copy already provides it -> nothing orphaned.
-        if graph.providers.contains(&key) {
-            continue;
-        }
-        // Nobody outside this package needs it -> nothing to preserve.
-        if let Some(consumers) = graph.consumer_files.get(&key) {
-            queue.push_back((rec, consumers.clone()));
+        let lib_dir = canonical_dir(&graph.root, rec.path.parent().unwrap_or(Utf8Path::new("/")));
+        let consumers = graph.stranded_consumers(&key, &lib_dir);
+        if !consumers.is_empty() {
+            queue.push_back((rec, consumers));
         }
     }
 
@@ -724,11 +842,12 @@ pub fn find_libs_to_preserve(
             soname_symlink,
             consumers,
         });
+        let runpath: Vec<Utf8PathBuf> = search_dirs(rec, &own)
+            .iter()
+            .map(|d| canonical_dir(&graph.root, d))
+            .collect();
         for needed in &rec.needed {
-            if graph
-                .providers
-                .contains(&(rec.category.clone(), needed.clone()))
-            {
+            if graph.provided_in(&(rec.category.clone(), needed.clone()), &runpath) {
                 continue;
             }
             for dep in &records {
@@ -1272,7 +1391,7 @@ mod tests {
                     let mut registry = PreservedLibsRegistry::load(&root);
                     let exclude = HashSet::from([pkg.cpv().clone()]);
                     let graph = build_link_graph(&vdb, &exclude, &registry, &root);
-                    black_box(graph.providers.len());
+                    black_box(graph.consumers.len());
                     registry.reclaim(&vdb, &root);
                     registry.store();
                 }
@@ -1283,7 +1402,7 @@ mod tests {
                 for pkg in &packages {
                     {
                         let (graph, _registry) = state.graph_and_registry(pkg.cpv());
-                        black_box(graph.providers.len());
+                        black_box(graph.consumers.len());
                     }
                     state.package_removed(pkg.cpv());
                     state.package_added(pkg);
@@ -1353,6 +1472,50 @@ mod tests {
                     vec!["/usr/lib64/libfoo.so.1"]
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn a_provider_outside_the_consumers_search_path_does_not_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        let vdb_root = root.join("var/db/pkg");
+        write_fake_package(
+            vdb_root.as_std_path(),
+            "sys-libs",
+            "libfoo-1.0",
+            "obj /usr/lib64/libfoo.so.1 aaaa 0\n",
+            "X86_64;/usr/lib64/libfoo.so.1;libfoo.so.1;;;x86_64\n",
+        );
+        write_fake_package(
+            vdb_root.as_std_path(),
+            "app-misc",
+            "bundled-1.0",
+            "obj /opt/bundled/lib/libfoo.so.1 aaaa 0\nobj /opt/bundled/bin/tool aaaa 0\n",
+            "X86_64;/opt/bundled/lib/libfoo.so.1;libfoo.so.1;;;x86_64\n\
+             X86_64;/opt/bundled/bin/tool;;$ORIGIN/../lib;libfoo.so.1;x86_64\n",
+        );
+        write_fake_package(
+            vdb_root.as_std_path(),
+            "app-misc",
+            "consumer-1.0",
+            "obj /usr/bin/consumer bbbb 0\nobj /usr/bin/linked bbbb 0\n",
+            "X86_64;/usr/bin/consumer;;;libfoo.so.1;x86_64\n\
+             X86_64;/usr/bin/linked;;${ORIGIN}/../../opt/bundled/lib;libfoo.so.1;x86_64\n",
+        );
+        let vdb = Vdb::open(&vdb_root).unwrap();
+        let libfoo = vdb
+            .category("sys-libs")
+            .unwrap()
+            .package("libfoo-1.0")
+            .unwrap();
+        let exclude: HashSet<Cpv> = std::iter::once(libfoo.cpv().clone()).collect();
+        let graph = build_link_graph(&vdb, &exclude, &PreservedLibsRegistry::load(&root), &root);
+        let preserved = find_libs_to_preserve(&graph, &libfoo, &libfoo.contents().unwrap());
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(
+            preserved[0].consumers,
+            vec![Utf8PathBuf::from("/usr/bin/consumer")]
         );
     }
 
