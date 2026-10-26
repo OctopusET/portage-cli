@@ -1429,8 +1429,8 @@ fn status_field(tag: &str, forced_rebuild: bool) -> String {
         }
         "R" => f[2] = b'R',
         "U" => f[4] = b'U',
-        "D" => f[5] = b'D',
-        "UD" => {
+        // Portage marks a downgrade as a new version too.
+        "D" => {
             f[4] = b'U';
             f[5] = b'D';
         }
@@ -2385,6 +2385,12 @@ mod tests {
                 portage_metadata::Eapi::LATEST
             )
         );
+    }
+
+    #[test]
+    fn status_field_marks_a_downgrade_ud() {
+        assert_eq!(status_field("D", false), "    UD ");
+        assert_eq!(status_field("U", false), "    U  ");
     }
 
     #[test]
