@@ -188,6 +188,19 @@ impl DependencyProvider for PortageDependencyProvider {
         let bump_slot =
             self.prefer_newest_slot && matches!(package, PortagePackage::SlotChoice { .. });
 
+        // portage `dep_zapdeps`: a branch whose USE deps hold beats one needing a USE change,
+        // installed or not; the installed preference below then ranks within that tier.
+        let candidates = if matches!(package, PortagePackage::Choice { .. }) {
+            let sat: Vec<&Version> = candidates
+                .iter()
+                .copied()
+                .filter(|v| self.use_dep_branch_satisfied(&data.versions[*v].use_deps))
+                .collect();
+            if sat.is_empty() { candidates } else { sat }
+        } else {
+            candidates
+        };
+
         // For OR-group / slot-choice packages, prefer branches that lead to
         // an already-installed package.  Independent of `rebuild_tree`: emptytree
         // rebuilds every listed package but `gcc:*` must still bind to the
@@ -215,43 +228,6 @@ impl DependencyProvider for PortageDependencyProvider {
             let directly_installed_count = direct_installed.iter().filter(|&&x| x).count();
 
             if directly_installed_count > 0 {
-                // For OR-group Choice packages: among the installed branches, prefer
-                // those that already satisfy all USE dep constraints.  A branch that
-                // is installed AND use-satisfied avoids unnecessary package rebuilds.
-                //
-                // Example: librsvg BDEPEND has || ( (python:3.14 docutils[p3.14(-)]) ... )
-                // Both python:3.14 and python:3.13 are installed, so both branches pass
-                // the simple installed-preference check and we'd fall through to max()
-                // (= first listed, python:3.14).  But if docutils only has p3.13 enabled,
-                // the p3.14 branch's USE dep is unsatisfied — we should pick p3.13 instead.
-                if matches!(package, PortagePackage::Choice { .. }) {
-                    let installed_and_use_sat: Vec<bool> = candidates
-                        .iter()
-                        .zip(direct_installed.iter())
-                        .map(|(&ver, &inst)| {
-                            inst && data
-                                .versions
-                                .get(ver)
-                                .map(|vd| self.use_dep_branch_satisfied(&vd.use_deps))
-                                .unwrap_or(true)
-                        })
-                        .collect();
-                    let sat_count = installed_and_use_sat.iter().filter(|&&s| s).count();
-                    // Only intervene when some (not all) installed branches satisfy USE
-                    // deps — if none satisfy, we can't do better so fall through.
-                    if sat_count > 0 && sat_count < candidates.len() {
-                        let best = candidates
-                            .iter()
-                            .copied()
-                            .zip(installed_and_use_sat.iter().copied())
-                            .filter(|(_, s)| *s)
-                            .map(|(v, _)| v)
-                            .max()
-                            .cloned();
-                        return Ok(best);
-                    }
-                }
-
                 if directly_installed_count < candidates.len() {
                     // OR group with some (not all) branches installed: prefer
                     // the highest-version installed branch (= first listed).

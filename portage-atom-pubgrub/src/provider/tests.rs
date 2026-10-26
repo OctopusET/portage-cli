@@ -1299,6 +1299,61 @@ fn or_group_installed_branch_needs_every_atom_installed() {
     assert!(solution.get(&pkg("dev-libs/b")).is_none());
 }
 
+// libpulse `|| ( pipewire[sound-server] pulseaudio-daemon )`: a branch needing a USE change
+// loses to one that does not, whether or not its target is installed.
+#[test]
+fn or_group_prefers_use_satisfied_branch_over_installed() {
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let f = Interned::intern("f");
+    let picked = |x_installed_use: Option<Vec<Interned<DefaultInterner>>>| {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("a/x-1").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![f],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("a/y-1").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: (DepEntry::parse("|| ( a/x[f] a/y )").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        if let Some(active_use) = x_installed_use {
+            provider.add_installed(InstalledPackage {
+                package: pkg("a/x"),
+                version: Version::parse("1").unwrap(),
+                policy: InstalledPolicy::Favor,
+                active_use,
+                iuse: vec![f],
+            });
+        }
+        let solution = provider
+            .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
+            .unwrap();
+        let has = |cpn: &str| solution.get(&pkg(cpn)).is_some();
+        match (has("a/x"), has("a/y")) {
+            (true, false) => "x",
+            (false, true) => "y",
+            other => panic!("unexpected selection {other:?}"),
+        }
+    };
+    assert_eq!(picked(None), "y", "nothing installed, x defaults to -f");
+    assert_eq!(picked(Some(vec![])), "y", "x installed without f");
+    assert_eq!(picked(Some(vec![f])), "x", "x installed with f");
+}
+
 #[test]
 fn or_group_no_preference_when_both_installed() {
     // || ( A B ) where both A and B are installed — solver falls through to

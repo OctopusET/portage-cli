@@ -373,47 +373,63 @@ impl PortageDependencyProvider {
     }
 
     /// Check whether all USE dep constraints for an OR-group branch are
-    /// consistent with the desired final state of the installed packages
+    /// consistent with the desired final state of their targets
     ///
-    /// A flag is treated as "effectively enabled" when it is either currently
-    /// active in the installed VDB, or in the package's IUSE and enabled in the
-    /// global `use_config` — so branch selection favors branches consistent
-    /// with the desired post-build state, not just the current one.
-    ///
-    /// Returns `true` when every constraint is satisfied or refers to a
-    /// package not yet installed.
+    /// An installed target in range is judged on its VDB USE, or its desired USE when a
+    /// rebuild would enable the flag; any other target on its newest accepted version in
+    /// range. A constraint fanned out over a multi-slot target holds when one slot does.
+    /// Returns `true` when every constraint holds or has no version to judge.
     pub(crate) fn use_dep_branch_satisfied(&self, udeps: &[convert::UseDepConstraint]) -> bool {
-        for constraint in udeps {
-            let (target_pkg, vs) = &constraint.target;
-            let Some((inst_ver, _)) = self.installed.get(target_pkg) else {
-                continue; // not installed → can't verify, don't veto
-            };
-            if !vs.contains(inst_ver) {
-                continue;
-            }
-            let active = self
+        let verdicts: Vec<Option<bool>> = udeps
+            .iter()
+            .map(|c| self.use_dep_constraint_satisfied(c))
+            .collect();
+        udeps.iter().zip(&verdicts).all(|(c, v)| {
+            *v != Some(false)
+                || udeps.iter().zip(&verdicts).any(|(o, ov)| {
+                    *ov == Some(true)
+                        && o.target.0.cpn() == c.target.0.cpn()
+                        && o.use_deps == c.use_deps
+                })
+        })
+    }
+
+    /// One [`Self::use_dep_branch_satisfied`] constraint; `None` when no version is in range
+    fn use_dep_constraint_satisfied(&self, constraint: &convert::UseDepConstraint) -> Option<bool> {
+        let (target_pkg, vs) = &constraint.target;
+        let installed = self
+            .installed
+            .get(target_pkg)
+            .map(|(v, _)| v)
+            .filter(|v| vs.contains(v));
+        let ver = match installed {
+            Some(v) => v.clone(),
+            None => self
+                .package_data(target_pkg)?
+                .versions
+                .iter()
+                .filter(|(v, vd)| vs.contains(v) && !vd.needs_unmask && !vd.installed_only)
+                .map(|(v, _)| v)
+                .max()?
+                .clone(),
+        };
+        let active = match installed {
+            Some(_) => self
                 .installed_use
                 .get(target_pkg)
                 .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            for ud in &constraint.use_deps {
-                // Desired final state of the target's flag: active now, or the
-                // version's desired set will enable it on rebuild.
-                let dep_effective_enabled = active.contains(&ud.flag)
-                    || self.effective_flag_new(target_pkg, inst_ver, ud.flag, ud.default);
-                // Parent flag (only used by Conditional/Equal kinds, rare in OR
-                // groups): approximate with the target's desired state.
-                let parent_flag_enabled =
-                    self.effective_flag_new(target_pkg, inst_ver, ud.flag, ud.default);
-                // A violated constraint means this branch is not satisfiable.
-                if eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled)
-                    .is_some()
-                {
-                    return false;
-                }
-            }
-        }
-        true
+                .unwrap_or(&[]),
+            None => &[],
+        };
+        Some(constraint.use_deps.iter().all(|ud| {
+            let dep_effective_enabled = active.contains(&ud.flag)
+                || self.effective_flag_new(target_pkg, &ver, ud.flag, ud.default);
+            // Parent flag (only used by Conditional/Equal kinds, rare in OR
+            // groups): approximate with the target's desired state.
+            let parent_flag_enabled =
+                self.effective_flag_new(target_pkg, &ver, ud.flag, ud.default);
+            eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled).is_none()
+        }))
     }
 }
 
