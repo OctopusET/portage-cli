@@ -65,7 +65,7 @@ fn quoted_args<I: IntoIterator<Item = S>, S: AsRef<str>>(args: I) -> String {
 /// Takes the die flag and params directly (not `&ExecutionContext`) because
 /// callers need to move `context.shell` out first, which would otherwise
 /// make `context` itself unusable as a whole.
-fn die_now<SE: brush_core::ShellExtensions>(
+pub(crate) fn die_now<SE: brush_core::ShellExtensions>(
     params: &brush_core::ExecutionParameters,
     die_flag: Option<&DieFlag>,
     shell: &mut brush_core::Shell<SE>,

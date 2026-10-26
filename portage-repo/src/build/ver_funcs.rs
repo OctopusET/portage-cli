@@ -13,6 +13,7 @@ use brush_core::builtins;
 use regex::Regex;
 
 use super::commands::die::DieFlag;
+use super::commands::phase_defaults::die_now;
 
 // ── Version splitting ──────────────────────────────────────────────────────
 
@@ -579,10 +580,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for VerReplacingComm
         let die_flag = context.shell.builtin_state::<DieFlag>().cloned();
         let shell = context.shell;
         let die = |shell: &mut brush_core::Shell<SE>, msg: String| {
-            if let Some(flag) = &die_flag {
-                flag.raise(&msg);
-            }
-            let _ = writeln!(context.params.stderr(shell), "die: {msg}");
+            die_now(&context.params, die_flag.as_ref(), shell, &msg);
             Ok(brush_core::ExecutionResult::new(1))
         };
         let phase = shell.env_str("EBUILD_PHASE").unwrap_or_default();
