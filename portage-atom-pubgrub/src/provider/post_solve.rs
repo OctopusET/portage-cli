@@ -424,10 +424,7 @@ impl PortageDependencyProvider {
         Some(constraint.use_deps.iter().all(|ud| {
             let dep_effective_enabled = active.contains(&ud.flag)
                 || self.effective_flag_new(target_pkg, &ver, ud.flag, ud.default);
-            // Parent flag (only used by Conditional/Equal kinds, rare in OR
-            // groups): approximate with the target's desired state.
-            let parent_flag_enabled =
-                self.effective_flag_new(target_pkg, &ver, ud.flag, ud.default);
+            let parent_flag_enabled = constraint.parent_enabled.contains(&ud.flag);
             eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled).is_none()
         }))
     }

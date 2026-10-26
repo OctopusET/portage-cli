@@ -1361,6 +1361,51 @@ fn or_group_prefers_use_satisfied_branch_over_installed() {
     assert_eq!(picked(Some(vec![f])), "x", "x installed with f");
 }
 
+// `[f?]` in an || branch is judged against the consumer's USE, not the target's own.
+#[test]
+fn or_group_conditional_use_dep_follows_parent_use() {
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let f = Interned::intern("f");
+    let picked = |parent_f: bool| {
+        let mut repo = InMemoryRepository::new();
+        for cpv in ["a/x-1", "a/y-1"] {
+            repo.add_version(
+                portage_atom::Cpv::parse(cpv).unwrap(),
+                Some(Interned::intern("0")),
+                None,
+                empty_deps(),
+            );
+        }
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![f],
+            PackageDeps {
+                rdepend: (DepEntry::parse("|| ( a/x[f?] a/y )").unwrap()).into(),
+                ..empty_deps()
+            },
+        );
+        let mut config = UseConfig::new();
+        if parent_f {
+            config.enable(f);
+        }
+        repo.set_use_config(config);
+        let mut provider = PortageDependencyProvider::new(repo);
+        let solution = provider
+            .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
+            .unwrap();
+        let has = |cpn: &str| solution.get(&pkg(cpn)).is_some();
+        match (has("a/x"), has("a/y")) {
+            (true, false) => "x",
+            (false, true) => "y",
+            other => panic!("unexpected selection {other:?}"),
+        }
+    };
+    assert_eq!(picked(true), "y", "USE=f needs x[f], x has no f");
+    assert_eq!(picked(false), "x", "USE=-f puts no demand on x");
+}
+
 // dev-libs/libei `|| ( systemd? ( sys-apps/systemd ) sys-libs/basu )` with -systemd.
 #[test]
 fn or_branch_emptied_by_disabled_use_is_no_alternative() {

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Dep, DepEntry, Operator, SlotDep, SlotOperator, UseDep, Version};
+use portage_atom::{
+    Cpn, Dep, DepEntry, Operator, SlotDep, SlotOperator, UseDep, UseDepKind, Version,
+};
 
 use crate::package::PortagePackage;
 use crate::required_use::RequiredUse;
@@ -110,6 +112,8 @@ pub(crate) struct UseDepConstraint {
     /// rebuild (up to ~8x per invocation during the USE-dep co-solve
     /// fixpoint), then carried through a `BTreeSet` in `post_solve.rs`.
     pub parent_cpn_str: Interned<DefaultInterner>,
+    /// Flags of `[flag?]`/`[flag=]`-style deps that are on in the parent's desired USE
+    pub parent_enabled: Vec<Interned<DefaultInterner>>,
 }
 
 /// Slot info for a CPN: pre-computed `(slot_interned, slotted_package)` pairs
@@ -357,10 +361,22 @@ impl ConvertCtx<'_> {
         if let Some(use_deps) = &dep.use_deps
             && !use_deps.is_empty()
         {
+            let parent_enabled = use_deps
+                .iter()
+                .filter(|ud| !matches!(ud.kind, UseDepKind::Enabled | UseDepKind::Disabled))
+                .filter(|ud| {
+                    matches!(
+                        self.use_config.get(ud.flag),
+                        UseFlagState::Enabled | UseFlagState::SolverDecided { prefer: true }
+                    )
+                })
+                .map(|ud| ud.flag)
+                .collect();
             self.use_deps.push(UseDepConstraint {
                 target: (pkg.clone(), vs.clone()),
                 use_deps: use_deps.clone(),
                 parent_cpn_str: Interned::intern(self.cpn_str),
+                parent_enabled,
             });
         }
         if let Some(repo) = dep.repo {
