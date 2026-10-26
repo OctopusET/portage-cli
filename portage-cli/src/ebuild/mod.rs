@@ -2115,7 +2115,7 @@ fn post_process_after_install(
     let stats = postprocess::post_process_image(&image_dir, &cfg)?;
     if stats.compressed + stats.relinked + stats.stripped > 0 {
         // debug, not info: real portage doesn't print an interactive
-        // ecompress/estrip summary either — this is developer detail
+        // ecompress/estrip summary either; this is developer detail
         // (`-vv`/`RUST_LOG`), not something that belongs mixed into the
         // default `>>>`-style merge output.
         tracing::debug!(
