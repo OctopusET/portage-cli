@@ -55,6 +55,7 @@ impl Solver for PortageDependencyProvider {
 
     fn set_rebuild_tree(&mut self, on: bool) {
         PortageDependencyProvider::set_rebuild_tree(self, on);
+        PortageDependencyProvider::set_emptytree(self, on);
     }
 
     fn set_cross_active(&mut self, active: bool) {

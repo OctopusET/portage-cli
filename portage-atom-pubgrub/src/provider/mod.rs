@@ -331,10 +331,11 @@ pub struct PortageDependencyProvider {
     pub(crate) root_targets: std::collections::HashMap<PortagePackage, PortageVersionSet>,
     /// Whether a cross build's host-root packages list their DEPEND and BDEPEND
     pub(crate) with_bdeps: bool,
-    /// `--emptytree`: do not prefer installed virtual/OR branches; full deep
-    /// closure from repository candidates
+    /// Native `--emptytree`: list the full deep closure, without pruning build deps BROOT satisfies
     pub(crate) rebuild_tree: bool,
-    /// `--update --deep` (and native `--emptytree`): for a `:*` any-slot dep
+    /// `--emptytree` on any root: a [`InstalledPolicy::Rebuild`] package takes the newest version
+    pub(crate) emptytree: bool,
+    /// `--update --deep` (and `--emptytree`): for a `:*` any-slot dep
     /// (`SlotChoice`), bump to the newest slot instead of keeping the installed
     /// slot that already satisfies `>=MIN` — matching `emerge -uD`/`-e`
     ///
@@ -894,6 +895,7 @@ impl PortageDependencyProvider {
             root_targets: std::collections::HashMap::new(),
             with_bdeps,
             rebuild_tree: false,
+            emptytree: false,
             prefer_newest_slot: false,
             prefer_update: false,
             kept_build_deps: false,
@@ -1012,13 +1014,17 @@ impl PortageDependencyProvider {
         self.is_cross_arch = is_cross_arch;
     }
 
-    /// `--emptytree`: rebuild the full deep closure; skip installed-branch
-    /// heuristics and never favor target VDB versions during selection
+    /// Native `--emptytree`: list the full deep closure, without pruning build deps BROOT satisfies
     pub fn set_rebuild_tree(&mut self, active: bool) {
         self.rebuild_tree = active;
     }
 
-    /// `-uD` / native `--emptytree`: bump `:*` any-slot deps (`SlotChoice`)
+    /// `--emptytree` on any root: never keep an installed version for its own sake
+    pub fn set_emptytree(&mut self, active: bool) {
+        self.emptytree = active;
+    }
+
+    /// `-uD` / `--emptytree`: bump `:*` any-slot deps (`SlotChoice`)
     /// to the newest slot rather than keeping a satisfying installed slot
     pub fn set_prefer_newest_slot(&mut self, active: bool) {
         self.prefer_newest_slot = active;

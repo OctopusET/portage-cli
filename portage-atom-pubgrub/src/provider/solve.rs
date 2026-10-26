@@ -165,7 +165,7 @@ impl DependencyProvider for PortageDependencyProvider {
                     // `-N`/`-U` alone: same-CPV reinstall when the installed
                     // version is still offered (emerge `[R]`); otherwise the
                     // newest offered one, as the installed one cannot be built.
-                    if !self.rebuild_tree
+                    if !self.emptytree
                         && !self.prefer_update
                         && !replaceable
                         && range.contains(installed_ver)
@@ -177,7 +177,7 @@ impl DependencyProvider for PortageDependencyProvider {
         }
         let candidates = if replaceable { offered } else { candidates };
 
-        // `-uD` / native emptytree: for a `:*` any-slot dep (`SlotChoice`),
+        // `-uD` / emptytree: for a `:*` any-slot dep (`SlotChoice`),
         // bump to the newest slot instead of keeping a satisfying installed slot
         // — matching `emerge -uD`/`-e` (e.g. firefox pulling the newest
         // `dev-lang/rust-bin` slot). Slots are version-ranked, so the `max()`

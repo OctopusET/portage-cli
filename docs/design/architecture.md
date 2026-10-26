@@ -383,10 +383,12 @@ Stages, in order:
    `UseConfig`, `package.use`, `USE_EXPAND` groups, masks, `ACCEPT_KEYWORDS`,
    `ACCEPT_LICENSE`.
 3. **Load installed set** (`installed.rs`) — the VDB, used for `InstalledPolicy`
-   (`Favor`/`Lock`, or `Rebuild` under native `--emptytree`), action tags
-   (`N`/`R`/`U`/`D`), and reverse-dep checks. Under `--emptytree` the real VDB
-   stays loaded (for tags/display) but the solver sees an empty installed set so
-   target packages are re-selected as rebuilds. The host branch captures one
+   (`Favor`/`Lock`, or `Rebuild` under `--emptytree`), action tags
+   (`N`/`R`/`U`/`D`), and reverse-dep checks. Under any `--emptytree`, offset
+   root or cross build included, the real VDB stays loaded (for tags/display)
+   but the solver sees an empty installed set, so target packages are
+   re-selected at their best version as rebuilds. Only BROOT and sysroot
+   satisfaction stay limited to native `--emptytree`. The host branch captures one
    `BrootSnapshot`; its ordered host-then-prefix rows feed host-installed state,
    BDEPEND availability, trims, root closure, and preflight without rescanning;
    preflight consumes the snapshot before any merge writes. Availability keeps

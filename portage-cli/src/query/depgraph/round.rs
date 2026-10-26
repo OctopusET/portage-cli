@@ -289,8 +289,9 @@ pub(super) fn solve_round(
         }
         provider.set_nodeps(nodeps);
         provider.set_rebuild_tree(emptytree_native);
-        // `-uD` and native emptytree bump `:*` deps to the newest slot.
-        provider.set_prefer_newest_slot((deep && update) || emptytree_native);
+        provider.set_emptytree(empty);
+        // `-uD` and emptytree bump `:*` deps to the newest slot.
+        provider.set_prefer_newest_slot((deep && update) || empty);
         // `-uD`: in-slot upgrades for the whole solve (not emptytree Rebuild).
         // Also the path that re-opens host-satisfied build edges so deep tools
         // can upgrade/rebuild; `-N` alone must not do that (Portage parity).

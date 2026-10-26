@@ -329,7 +329,24 @@ fn emptytree_still_plans_a_package_that_is_already_installed() {
 
 #[test]
 fn emptytree_rebuilds_an_installed_dependency_under_an_offset_root() {
-    let mut fix = fixture(&pair(), &["app-misc/foo-1", "app-misc/bar-1"]);
+    let mut pkgs = pair();
+    pkgs[0].rdepend = "app-misc/lib:*";
+    for (cpv, slot) in [
+        ("app-misc/bar-2", "0"),
+        ("app-misc/lib-1", "1"),
+        ("app-misc/lib-2", "2"),
+    ] {
+        pkgs.push(Pkg {
+            cpv,
+            keywords: "amd64",
+            depend: "",
+            rdepend: "",
+            iuse: "",
+            slot,
+        });
+    }
+    let mut fix = fixture(&pkgs, &["app-misc/foo-1", "app-misc/bar-1"]);
+    plant_installed(&fix.root, "app-misc/lib-1", "1", "", "");
     let broot = Utf8PathBuf::try_from(fix._dir.path().join("broot")).unwrap();
     std::fs::create_dir_all(broot.as_std_path()).unwrap();
     fix.roots = fix.roots.clone().with_broot(Some(broot));
@@ -337,13 +354,17 @@ fn emptytree_rebuilds_an_installed_dependency_under_an_offset_root() {
     let mut opts = Solve::new(&atoms);
     opts.empty = true;
     let outcome = solve(&fix, opts);
-    let target: Vec<String> = outcome
+    let mut target: Vec<String> = outcome
         .plan
         .iter()
         .filter(|p| p.merge_root == MergeRoot::Target)
         .map(|p| p.cpv.to_string())
         .collect();
-    assert_eq!(target, ["app-misc/bar-1", "app-misc/foo-1"]);
+    target.sort();
+    assert_eq!(
+        target,
+        ["app-misc/bar-2", "app-misc/foo-1", "app-misc/lib-2"]
+    );
 }
 
 #[test]
