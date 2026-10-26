@@ -83,6 +83,13 @@ impl LayoutConf {
             Err(e) => Err(util::io_err(&path, e)),
         }
     }
+
+    /// Whether a distfile with no Manifest `DIST` entry may be used: any `use-manifests` but `strict` (the default)
+    pub fn allow_missing_manifest(&self) -> bool {
+        self.properties
+            .get("use-manifests")
+            .is_some_and(|v| !v.eq_ignore_ascii_case("strict"))
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +159,14 @@ profile-formats = portage-2
         let input = "masters = gentoo\ncustom-key = custom-value\n";
         let layout = LayoutConf::parse(input).unwrap();
         assert_eq!(layout.properties.get("custom-key").unwrap(), "custom-value");
+    }
+
+    #[test]
+    fn allow_missing_manifest_unless_use_manifests_is_strict() {
+        let allows = |input: &str| LayoutConf::parse(input).unwrap().allow_missing_manifest();
+        assert!(!allows(""));
+        assert!(!allows("use-manifests = Strict\n"));
+        assert!(allows("use-manifests = true\n"));
+        assert!(allows("use-manifests = false\n"));
     }
 }

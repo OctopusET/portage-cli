@@ -2172,10 +2172,7 @@ async fn run_fetch(
 /// Whether a distfile with no `DIST` entry may be fetched unverified, as portage allows
 fn allow_missing_digests(shell: &portage_repo::EbuildShell, repo: &Repository) -> bool {
     let features = shell.get_var("FEATURES").unwrap_or_default();
-    repo.layout()
-        .properties
-        .get("allow-missing-manifests")
-        .is_some_and(|v| v == "true")
+    repo.layout().allow_missing_manifest()
         || features.split_whitespace().any(|f| f == "digest")
         || shell.get_var("EBUILD_SKIP_MANIFEST").as_deref() == Some("1")
 }
