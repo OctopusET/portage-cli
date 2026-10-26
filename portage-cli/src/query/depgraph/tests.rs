@@ -22,6 +22,7 @@ struct Pkg {
     rdepend: &'static str,
     iuse: &'static str,
     slot: &'static str,
+    required_use: &'static str,
 }
 
 struct Fix {
@@ -78,6 +79,9 @@ fn cache_text(pkg: &Pkg) -> String {
     );
     if !pkg.iuse.is_empty() {
         text.push_str(&format!("IUSE={}\n", pkg.iuse));
+    }
+    if !pkg.required_use.is_empty() {
+        text.push_str(&format!("REQUIRED_USE={}\n", pkg.required_use));
     }
     text
 }
@@ -241,6 +245,7 @@ fn pair() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/bar-1",
@@ -249,6 +254,7 @@ fn pair() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ]
 }
@@ -265,6 +271,7 @@ fn pinned_consumer() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/bar-2",
@@ -273,6 +280,7 @@ fn pinned_consumer() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/consumer-1",
@@ -281,6 +289,7 @@ fn pinned_consumer() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/consumer-2",
@@ -289,6 +298,7 @@ fn pinned_consumer() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ]
 }
@@ -302,6 +312,7 @@ fn masked_dep() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/masked-1",
@@ -310,6 +321,7 @@ fn masked_dep() -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ]
 }
@@ -356,6 +368,7 @@ fn emptytree_rebuilds_an_installed_dependency_under_an_offset_root() {
             rdepend: "",
             iuse: "",
             slot,
+            required_use: "",
         });
     }
     let mut fix = fixture(&pkgs, &["app-misc/foo-1", "app-misc/bar-1"]);
@@ -439,6 +452,7 @@ fn flagged() -> Vec<Pkg> {
         keywords: "amd64",
         depend: "",
         iuse,
+        required_use: "",
         rdepend: "",
         slot: "0",
     };
@@ -682,6 +696,7 @@ fn kept_bar(bar_keywords: &'static str) -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/bar-1",
@@ -690,6 +705,7 @@ fn kept_bar(bar_keywords: &'static str) -> Vec<Pkg> {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ]
 }
@@ -778,6 +794,7 @@ fn a_masked_installed_package_is_not_reported_when_its_slot_is_upgraded() {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/bar-1",
@@ -786,6 +803,7 @@ fn a_masked_installed_package_is_not_reported_when_its_slot_is_upgraded() {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/bar-2",
@@ -794,6 +812,7 @@ fn a_masked_installed_package_is_not_reported_when_its_slot_is_upgraded() {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ];
     let fix = fixture(&pkgs, &[]);
@@ -825,6 +844,7 @@ fn a_masked_installed_package_in_another_slot_is_not_reported() {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/bar-1",
@@ -833,6 +853,7 @@ fn a_masked_installed_package_in_another_slot_is_not_reported() {
             rdepend: "",
             iuse: "",
             slot: "1",
+            required_use: "",
         },
     ];
     let fix = fixture(&pkgs, &[]);
@@ -858,6 +879,7 @@ fn deep_without_update_keeps_the_installed_slot_of_an_any_slot_dep() {
             rdepend: "app-misc/lib:*",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/lib-1",
@@ -866,6 +888,7 @@ fn deep_without_update_keeps_the_installed_slot_of_an_any_slot_dep() {
             rdepend: "",
             iuse: "",
             slot: "1",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/lib-2",
@@ -874,6 +897,7 @@ fn deep_without_update_keeps_the_installed_slot_of_an_any_slot_dep() {
             rdepend: "",
             iuse: "",
             slot: "2",
+            required_use: "",
         },
     ];
     let fix = fixture(&pkgs, &[]);
@@ -904,6 +928,7 @@ fn deep_descends_into_a_kept_package_through_its_vdb_deps_once_its_ebuild_is_gon
         rdepend: "",
         iuse: "",
         slot: "0",
+        required_use: "",
     });
     let fix = fixture(&pkgs, &[]);
     plant_vdb_rdepend(&fix.root, "app-misc/bar-0", Some("app-misc/baz"));
@@ -927,6 +952,7 @@ fn deep_descends_into_a_kept_package_with_the_use_it_was_built_with() {
             rdepend: "net-misc/curl",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "net-misc/curl-1",
@@ -935,6 +961,7 @@ fn deep_descends_into_a_kept_package_with_the_use_it_was_built_with() {
             rdepend: "http2? ( net-libs/nghttp2 )",
             iuse: "+http2",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "net-libs/nghttp2-1",
@@ -943,6 +970,7 @@ fn deep_descends_into_a_kept_package_with_the_use_it_was_built_with() {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ];
     let fix = fixture(&pkgs, &[]);
@@ -961,6 +989,7 @@ fn pkg(cpv: &'static str, slot: &'static str, rdepend: &'static str) -> Pkg {
         rdepend,
         iuse: "",
         slot,
+        required_use: "",
     }
 }
 
@@ -1101,6 +1130,7 @@ fn changed_deps_rebuilds_only_an_installed_package_whose_deps_changed() {
             rdepend: "app-misc/baz",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
         Pkg {
             cpv: "app-misc/baz-1",
@@ -1109,6 +1139,7 @@ fn changed_deps_rebuilds_only_an_installed_package_whose_deps_changed() {
             rdepend: "",
             iuse: "",
             slot: "0",
+            required_use: "",
         },
     ];
     let atoms = [TargetAtom::explicit("app-misc/bar")];
@@ -1248,6 +1279,7 @@ fn binpkg_plan(
         rdepend: "",
         iuse: "nls",
         slot: "0",
+        required_use: "",
     }];
     let fix = fixture(&pkgs, &[]);
     let base = fix.root.parent().unwrap();
@@ -1315,4 +1347,25 @@ fn usepkgonly_shows_a_binpkg_with_the_use_it_was_built_with() {
     let plan = binpkg_plan(&["-K"], "IUSE: nls\nUSE: nls\n", "-march=x86-64-v3", "");
     assert!(plan.rows[0].starts_with("[binary"), "{}", plan.rows[0]);
     assert!(plan.rows[0].contains("USE=\"nls\""), "{}", plan.rows[0]);
+}
+
+#[test]
+fn only_the_first_required_use_failure_is_reported() {
+    let pkg = |cpv| Pkg {
+        cpv,
+        keywords: "amd64",
+        depend: "",
+        rdepend: "",
+        iuse: "x",
+        slot: "0",
+        required_use: "x",
+    };
+    let fix = fixture(&[pkg("app-misc/a-1"), pkg("app-misc/b-1")], &[]);
+    let atoms = [
+        TargetAtom::explicit("app-misc/a"),
+        TargetAtom::explicit("app-misc/b"),
+    ];
+    let outcome = solve(&fix, Solve::new(&atoms));
+    assert_eq!(outcome.required_use_reported.len(), 1);
+    assert_eq!(outcome.exit_code, 1);
 }

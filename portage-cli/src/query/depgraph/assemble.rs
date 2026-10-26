@@ -322,7 +322,7 @@ pub(super) fn assemble(
     //  - blockers (`!foo` / `!!foo`) and `::repo` constraints, which the solver
     //    does not model;
     //  - REQUIRED_USE, evaluated per-package against its effective USE.
-    let (hard_conflict, unmerges, required_use_unsatisfied, masked_installed) = {
+    let (hard_conflict, unmerges, required_use_reported, masked_installed) = {
         // `dep_conflicts` was computed per-round above (settled by the
         // `--complete-graph` repair loop, or from the single round when the
         // gate is off) — reporting it here, once, is the only place this
@@ -374,7 +374,10 @@ pub(super) fn assemble(
             output::report_masked_installed(&masked);
         }
 
-        let ru_violations = required_use::find_violations(&data, &order, &final_policy, &ceded);
+        let mut ru_violations =
+            required_use::find_violations(&data, &order, &final_policy, &ceded);
+        // emerge aborts on the first package whose REQUIRED_USE fails.
+        ru_violations.truncate(1);
         if !ru_violations.is_empty() {
             output::report_required_use(&ru_violations);
         }
@@ -442,14 +445,18 @@ pub(super) fn assemble(
             }
         }
 
-        package_use::report(&use_change_entries);
+        // Changes the aborted resolve never reached are not worth showing.
+        if !required_use_unsatisfied {
+            package_use::report(&use_change_entries);
+        }
 
         // Deliberate divergence from real emerge (which only ever writes
         // package.use via `--autounmask-write`, never interactively): with
         // `--ask` and no `--autounmask-write`, offer to write these now
         // instead of making the user re-run with `--autounmask-write` by
         // hand. Skipped when `--autounmask-write` already wrote them above.
-        if ask && !autounmask_write && !use_change_entries.is_empty() {
+        if ask && !autounmask_write && !required_use_unsatisfied && !use_change_entries.is_empty()
+        {
             let write_confirmed =
                 crate::config_plan::confirm_config_write(use_change_entries.len())?;
             if write_confirmed {
@@ -464,11 +471,13 @@ pub(super) fn assemble(
         if !unsatisfiable.is_empty() {
             output::report_unsatisfiable_targets(&unsatisfiable, &data, set.is_multi());
         }
-        (hard_conflict, unmerges, required_use_unsatisfied, masked)
+        let ru_reported: Vec<Cpv> = ru_violations.into_iter().map(|v| v.cpv).collect();
+        (hard_conflict, unmerges, ru_reported, masked)
     };
     // Retained on the outcome for tests. The report above is the user-facing copy.
     #[cfg(not(test))]
     let _ = masked_installed;
+    let required_use_unsatisfied = !required_use_reported.is_empty();
 
     // `Total:`/`Size of downloads:` print *after* the advisories above (not
     // right after the merge list, as it used to): the caller's `--eta`
@@ -674,5 +683,7 @@ pub(super) fn assemble(
         masked_installed,
         #[cfg(test)]
         rows,
+        #[cfg(test)]
+        required_use_reported,
     })
 }

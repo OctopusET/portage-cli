@@ -181,6 +181,9 @@ pub struct DepgraphOutcome {
     /// The `-p` row of each plan entry, uncolored
     #[cfg(test)]
     pub rows: Vec<String>,
+    /// The packages reported with an unsatisfied `REQUIRED_USE`.
+    #[cfg(test)]
+    pub required_use_reported: Vec<Cpv>,
 }
 
 /// Whether pending autounmask changes (keyword/mask/license/…) may be
