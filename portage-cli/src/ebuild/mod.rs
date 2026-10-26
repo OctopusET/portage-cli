@@ -2436,7 +2436,7 @@ async fn run_merge(
             crate::style::warn_line!("{path} is a directory; the package installs a symlink there");
         }
         bail!(
-            "{} symlink(s) would replace a directory (forbidden by PMS) — aborting merge",
+            "{} symlink(s) would replace a directory (forbidden by PMS); aborting merge",
             blocked.len()
         );
     }

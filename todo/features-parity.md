@@ -13,8 +13,8 @@ run. Matching Portage's set is this note's work, one feature at a time.
 ## Where em stands (grep of `features.contains(…)`, 2026-10-22)
 
 - **Read from FEATURES:** `binpkg-request-signature`, `binpkg-signing`, `candy`, `ccache`,
-  `config-protect-if-modified` (seeded from the settings), `keeptemp`, `keepwork`, `noclean`, `nostrip`, `test`, `test-fail-continue`; `sandbox` only in
-  a test.
+  `config-protect-if-modified` (seeded from the settings), `keeptemp`, `keepwork`, `noclean`,
+  `nostrip`, `test`, `test-fail-continue`; `sandbox` only in a test.
 - **Make.globals defaults em has no FEATURES check for** (30): `assume-digests`,
   `binpkg-docompress`, `binpkg-dostrip`, `binpkg-logs`, `binpkg-multi-instance`,
   `buildpkg-live`, `compress-index`, `distlocks`, `ebuild-locks`,
