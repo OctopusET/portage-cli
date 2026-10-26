@@ -710,12 +710,13 @@ pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Res
         }
     }
 
-    // Extract with the `image/` prefix stripped, preserving owners/mode/xattrs.
+    // Extract with the `image/` prefix stripped, preserving mode/xattrs, and the recorded
+    // owners when run as root (tar's default then; an unprivileged extract keeps its own).
     std::fs::create_dir_all(dest)?;
     run(
         "tar",
         Command::new("tar")
-            .arg("--no-same-owner")
+            .arg("--numeric-owner")
             .arg("--xattrs")
             .arg("--xattrs-include=*")
             .arg("--strip-components=1")
