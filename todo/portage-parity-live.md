@@ -63,6 +63,14 @@ needed under the default profile).
 - Remaining after the fix batch (17 packages): NEEDED/NEEDED.ELF.2 line order; `metadata` (portage's
   VDB field cache, safe to omit: em replaces entry dirs by rename); `/var/lib/portage/config`
   (config-protect-if-modified md5s); binpkg extraction drops owners (`tar --no-same-owner`).
+- After both batches (frozen tree, 17 packages + config-protect/unmerge/binpkg scenarios): VDB keys,
+  files, modes and owners match except: VDB FEATURES (D3, [[features-parity]]); binaries that embed
+  `__FILE__` paths, because em builds under `.../portage/host/<cat>/<pf>` (intentional per-root
+  builddirs, `work_root_key`); empty `/var/lib/portage/{config,preserved_libs_registry}` portage
+  creates up front.
+- done `eec77774`: an existing dir or dir symlink (merged-usr `/usr/sbin -> bin`) was re-chowned;
+  new dirs did not get the image's mode.
+- done `c0506725`: info dir index regenerated after unmerges too.
 - SIZE: portage measures `${D}` before compression, em after; left as is.
 
 ## Follow-ups left by the fix batches
