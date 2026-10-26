@@ -84,7 +84,7 @@ fn verify_commit(path: &Path, rev: &str, verify: &Verify, quiet: bool) -> Result
         .args(["--pretty=format:%G?%n%GF", rev])
         .stderr(Stdio::null());
     if let Some(home) = &keyring {
-        cmd.env("GNUPGHOME", home.path());
+        cmd.env("GNUPGHOME", home.0.path());
     }
     let out = cmd.output().context("spawning git log")?;
     if !out.status.success() {
@@ -120,19 +120,37 @@ fn signature_problem(status: &str) -> Option<&'static str> {
     })
 }
 
+/// A throwaway GnuPG home; dropping it stops the agent gpg started there
+struct Keyring(tempfile::TempDir);
+
+impl Drop for Keyring {
+    fn drop(&mut self) {
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(self.0.path())
+            .args(["--kill", "all"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 /// A throwaway GnuPG home holding only `key`'s keys, each ultimately trusted
-fn keyring(key: &Utf8Path) -> Result<tempfile::TempDir> {
+fn keyring(key: &Utf8Path) -> Result<Keyring> {
     use std::os::unix::fs::PermissionsExt;
     // gpg warns about a home other users can read
-    let home = tempfile::Builder::new()
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()
-        .context("creating a GnuPG home")?;
+    let home = Keyring(
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .context("creating a GnuPG home")?,
+    );
     let gpg = |args: &[&std::ffi::OsStr]| {
         let out = Command::new("gpg")
             .arg("--batch")
             .arg("--homedir")
-            .arg(home.path())
+            .arg(home.0.path())
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
@@ -146,7 +164,7 @@ fn keyring(key: &Utf8Path) -> Result<tempfile::TempDir> {
     gpg(&["--quiet".as_ref(), "--import".as_ref(), key.as_ref()])
         .with_context(|| format!("importing {key}"))?;
     let listing = gpg(&["--with-colons".as_ref(), "--list-keys".as_ref()])?;
-    let trust = home.path().join("ownertrust");
+    let trust = home.0.path().join("ownertrust");
     std::fs::write(&trust, ownertrust(&listing)).context("writing ownertrust")?;
     gpg(&[
         "--quiet".as_ref(),
