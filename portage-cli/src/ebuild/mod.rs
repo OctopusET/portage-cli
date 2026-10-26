@@ -2086,6 +2086,9 @@ async fn run_one_phase(
     root: &Utf8Path,
     context: PhaseContext<'_>,
 ) -> Result<()> {
+    if phase != RunPhase::Manifest {
+        check_ebuild_digest(shell, ebuild, repo)?;
+    }
     match phase {
         RunPhase::Fetch => {
             let PhaseContext {
@@ -2499,6 +2502,51 @@ fn check_package_manifest(
         bail!("{path} does not list every file of the package");
     }
     Ok(())
+}
+
+/// Under FEATURES=strict, verify a thick Manifest's `EBUILD` digest of the ebuild before any of
+/// its code runs, as portage's doebuild does for every phase but `manifest`/`digest`
+fn check_ebuild_digest(
+    shell: &portage_repo::EbuildShell,
+    ebuild: &Ebuild,
+    repo: &Repository,
+) -> Result<()> {
+    let layout = repo.layout();
+    let path = ebuild.path();
+    let (Some(pkg_dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(());
+    };
+    // A binary package's shipped ebuild is not the tree's, so the tree's Manifest cannot vouch for it.
+    if layout.thin_manifests
+        || !has_feature(shell, "strict")
+        || has_feature(shell, "digest")
+        || shell.get_var("EBUILD_SKIP_MANIFEST").as_deref() == Some("1")
+        || !path.starts_with(repo.path())
+    {
+        return Ok(());
+    }
+    let manifest_path = pkg_dir.join("Manifest");
+    let raw = match std::fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if layout.allow_missing_manifest() {
+                return Ok(());
+            }
+            bail!("Manifest not found for '{path}'");
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {manifest_path}")),
+    };
+    let manifest = Manifest::parse(&raw).with_context(|| format!("parsing {manifest_path}"))?;
+    let entry = manifest.entries.iter().find(|e| {
+        matches!(e, portage_repo::ManifestEntry::Data { kind: portage_repo::DataKind::Ebuild, path, .. } if path == name)
+    });
+    match entry {
+        Some(entry) => entry
+            .verify_file(path.as_std_path())
+            .with_context(|| format!("Digest verification failed for '{path}'")),
+        None if layout.allow_missing_manifest() => Ok(()),
+        None => bail!("Missing digest for '{path}'"),
+    }
 }
 
 fn has_feature(shell: &portage_repo::EbuildShell, feature: &str) -> bool {
@@ -5034,6 +5082,30 @@ mod tests {
         fs::write(ebuild.path(), "EAPI=8\n# tampered\n").unwrap();
         assert!(run_alone(&probe, &ebuild, unpack, "strict").await.is_err());
         run_alone(&probe, &ebuild, unpack, "").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_tampered_ebuild_fails_under_strict_before_pkg_setup_runs() {
+        let probe = Probe::new();
+        let body = "pkg_setup() { note setup; }\n";
+        let ebuild = probe.ebuild("probe", "1", body);
+        let setup = RunPhase::SETUP;
+        let err = run_alone(&probe, &ebuild, setup, "strict")
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("Manifest not found"), "{err:#}");
+
+        let pkg_dir = probe.path("repo/app-misc/probe");
+        let mut m = Manifest { entries: vec![] };
+        m.regenerate_package_files(pkg_dir.as_std_path(), &["BLAKE2B".to_owned()])
+            .unwrap();
+        fs::write(pkg_dir.join("Manifest"), m.render()).unwrap();
+        let tampered = fs::read_to_string(ebuild.path()).unwrap() + "# tampered\n";
+        fs::write(ebuild.path(), tampered).unwrap();
+        assert!(run_alone(&probe, &ebuild, setup, "strict").await.is_err());
+        assert_eq!(probe.log(), "");
+        run_alone(&probe, &ebuild, setup, "").await.unwrap();
+        assert_eq!(probe.log(), "setup");
     }
 
     /// Fetch `body`'s one distfile, which has no Manifest entry and so fails without a download;
