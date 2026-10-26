@@ -482,7 +482,12 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for VerTestCommand {
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        let die_flag = context.shell.builtin_state::<DieFlag>().cloned();
         let shell = context.shell;
+        let die = |shell: &mut brush_core::Shell<SE>, msg: String| {
+            die_now(&context.params, die_flag.as_ref(), shell, &msg);
+            Ok(brush_core::ExecutionResult::new(1))
+        };
 
         let pvr_owned;
         let (va, op, vb): (&str, &str, &str) = match self.args.len() {
@@ -503,29 +508,17 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for VerTestCommand {
                 self.args[2].as_str(),
             ),
             _ => {
-                let _ = writeln!(
-                    context.params.stderr(shell),
-                    "die: ver_test: bad number of arguments"
-                );
-                return Ok(brush_core::ExecutionResult::new(1));
+                return die(shell, "ver_test: bad number of arguments".to_string());
             }
         };
 
         let valid_ops = ["-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
         if !valid_ops.contains(&op) {
-            let _ = writeln!(
-                context.params.stderr(shell),
-                "die: ver_test: invalid operator: {op}"
-            );
-            return Ok(brush_core::ExecutionResult::new(1));
+            return die(shell, format!("ver_test: invalid operator: {op}"));
         }
 
         let Some(ord) = ver_compare(va, vb) else {
-            let _ = writeln!(
-                context.params.stderr(shell),
-                "die: ver_test: invalid version: {va} or {vb}"
-            );
-            return Ok(brush_core::ExecutionResult::new(1));
+            return die(shell, format!("ver_test: invalid version: {va} or {vb}"));
         };
 
         let result = op_holds(op, ord).unwrap_or_default();

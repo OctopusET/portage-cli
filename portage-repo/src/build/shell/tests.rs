@@ -2786,6 +2786,18 @@ async fn ver_replacing_tests_each_replaced_version() {
 }
 
 #[tokio::test]
+async fn ver_test_dies_on_an_invalid_operator() {
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(dir.path(), "pkg_setup() { ver_test 1 -xx 2; :; }\n");
+    let mut shell = repo.shell().await.unwrap();
+    let err = shell
+        .run_phase(&ebuild, "setup", &dir.path().join("work"), Path::new("/"))
+        .await
+        .expect_err("an invalid ver_test operator aborts the phase");
+    assert!(format!("{err}").contains("invalid operator"), "{err}");
+}
+
+#[tokio::test]
 async fn pipestatus_returns_the_last_failure_of_the_previous_pipeline() {
     let dir = tempdir().unwrap();
     let mut shell = minimal_shell(dir.path()).await;
