@@ -1375,11 +1375,7 @@ struct PhaseGroupRun<'a> {
     buildpkg: bool,
     /// Pre-built GPKG to extract after clean (`-k`/`-g`); Install group only
     binpkg: Option<&'a Utf8Path>,
-    /// This binpkg's origin (a `binrepos.conf` entry with
-    /// `verify-signature = yes`) forces cryptographic signature
-    /// verification for `binpkg`, independent of whether
-    /// `FEATURES=binpkg-request-signature` is set. `false` for a local
-    /// `-k` reuse or when the remote repo didn't request it.
+    /// See [`MergeBinpkg::verify_signature`]
     verify_signature: Option<bool>,
     /// See [`BuildAndMerge::ignore_blockers`]
     ignore_blockers: bool,
