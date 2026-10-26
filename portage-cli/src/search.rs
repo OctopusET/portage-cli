@@ -571,8 +571,9 @@ mod tests {
         let arch = gentoo_core::Arch::intern("amd64");
         let latest = |accept: &[&str]| {
             let keywords = portage_resolve::repo::AcceptKeywords::from_global(&arch, accept);
-            let accepts = |cpv: &Cpv, e: &portage_metadata::CacheEntry, _: &Repository| {
-                keywords.accepts(&e.metadata.keywords, cpv, Some(e.metadata.slot.slot))
+            let accepts = |cpv: &Cpv, e: &portage_metadata::CacheEntry, repo: &Repository| {
+                let slot = Some(e.metadata.slot.slot);
+                keywords.accepts(&e.metadata.keywords, cpv, slot, Some(repo.name()))
             };
             let (ver, _, visible) = latest_visible(&repos, 0, &cpn, &accepts).unwrap();
             (ver.to_string(), visible)
