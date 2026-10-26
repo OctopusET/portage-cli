@@ -145,6 +145,11 @@ impl BinpkgIndex {
         self.entries.is_empty()
     }
 
+    /// The `PKGDIR` this index was read from
+    pub fn pkgdir(&self) -> &Path {
+        &self.pkgdir
+    }
+
     /// Find a reusable binpkg for `cpv` given the desired `USE`, `CHOST`,
     /// and `build_env_key`, returning the absolute container path.
     ///

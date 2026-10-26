@@ -174,7 +174,10 @@ fn write_index(
         text.push('\n');
     }
 
-    std::fs::write(pkgdir.join("Packages"), text)?;
+    // Readers reopen the index mid-run, so a reader must never see a truncated file.
+    let tmp = pkgdir.join(format!("Packages.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, pkgdir.join("Packages"))?;
     Ok(())
 }
 
