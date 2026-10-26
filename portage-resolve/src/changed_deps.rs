@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, DepEntry, SlotDep, SlotOperator};
+use portage_atom::{Cpn, Dep, DepEntry, SlotDep, SlotOperator, UseDep, UseDepKind};
 use portage_metadata::EbuildMetadata;
 
 use crate::installed::VdbEntry;
@@ -35,7 +35,7 @@ pub fn deps_changed(
     let reduce = |entries: &[DepEntry]| {
         let evaluated = DepEntry::evaluate_use_groups(entries, &active, empty_groups_match);
         let mut out = Vec::new();
-        normalize(&evaluated, false, &mut out);
+        normalize(&evaluated, false, &active, &mut out);
         out.retain(|e| !matches!(e, DepEntry::Atom(d) if libc.contains(&d.cpn)));
         out
     };
@@ -70,13 +70,16 @@ pub fn slot_changed(installed: &VdbEntry, ebuild: &EbuildMetadata) -> bool {
     (tree.slot, tree.subslot.unwrap_or(tree.slot)) != (slot, installed.subslot.unwrap_or(slot))
 }
 
+type Active = HashSet<Interned<DefaultInterner>>;
+
 /// The shape a recorded dependency string has: all-of groups inlined (kept as an `||`
-/// alternative), a one-alternative `||` replaced by that alternative, slot bindings dropped
-fn normalize(entries: &[DepEntry], under_any_of: bool, out: &mut Vec<DepEntry>) {
+/// alternative), a one-alternative `||` replaced by that alternative, slot bindings dropped,
+/// conditional USE deps evaluated
+fn normalize(entries: &[DepEntry], under_any_of: bool, active: &Active, out: &mut Vec<DepEntry>) {
     for entry in entries {
         match entry {
             DepEntry::Atom(dep) => {
-                let mut dep = dep.clone();
+                let mut dep = evaluate_use_deps(dep, active);
                 if let Some(SlotDep::Slot {
                     slot: Some(_),
                     op: Some(SlotOperator::Equal),
@@ -86,9 +89,12 @@ fn normalize(entries: &[DepEntry], under_any_of: bool, out: &mut Vec<DepEntry>) 
                 }
                 out.push(DepEntry::Atom(dep));
             }
-            DepEntry::AllOf(children) => normalize(children, under_any_of, out),
+            DepEntry::AllOf(children) => normalize(children, under_any_of, active, out),
             DepEntry::AnyOf(alts) => {
-                let mut alts: Vec<DepEntry> = alts.iter().map(normalize_alternative).collect();
+                let mut alts: Vec<DepEntry> = alts
+                    .iter()
+                    .map(|a| normalize_alternative(a, active))
+                    .collect();
                 if alts.len() == 1 {
                     match alts.remove(0) {
                         DepEntry::AllOf(c) if !under_any_of => out.extend(c),
@@ -103,18 +109,49 @@ fn normalize(entries: &[DepEntry], under_any_of: bool, out: &mut Vec<DepEntry>) 
     }
 }
 
-fn normalize_alternative(alt: &DepEntry) -> DepEntry {
+fn normalize_alternative(alt: &DepEntry, active: &Active) -> DepEntry {
     let mut out = Vec::new();
     match alt {
         DepEntry::AllOf(children) => {
-            normalize(children, true, &mut out);
+            normalize(children, true, active, &mut out);
             DepEntry::AllOf(out)
         }
         other => {
-            normalize(std::slice::from_ref(other), true, &mut out);
+            normalize(std::slice::from_ref(other), true, active, &mut out);
             out.pop().unwrap_or(DepEntry::AllOf(Vec::new()))
         }
     }
+}
+
+/// `dep` with its `[f?]`, `[!f?]`, `[f=]` and `[!f=]` USE deps resolved against `active`, as recorded at merge time
+fn evaluate_use_deps(dep: &Dep, active: &Active) -> Dep {
+    let mut dep = dep.clone();
+    let Some(use_deps) = dep.use_deps.take() else {
+        return dep;
+    };
+    let fixed = |u: &UseDep, on: bool| UseDep {
+        kind: if on {
+            UseDepKind::Enabled
+        } else {
+            UseDepKind::Disabled
+        },
+        ..*u
+    };
+    let evaluated: Vec<UseDep> = use_deps
+        .iter()
+        .filter_map(|u| {
+            let on = active.contains(&u.flag);
+            match u.kind {
+                UseDepKind::Enabled | UseDepKind::Disabled => Some(*u),
+                UseDepKind::Conditional => on.then(|| fixed(u, true)),
+                UseDepKind::ConditionalInverse => (!on).then(|| fixed(u, false)),
+                UseDepKind::Equal => Some(fixed(u, on)),
+                UseDepKind::EqualInverse => Some(fixed(u, !on)),
+            }
+        })
+        .collect();
+    dep.use_deps = (!evaluated.is_empty()).then_some(evaluated);
+    dep
 }
 
 #[cfg(test)]
@@ -178,6 +215,15 @@ mod tests {
         let libc = HashSet::from([Cpn::parse("sys-libs/glibc").unwrap()]);
         assert!(!deps_changed(&vdb, &tree, false, &libc));
         assert!(deps_changed(&vdb, &tree, true, &libc));
+    }
+
+    #[test]
+    fn conditional_use_deps_compare_as_evaluated() {
+        let tree = ebuild("RDEPEND=dev-libs/a[x?,y=,z?] dev-libs/b[w?]\n");
+        let vdb = installed("dev-libs/a[x,-y] dev-libs/b", &["x"]);
+        assert!(!deps_changed(&vdb, &tree, false, &HashSet::new()));
+        let vdb = installed("dev-libs/a[x,-y] dev-libs/b", &["x", "y"]);
+        assert!(deps_changed(&vdb, &tree, false, &HashSet::new()));
     }
 
     #[test]
