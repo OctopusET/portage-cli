@@ -2359,13 +2359,29 @@ impl EbuildShell {
     /// Variable assignments (with `${VAR}` expansion) are evaluated in the
     /// shell environment.
     ///
+    /// A relative `source` inside the file resolves against the file's own directory, as
+    /// Portage reads config files.
+    ///
     /// See [PMS 5.2.4](https://projects.gentoo.org/pms/9/pms.html#makedefaults).
     pub async fn source_make_defaults(&mut self, path: &Path) -> Result<()> {
         self.invalidate_baseline();
         let params = self.shell.default_exec_params();
-        self.shell
-            .source_script(path, std::iter::empty::<&str>(), &params)
-            .await
+        let path = std::path::absolute(path).map_err(|e| Error::Shell(e.to_string()))?;
+        let cwd = self.shell.working_dir().to_path_buf();
+        let oldpwd = self.get_var("OLDPWD");
+        if let Some(dir) = path.parent() {
+            let _ = self.shell.set_working_dir(dir);
+        }
+        let sourced = self
+            .shell
+            .source_script(&path, std::iter::empty::<&str>(), &params)
+            .await;
+        let _ = self.shell.set_working_dir(&cwd);
+        match oldpwd {
+            Some(v) => self.set_var("OLDPWD", &v),
+            None => self.run_string("unset OLDPWD").await?,
+        }
+        sourced
             .map_err(|e| Error::Shell(format!("sourcing make.defaults {}: {e}", path.display())))?;
         Ok(())
     }

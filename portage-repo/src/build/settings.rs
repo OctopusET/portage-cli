@@ -528,6 +528,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_relative_source_in_make_conf_is_relative_to_its_directory() {
+        let f = Fixture::new();
+        let conf = f.write("etc/portage/make.conf", "source ./extra.conf\n");
+        f.write("etc/portage/extra.conf", "CFLAGS=\"-O3\"\n");
+        let stack = ProfileStack::build(f.dir.path().join("profiles/test")).unwrap();
+        let env = Environment::default();
+        let mut shell = f.repo.shell().await.unwrap();
+        let s = Settings::evaluate(
+            &mut shell,
+            SettingsSources {
+                stack: &stack,
+                env_d: None,
+                globals: None,
+                confs: &[ConfSource::File(&conf)],
+                env: &env,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.get("CFLAGS"), Some("-O3"));
+        assert_eq!(s.get("OLDPWD"), None);
+    }
+
+    #[tokio::test]
     async fn the_shells_own_variables_are_not_settings() {
         let f = Fixture::new();
         let s = f.settings("", "__LOCAL=\"x\"\n", &[]).await;
