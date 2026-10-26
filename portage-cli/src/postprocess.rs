@@ -1,11 +1,12 @@
 //! Post-`src_install` image processing, mirroring portage's ecompress and
 //! estrip steps: documentation under the `docompress` inclusion list is
 //! compressed (PMS 12.3.9), library modes are fixed as portage's install QA
-//! does, and ELF objects are stripped unless excluded via
-//! `dostrip`/`RESTRICT=strip`/`FEATURES=nostrip` (PMS 12.3.10).
+//! does, and ELF objects and static archives are stripped unless excluded via
+//! `dostrip`/`STRIP_MASK`/`RESTRICT=strip`/`FEATURES=nostrip` (PMS 12.3.10),
+//! `FEATURES=splitdebug` first saving their debug info under `/usr/lib/debug`.
 //!
-//! Both passes shell out, to `${PORTAGE_COMPRESS}` and `${STRIP}`, rather
-//! than being Rust builtins.
+//! Both passes shell out, to `${PORTAGE_COMPRESS}` and `${STRIP}` (with its
+//! `objcopy`/`ranlib`), rather than being Rust builtins.
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -28,10 +29,38 @@ pub struct PostProcess {
     pub compress_flags: Vec<String>,
     pub strip: StripMode,
     pub strip_exclude: Vec<Utf8PathBuf>,
+    /// `STRIP_MASK` globs over installed paths (EAPI 0-6, which lack `dostrip -x`)
+    pub strip_mask: Vec<glob::Pattern>,
     pub strip_cmd: String,
+    /// Flags for executables and shared objects, see [`strip_flags`]
+    pub strip_flags: Vec<String>,
+    pub objcopy_cmd: String,
+    pub ranlib_cmd: String,
+    /// FEATURES=splitdebug: where debug files go, as an installed path
+    pub split_debug: Option<SplitDebug>,
     /// The build's `PATH`, so both tools resolve as they did in the phases (e.g. LLVM's
     /// slotted `llvm-strip`, which em's own startup `PATH` may predate)
     pub path: Option<String>,
+}
+
+/// FEATURES=splitdebug: keep each stripped ELF's debug info in a separate file
+pub struct SplitDebug {
+    /// `/usr/lib/debug${EPREFIX}`; a debug file lands at `<dir><installed path>.debug`
+    pub dir: Utf8PathBuf,
+    /// FEATURES=compressdebug
+    pub compress: bool,
+}
+
+/// `PORTAGE_STRIP_FLAGS` when set (even empty), else binutils' safe and default flags
+pub fn strip_flags(portage_strip_flags: Option<&str>) -> Vec<String> {
+    portage_strip_flags
+        .unwrap_or(
+            "--strip-unneeded -N __gentoo_check_ldflags__ \
+             -R .comment -R .GCC.command.line -R .note.gnu.gold-version",
+        )
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Default)]
@@ -244,13 +273,24 @@ pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<Pos
         {
             continue;
         }
-        if under_any(installed, &cfg.strip_exclude) {
+        if under_any(installed, &cfg.strip_exclude)
+            || cfg.strip_mask.iter().any(|m| m.matches(installed.as_str()))
+        {
             continue;
         }
         let Ok(meta) = std::fs::symlink_metadata(on_disk.as_std_path()) else {
             continue;
         };
-        if !meta.is_file() || !is_strippable_elf(on_disk) {
+        if !meta.is_file() {
+            continue;
+        }
+        let elf = is_strippable_elf(on_disk);
+        // Archive members are not final links, so splitdebug keeps their debug info in place.
+        let archive = !elf
+            && cfg.split_debug.is_none()
+            && installed.as_str().ends_with(".a")
+            && is_ar_archive(on_disk);
+        if !elf && !archive {
             continue;
         }
 
@@ -264,25 +304,23 @@ pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<Pos
             p.set_mode(perms.mode() | 0o200);
             let _ = std::fs::set_permissions(on_disk.as_std_path(), p);
         }
-        let status = tool(&cfg.strip_cmd, cfg)
-            .args([
-                "--strip-unneeded",
-                "-N",
-                "__gentoo_check_ldflags__",
-                "-R",
-                ".comment",
-                "-R",
-                ".GCC.command.line",
-                "-R",
-                ".note.gnu.gold-version",
-            ])
-            .arg(on_disk.as_std_path())
-            .status()
-            .with_context(|| format!("running {}", cfg.strip_cmd))?;
+        let ok = if archive {
+            run(tool(&cfg.strip_cmd, cfg).arg("-g").arg(on_disk))?
+                && run(tool(&cfg.ranlib_cmd, cfg).arg(on_disk))?
+        } else {
+            if let Some(split) = &cfg.split_debug
+                && !installed.as_str().ends_with(".debug")
+            {
+                save_debug(image_dir, installed, on_disk, &perms, split, cfg)?;
+            }
+            run(tool(&cfg.strip_cmd, cfg)
+                .args(&cfg.strip_flags)
+                .arg(on_disk))?
+        };
         if !writable {
             let _ = std::fs::set_permissions(on_disk.as_std_path(), perms);
         }
-        if status.success() {
+        if ok {
             stats.stripped += 1;
         } else {
             crate::style::warn_line!("estrip: {} failed on {installed}", cfg.strip_cmd);
@@ -290,6 +328,62 @@ pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<Pos
     }
 
     Ok(stats)
+}
+
+fn run(cmd: &mut std::process::Command) -> Result<bool> {
+    let status = cmd
+        .status()
+        .with_context(|| format!("running {}", cmd.get_program().display()))?;
+    Ok(status.success())
+}
+
+/// Copy `on_disk`'s debug info to the splitdebug tree and link the object to it
+fn save_debug(
+    image_dir: &Utf8Path,
+    installed: &Utf8Path,
+    on_disk: &Utf8Path,
+    perms: &std::fs::Permissions,
+    split: &SplitDebug,
+    cfg: &PostProcess,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let rel = format!("{}{installed}.debug", split.dir);
+    let debug = image_dir.join(rel.trim_start_matches('/'));
+    if let Some(dir) = debug.parent() {
+        std::fs::create_dir_all(dir.as_std_path()).with_context(|| format!("creating {dir}"))?;
+    }
+    let mut keep = tool(&cfg.objcopy_cmd, cfg);
+    keep.arg("--only-keep-debug");
+    if split.compress {
+        keep.arg("--compress-debug-sections");
+    }
+    if !run(keep.arg(on_disk).arg(&debug))? {
+        crate::style::warn_line!("estrip: {} could not split {installed}", cfg.objcopy_cmd);
+        return Ok(());
+    }
+    // A setuid/setgid object's symbols stay unreadable to group and others.
+    if let Ok(meta) = std::fs::metadata(debug.as_std_path()) {
+        let mut mode = meta.permissions().mode() & !0o113;
+        if perms.mode() & 0o6000 != 0 {
+            mode &= !0o044;
+        }
+        let _ =
+            std::fs::set_permissions(debug.as_std_path(), std::fs::Permissions::from_mode(mode));
+    }
+    if !run(tool(&cfg.objcopy_cmd, cfg)
+        .arg(format!("--add-gnu-debuglink={debug}"))
+        .arg(on_disk))?
+    {
+        crate::style::warn_line!("estrip: {} could not link {installed}", cfg.objcopy_cmd);
+    }
+    Ok(())
+}
+
+fn is_ar_archive(path: &Utf8Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 8];
+    std::fs::File::open(path.as_std_path()).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
+        && &magic == b"!<arch>\n"
 }
 
 /// Shared libraries directly in a library directory are made executable, static archives and
@@ -374,9 +468,124 @@ mod tests {
             compress_flags: vec!["-9".into()],
             strip: StripMode::All,
             strip_exclude: vec![],
+            strip_mask: vec![],
             strip_cmd: "strip".into(),
+            strip_flags: strip_flags(None),
+            objcopy_cmd: "objcopy".into(),
+            ranlib_cmd: "ranlib".into(),
+            split_debug: None,
             path: None,
         }
+    }
+
+    /// Fake strip/objcopy/ranlib that log their argv; objcopy writes its output file.
+    fn fake_tools(dir: &Utf8Path) -> (PostProcess, Utf8PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join("argv.log");
+        for name in ["strip", "objcopy", "ranlib"] {
+            let script = dir.join(format!("fake-{name}"));
+            let mut body = format!("#!/bin/sh\necho \"{name} $*\" >> '{log}'\n");
+            if name == "objcopy" {
+                body.push_str("[ \"$1\" = --only-keep-debug ] && for a; do out=$a; done && : > \"$out\"\nexit 0\n");
+            }
+            write(&script, body.as_bytes());
+            std::fs::set_permissions(script.as_std_path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let mut cfg = default_cfg();
+        cfg.strip_cmd = dir.join("fake-strip").into_string();
+        cfg.objcopy_cmd = dir.join("fake-objcopy").into_string();
+        cfg.ranlib_cmd = dir.join("fake-ranlib").into_string();
+        (cfg, log)
+    }
+
+    fn tiny_elf() -> Vec<u8> {
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[5] = 1;
+        elf[16] = 3;
+        elf
+    }
+
+    fn logged(log: &Utf8Path, image: &Utf8Path) -> Vec<String> {
+        std::fs::read_to_string(log.as_std_path())
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.replace(&format!("{image}/"), ""))
+            .collect()
+    }
+
+    #[test]
+    fn strip_flags_default_unless_portage_strip_flags_is_set() {
+        assert_eq!(strip_flags(None)[0], "--strip-unneeded");
+        assert_eq!(strip_flags(Some("-s -v")), ["-s", "-v"]);
+        assert!(strip_flags(Some("")).is_empty());
+    }
+
+    #[test]
+    fn archives_are_stripped_of_debug_info_and_reindexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let (mut cfg, log) = fake_tools(&root);
+        cfg.strip_flags = vec!["--custom".into()];
+        let image = root.join("image");
+        write(&image.join("usr/lib64/libx.a"), b"!<arch>\nmembers");
+        write(&image.join("usr/lib64/libx.so"), &tiny_elf());
+        write(&image.join("usr/lib64/fake.a"), b"not an archive");
+
+        assert_eq!(post_process_image(&image, &cfg).unwrap().stripped, 2);
+        let mut calls = logged(&log, &image);
+        calls.sort();
+        assert_eq!(
+            calls,
+            [
+                "ranlib usr/lib64/libx.a",
+                "strip --custom usr/lib64/libx.so",
+                "strip -g usr/lib64/libx.a",
+            ]
+        );
+    }
+
+    #[test]
+    fn splitdebug_saves_debug_info_before_stripping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let (mut cfg, log) = fake_tools(&root);
+        cfg.strip_flags = vec![];
+        cfg.split_debug = Some(SplitDebug {
+            dir: Utf8PathBuf::from("/usr/lib/debug"),
+            compress: true,
+        });
+        let image = root.join("image");
+        write(&image.join("usr/bin/tool"), &tiny_elf());
+        write(&image.join("usr/lib64/libx.a"), b"!<arch>\nmembers");
+
+        assert_eq!(post_process_image(&image, &cfg).unwrap().stripped, 1);
+        assert!(image.join("usr/lib/debug/usr/bin/tool.debug").is_file());
+        assert_eq!(
+            logged(&log, &image),
+            [
+                "objcopy --only-keep-debug --compress-debug-sections usr/bin/tool \
+                 usr/lib/debug/usr/bin/tool.debug",
+                "objcopy --add-gnu-debuglink=usr/lib/debug/usr/bin/tool.debug usr/bin/tool",
+                "strip usr/bin/tool",
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_mask_excludes_matching_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let (mut cfg, log) = fake_tools(&root);
+        cfg.strip_mask = vec![glob::Pattern::new("*/plugins/*.so").unwrap()];
+        let image = root.join("image");
+        write(&image.join("usr/lib64/app/plugins/a.so"), &tiny_elf());
+        write(&image.join("usr/lib64/libapp.so"), &tiny_elf());
+
+        assert_eq!(post_process_image(&image, &cfg).unwrap().stripped, 1);
+        assert_eq!(logged(&log, &image).len(), 1);
+        assert!(logged(&log, &image)[0].ends_with("usr/lib64/libapp.so"));
     }
 
     #[test]

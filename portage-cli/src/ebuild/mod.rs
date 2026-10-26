@@ -2059,18 +2059,50 @@ fn post_process_after_install(
 
     // Conservative RESTRICT check: a conditional `use? ( strip )` counts as
     // restricted; the cost is only an unstripped binary.
-    let restrict_strip = shell
-        .get_var("RESTRICT")
-        .unwrap_or_default()
-        .split_whitespace()
-        .any(|t| t == "strip");
+    let restricted = |token: &str| {
+        shell
+            .get_var("RESTRICT")
+            .unwrap_or_default()
+            .split_whitespace()
+            .any(|t| t == token)
+    };
     let strip = if features.contains("nostrip") {
         postprocess::StripMode::Disabled
-    } else if restrict_strip {
+    } else if restricted("strip") {
         // dostrip <path> opts paths back in under RESTRICT=strip.
         postprocess::StripMode::Only(to_paths(paths.strip))
     } else {
         postprocess::StripMode::All
+    };
+
+    let var = |name: &str| shell.get_var(name).filter(|s| !s.is_empty());
+    let strip_cmd = var("STRIP").unwrap_or_else(|| "strip".to_string());
+    // The strip's sibling tool, so `x86_64-pc-linux-gnu-strip` pairs with `x86_64-pc-linux-gnu-objcopy`.
+    let sibling = |name: &str| {
+        let prefix = strip_cmd.strip_suffix("strip").unwrap_or("");
+        format!("{prefix}{name}")
+    };
+    let split_debug = (features.contains("splitdebug") && !restricted("splitdebug")).then(|| {
+        postprocess::SplitDebug {
+            dir: Utf8PathBuf::from(format!(
+                "/usr/lib/debug{}",
+                shell.get_var("EPREFIX").unwrap_or_default()
+            )),
+            compress: features.contains("compressdebug"),
+        }
+    });
+    let no_dostrip = shell
+        .get_var("EAPI")
+        .and_then(|e| e.parse::<portage_metadata::Eapi>().ok())
+        .is_some_and(|e| e < portage_metadata::Eapi::Seven);
+    let strip_mask = if no_dostrip {
+        var("STRIP_MASK")
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|g| glob::Pattern::new(g).ok())
+            .collect()
+    } else {
+        Vec::new()
     };
 
     let cfg = postprocess::PostProcess {
@@ -2080,10 +2112,12 @@ fn post_process_after_install(
         compress_flags,
         strip,
         strip_exclude: to_paths(paths.strip_exclude),
-        strip_cmd: shell
-            .get_var("STRIP")
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "strip".to_string()),
+        strip_mask,
+        strip_flags: postprocess::strip_flags(shell.get_var("PORTAGE_STRIP_FLAGS").as_deref()),
+        objcopy_cmd: var("OBJCOPY").unwrap_or_else(|| sibling("objcopy")),
+        ranlib_cmd: var("RANLIB").unwrap_or_else(|| sibling("ranlib")),
+        strip_cmd,
+        split_debug,
         path: shell.get_var("PATH"),
     };
 
