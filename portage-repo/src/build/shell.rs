@@ -2370,7 +2370,7 @@ impl EbuildShell {
     /// Set `IUSE_EFFECTIVE` from IUSE + profile implicit/expand values (PMS 11.1.1)
     /// and narrow `USE` to it
     ///
-    /// `USE` is rebuilt from the full configured set each call, so a shell reused
+    /// With plan flags set, `USE` is rebuilt from them each call, so a shell reused
     /// for another ebuild does not inherit the previous one's narrowing.
     ///
     /// Undefined during metadata generation; call this on the build-phase
