@@ -45,9 +45,16 @@ pub(super) fn reduce_env(env: &mut EbuildEnv, target: &Vdb, running: &Vdb) {
     deps(&mut env.idepend, &[target]);
 }
 
-/// Take the reduced fields from a binpkg's metadata, already bound on its build host
+/// Take the reduced fields and the build settings from a binpkg's metadata, as on its build host
 pub(super) fn take_recorded(env: &mut EbuildEnv, metadata: &BTreeMap<String, String>) {
     let fields = [
+        ("CBUILD", &mut env.cbuild),
+        ("CFLAGS", &mut env.cflags),
+        ("CHOST", &mut env.chost),
+        ("CXXFLAGS", &mut env.cxxflags),
+        ("FEATURES", &mut env.features),
+        ("LDFLAGS", &mut env.ldflags),
+        ("RUSTFLAGS", &mut env.rustflags),
         ("LICENSE", &mut env.license),
         ("RESTRICT", &mut env.restrict),
         ("PROPERTIES", &mut env.properties),
