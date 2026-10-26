@@ -34,7 +34,9 @@ pub struct PostProcess {
     pub strip_cmd: String,
     /// Flags for executables and shared objects, see [`strip_flags`]
     pub strip_flags: Vec<String>,
+    /// `OBJCOPY`, else STRIP's sibling `objcopy`
     pub objcopy_cmd: String,
+    /// `RANLIB`, else STRIP's sibling `ranlib`
     pub ranlib_cmd: String,
     /// FEATURES=splitdebug: where debug files go, as an installed path
     pub split_debug: Option<SplitDebug>,

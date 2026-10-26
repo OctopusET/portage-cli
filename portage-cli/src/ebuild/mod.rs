@@ -954,12 +954,18 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
 
 /// Inputs for [`pkg_pretend`]
 pub struct PkgPretend<'a> {
+    /// The repository ebuild, used when no binpkg is reused
     pub ebuild_path: &'a Utf8Path,
+    /// The package being checked
     pub cpv: &'a portage_atom::Cpv,
+    /// The resolved USE flags
     pub use_flags:
         &'a [portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
+    /// Parent of the per-package build directory
     pub work_base: &'a Utf8Path,
+    /// `ROOT` of the merge
     pub root: &'a Utf8Path,
+    /// Config root, `SYSROOT`, `EPREFIX` and `BROOT` for the phase
     pub roots: RootContext<'a>,
     /// The binary package the merge will install, whose saved `pkg_pretend` runs
     pub binpkg: Option<&'a Utf8Path>,

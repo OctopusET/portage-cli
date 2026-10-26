@@ -701,7 +701,7 @@ fn stage_accepted_container(
 /// Used by the `-k`/`--usepkg` consumer to merge a pre-built package
 /// without compiling. Requires `tar` and `zstd` on `PATH`.
 ///
-/// `policy` is checked first (via [`verify_container_signature`]) — a
+/// `policy` is checked first (via [`verify_container_signature`]): a
 /// signature-required-but-missing or fails-to-verify container is rejected
 /// before any extraction happens, and so is a signed one with no keyring to
 /// check it against unless `policy.ignore_signature` is set.
