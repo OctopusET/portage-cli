@@ -502,32 +502,80 @@ pub(crate) fn require_ask_tty() -> Result<()> {
     }
 }
 
-/// `action` is the full description ("merge these 3 package(s)") — the
+/// Ask whether to `action`, the full description ("merge these 3 package(s)") — the
 /// caller composes it, since what belongs in it (e.g. PMS 8.3.2 blocker
 /// victims a merge will also unmerge) is caller-specific; this just handles
 /// the prompt itself.
-pub(crate) fn confirm_action(action: &str) -> Result<bool> {
+///
+/// A "No" prints `>>> Quitting.` and fails with [`crate::error::Declined`].
+pub(crate) fn confirm_action(action: &str) -> Result<()> {
+    if ask_yes_no(&format!("\n>>> Would you like to {action}?"))? {
+        Ok(())
+    } else {
+        println!(">>> Quitting.");
+        Err(crate::error::Declined.into())
+    }
+}
+
+static ASK_ENTER_INVALID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--ask-enter-invalid`: an empty answer to an `--ask` prompt is not taken as "Yes"
+pub(crate) fn set_ask_enter_invalid(on: bool) {
+    ASK_ENTER_INVALID.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The answer `line` gives a Yes/No prompt: any case-insensitive prefix of either word, and an
+/// empty line is Yes unless `enter_invalid`
+fn parse_answer(line: &str, enter_invalid: bool) -> Option<bool> {
+    let line = line.trim_end_matches(['\n', '\r']);
+    if line.is_empty() && enter_invalid {
+        return None;
+    }
+    let prefix_of = |word: &str| {
+        word.get(..line.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(line))
+    };
+    if prefix_of("Yes") {
+        Some(true)
+    } else if prefix_of("No") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Ask `question` on the terminal until it gets a Yes or a No, as emerge's `--ask` does
+///
+/// End of input prints `Interrupted.` and fails with [`crate::error::Declined`].
+pub(crate) fn ask_yes_no(question: &str) -> Result<bool> {
     use std::io::Write;
 
     use crate::style::{C_CHOICE_DEFAULT, C_CHOICE_OTHER};
 
     require_ask_tty()?;
-    // "N" is the default (empty input / EOF -> no), so it gets
-    // PROMPT_CHOICE_DEFAULT's green, matching real portage's own
-    // `UserQuery.query` — the color follows which answer is the default,
-    // not a fixed "y is green" rule. Through anstream (not a bare `print!`)
-    // so the color strips itself when stdout is not a terminal.
+    let enter_invalid = ASK_ENTER_INVALID.load(std::sync::atomic::Ordering::Relaxed);
+    // Through anstream so the colors strip themselves when stdout is not a terminal.
     let mut out = anstream::stdout();
     let _ = write!(
         out,
-        "\n>>> Would you like to {action}? [{C_CHOICE_OTHER}y{C_CHOICE_OTHER:#}/{C_CHOICE_DEFAULT}N{C_CHOICE_DEFAULT:#}] "
+        "{question} [{C_CHOICE_DEFAULT}Yes{C_CHOICE_DEFAULT:#}/{C_CHOICE_OTHER}No{C_CHOICE_OTHER:#}] "
     );
-    let _ = out.flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        return Ok(false);
+    loop {
+        let _ = out.flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            println!("Interrupted.");
+            return Err(crate::error::Declined.into());
+        }
+        if let Some(answer) = parse_answer(&line, enter_invalid) {
+            return Ok(answer);
+        }
+        let _ = write!(
+            out,
+            "Sorry, response '{}' not understood. [{C_CHOICE_DEFAULT}Yes{C_CHOICE_DEFAULT:#}/{C_CHOICE_OTHER}No{C_CHOICE_OTHER:#}] ",
+            line.trim_end_matches(['\n', '\r'])
+        );
     }
-    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// Which [`portage_resolve::Roots`] a plan entry actually installs into
@@ -1782,6 +1830,23 @@ mod build_failure_tests {
             build_failure(&anyhow::anyhow!("fetch failed")),
             (None, None)
         );
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::parse_answer;
+
+    #[test]
+    fn answers_are_prefixes_and_enter_is_yes_unless_invalid() {
+        assert_eq!(parse_answer("\n", false), Some(true));
+        assert_eq!(parse_answer("\n", true), None);
+        assert_eq!(parse_answer("y\n", false), Some(true));
+        assert_eq!(parse_answer("YE\n", true), Some(true));
+        assert_eq!(parse_answer("n\n", false), Some(false));
+        assert_eq!(parse_answer("no", false), Some(false));
+        assert_eq!(parse_answer("x\n", false), None);
+        assert_eq!(parse_answer("yess\n", false), None);
     }
 }
 

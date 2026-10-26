@@ -70,6 +70,9 @@ fn main() {
         // change block); do it explicitly so nothing printed is lost.
         use std::io::Write;
         std::io::stdout().flush().ok();
+        if e.downcast_ref::<portage_cli::Declined>().is_some() {
+            std::process::exit(130);
+        }
         // A "changes needed" resolve, or an all-atoms-failed run, exits 1
         // quietly — the real explanation (change block / per-atom warnings)
         // is already printed, so a final generic `!!!` line would be noise,

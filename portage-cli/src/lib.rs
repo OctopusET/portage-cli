@@ -63,7 +63,7 @@ pub use activity::{
     estimate_remaining, estimate_remaining_with_blockers,
 };
 pub(crate) use emerge::{EmergeOpts, emerge_atoms};
-pub use error::{ConfigChangesNeeded, NoMatches, NoValidAtoms};
+pub use error::{ConfigChangesNeeded, Declined, NoMatches, NoValidAtoms};
 
 /// Dispatch one parsed invocation to its applet or the default emerge path
 pub async fn run(cli: &cli::Cli) -> error::Result<()> {
@@ -73,6 +73,7 @@ pub async fn run(cli: &cli::Cli) -> error::Result<()> {
     if privilege::will_build(cli) {
         interrupt::install();
     }
+    merge::set_ask_enter_invalid(cli.merge_flags().ask_enter_invalid);
     dispatch::run(cli).await
 }
 

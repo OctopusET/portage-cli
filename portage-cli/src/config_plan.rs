@@ -10,8 +10,6 @@
 //! regeneration equivalent of a merge plan. Shared between `crossdev` (cross
 //! sysroot config) and `setup` (`--local`/`--prefix` repos.conf/make.profile).
 
-use std::io::Write;
-
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -309,14 +307,9 @@ pub(crate) fn apply(
 /// wants the exact same "write these N config file(s)?" phrasing/TTY-gate
 /// rather than a second near-identical prompt.
 pub(crate) fn confirm_config_write(count: usize) -> Result<bool> {
-    crate::merge::require_ask_tty()?;
-    print!("\n>>> Would you like to write these {count} config file(s)? [y/N] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        return Ok(false);
-    }
-    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+    crate::merge::ask_yes_no(&format!(
+        "\n>>> Would you like to write these {count} config file(s)?"
+    ))
 }
 
 #[cfg(test)]

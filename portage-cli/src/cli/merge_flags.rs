@@ -27,6 +27,10 @@ pub struct MergeFlags {
     #[arg(short = 'a', long)]
     pub ask: bool,
 
+    /// Do not take an empty answer to an `--ask` prompt as "Yes"
+    #[arg(long)]
+    pub ask_enter_invalid: bool,
+
     /// Update installed packages to newest available versions
     #[arg(short = 'u', long)]
     pub update: bool,

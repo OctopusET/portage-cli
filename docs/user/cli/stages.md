@@ -33,6 +33,7 @@ How the solver and build scheduler behave.
   * `sudo`: Re-exec under `sudo` for real root (root-owned tree, real setuid)
   * `none`: No wrapping; run unprivileged (chowns best-effort, may not stick)
 * `-a, --ask` — Ask for confirmation before performing actions
+* `--ask-enter-invalid` — Do not take an empty answer to an `--ask` prompt as "Yes"
 * `-u, --update` — Update installed packages to newest available versions
 * `--autounmask-write` — Write required USE changes to /etc/portage/package.use/
 * `-1, --oneshot` — Build and install packages but do not add them to the world file

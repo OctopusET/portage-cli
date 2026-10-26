@@ -387,7 +387,7 @@ fn confirm_merge(
     verb: &str,
     outcome: &query::depgraph::DepgraphOutcome,
     skip_unmerge: bool,
-) -> Result<bool> {
+) -> Result<()> {
     let unmerge_count = if skip_unmerge {
         0
     } else {
@@ -782,10 +782,7 @@ async fn emerge_atoms_inner(
         if merge_flags.eta {
             print_eta(&outcome);
         }
-        if !confirm_merge(verb, &outcome, skip_unmerge)? {
-            println!(">>> Quitting.");
-            return Ok(());
-        }
+        confirm_merge(verb, &outcome, skip_unmerge)?;
     }
 
     // Persist enough to replay this invocation via `-r`/`--resume` if it
@@ -1512,12 +1509,10 @@ pub(crate) async fn run_unmerge_batch(
         return Ok(());
     }
 
-    if cli.merge_flags().ask
-        && !confirm_action(&format!("{verb} these {} package(s)", packages.len()))?
-    {
-        println!(">>> Quitting.");
-        return Ok(());
+    if cli.merge_flags().ask {
+        confirm_action(&format!("{verb} these {} package(s)", packages.len()))?;
     }
+
     execute_unmerge_batch(cli, vdb, packages, exclude, verb, gerund, true).await
 }
 

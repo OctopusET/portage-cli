@@ -1,5 +1,12 @@
 pub use anyhow::Result;
 
+/// The user answered "No" to an `--ask` prompt, or closed its input
+///
+/// The prompt already said so; the `em` entry point exits 130 quietly, as emerge does.
+#[derive(Debug, thiserror::Error)]
+#[error("declined at the --ask prompt")]
+pub struct Declined;
+
 /// A `--pretend` resolve that surfaced required USE/mask changes
 ///
 /// The detailed change block was already printed (by the depgraph), so this

@@ -191,7 +191,7 @@ $ em crossdev -a --prefix /opt/xp --target riscv64-unknown-linux-gnu --init-targ
 >>> config changes:
   update /opt/xp/etc/portage/repos.conf/crossdev.conf
 
->>> Would you like to write these 1 config file(s)? [y/N] y
+>>> Would you like to write these 1 config file(s)? [Yes/No] y
 >>> cross target riscv64-unknown-linux-gnu ready
     ...
 ```
