@@ -23,6 +23,7 @@ mod git_cmd;
 mod git_gix;
 mod rsync_cmd;
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
@@ -46,35 +47,26 @@ pub async fn run(repos: &[String], globals: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let portage_dir = globals
-        .roots()
-        .config()
-        .unwrap_or(Utf8Path::new("/"))
-        .join("etc/portage");
+    let roots = globals.roots();
+    let config_root = roots.config().unwrap_or(Utf8Path::new("/"));
+    let portage_dir = config_root.join("etc/portage");
+    let configroot_env = format!("{}/", config_root.as_str().trim_end_matches('/'));
     let repo_hooks = postsync_hooks(&portage_dir.join("repo.postsync.d"));
-    let mut any_synced = false;
+    let mut hooked: HashSet<&str> = HashSet::new();
     let mut failed = 0usize;
     for entry in &selected {
-        match sync_one(entry, globals).await {
+        let changed = match sync_one(entry, globals).await {
             Ok(SyncOutcome::Skipped(why)) => {
                 if !globals.quiet() {
                     info_repo(&entry.name, &format!("Skipping — {why}"));
                 }
+                continue;
             }
             Ok(SyncOutcome::Pretend(msg)) => {
                 info_repo(&entry.name, &format!("Would sync — {msg}"));
+                continue;
             }
             Ok(SyncOutcome::Synced { changed }) => {
-                any_synced = true;
-                let uri = entry.sync_uri.as_deref().unwrap_or("").trim();
-                let location = entry.location.as_path().map(|p| p.as_os_str());
-                for hook in &repo_hooks {
-                    let mut cmd = std::process::Command::new(hook);
-                    cmd.arg(entry.name.as_str())
-                        .arg(uri)
-                        .arg(location.unwrap_or_default());
-                    run_hook(hook, cmd);
-                }
                 if !globals.quiet() {
                     if changed {
                         info_repo(&entry.name, "Synced (updated)");
@@ -82,17 +74,35 @@ pub async fn run(repos: &[String], globals: &Cli) -> Result<()> {
                         info_repo(&entry.name, "Synced (already up to date)");
                     }
                 }
+                changed
             }
             Err(e) => {
                 error_repo(&entry.name, &format!("{e:#}"));
                 failed += 1;
+                false
             }
+        };
+        if !runs_repo_hooks(entry, changed, &hooked) {
+            continue;
+        }
+        hooked.insert(entry.name.as_str());
+        let uri = entry.sync_uri.as_deref().unwrap_or("").trim();
+        let location = entry.location.as_path().map(|p| p.as_os_str());
+        for hook in &repo_hooks {
+            let mut cmd = std::process::Command::new(hook);
+            cmd.arg(entry.name.as_str())
+                .arg(uri)
+                .arg(location.unwrap_or_default())
+                .env("PORTAGE_CONFIGROOT", &configroot_env);
+            run_hook(hook, cmd);
         }
     }
 
-    if any_synced {
+    if !hooked.is_empty() {
         for hook in postsync_hooks(&portage_dir.join("postsync.d")) {
-            run_hook(&hook, std::process::Command::new(&hook));
+            let mut cmd = std::process::Command::new(&hook);
+            cmd.env("PORTAGE_CONFIGROOT", &configroot_env);
+            run_hook(&hook, cmd);
         }
     }
 
@@ -100,6 +110,23 @@ pub async fn run(repos: &[String], globals: &Cli) -> Result<()> {
         bail!("{failed} of {} repo(s) failed to sync", selected.len());
     }
     Ok(())
+}
+
+/// Whether `entry`'s repo.postsync.d hooks run after a sync attempt, failed ones included
+///
+/// `sync-hooks-only-on-change` limits them to a changed repo, or one whose master's hooks ran.
+fn runs_repo_hooks(entry: &RepoEntry, changed: bool, hooked: &HashSet<&str>) -> bool {
+    let only_on_change = entry
+        .sync_options
+        .get("sync-hooks-only-on-change")
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "yes" | "true"));
+    !only_on_change
+        || changed
+        || entry
+            .masters
+            .iter()
+            .flatten()
+            .any(|m| hooked.contains(m.as_str()))
 }
 
 /// The executable files under a `postsync.d`-style directory, in Portage's walk order
@@ -552,6 +579,24 @@ sync-uri = https://example/local.git
     #[test]
     fn portage_uid_is_none_without_a_matching_entry() {
         assert_eq!(parse_portage_uid("root:x:0:0:root:/root:/bin/bash\n"), None);
+    }
+
+    #[test]
+    fn repo_hooks_honour_sync_hooks_only_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("repos.conf");
+        write(
+            &conf,
+            "[gentoo]\nlocation = /a\n\n[ov]\nlocation = /b\nmasters = gentoo\n\
+             sync-hooks-only-on-change = yes\n",
+        );
+        let rc = ReposConf::load_from(&[&conf]).unwrap();
+        let (gentoo, ov) = (rc.find("gentoo").unwrap(), rc.find("ov").unwrap());
+        let none = HashSet::new();
+        assert!(runs_repo_hooks(gentoo, false, &none));
+        assert!(!runs_repo_hooks(ov, false, &none));
+        assert!(runs_repo_hooks(ov, true, &none));
+        assert!(runs_repo_hooks(ov, false, &HashSet::from(["gentoo"])));
     }
 
     #[test]
