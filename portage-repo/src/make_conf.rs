@@ -662,10 +662,7 @@ fn extend_to_newline(src: &str, end: usize) -> usize {
     }
 }
 
-/// Derive a [`Var`] from an AST `Assignment`
-///
-/// Computes the value span from `assignment.loc` and the name length
-/// (avoids relying on `Word.loc` which may not always be populated).
+/// Expand `$X`/`${X}` in `raw` from `vars`, unset names expanding empty
 fn expand_vars(raw: &str, vars: &std::collections::HashMap<&str, String>) -> String {
     let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let mut out = String::with_capacity(raw.len());
@@ -674,9 +671,21 @@ fn expand_vars(raw: &str, vars: &std::collections::HashMap<&str, String>) -> Str
         out.push_str(&rest[..i]);
         let tail = &rest[i + 1..];
         if rest.as_bytes()[i] == b'\\' {
-            let n = tail.chars().next().map_or(0, char::len_utf8);
-            out.push_str(&tail[..n]);
-            rest = &tail[n..];
+            // Like bash on a sourced assignment: only `\$`, `\\` and an escaped newline lose the `\`.
+            let Some(c) = tail.chars().next() else {
+                out.push('\\');
+                rest = tail;
+                continue;
+            };
+            match c {
+                '$' | '\\' => out.push(c),
+                '\n' => {}
+                _ => {
+                    out.push('\\');
+                    out.push(c);
+                }
+            }
+            rest = &tail[c.len_utf8()..];
             continue;
         }
         let (name, after) = if let Some(braced) = tail.strip_prefix('{')
@@ -699,6 +708,10 @@ fn expand_vars(raw: &str, vars: &std::collections::HashMap<&str, String>) -> Str
     out
 }
 
+/// Derive a [`Var`] from an AST `Assignment`
+///
+/// Computes the value span from `assignment.loc` and the name length
+/// (avoids relying on `Word.loc` which may not always be populated).
 fn var_from_assignment(src: &str, a: &brush_parser::ast::Assignment) -> Option<Var> {
     // Skip array assignments (uncommon in make.conf, hard to edit safely).
     if matches!(a.value, AssignmentValue::Array(_)) {
@@ -779,6 +792,8 @@ mod tests {
         assert_eq!(mc.get_expanded("DISTDIR", &seed).as_deref(), Some("/p/d"));
         assert_eq!(mc.get_expanded("B", &seed).as_deref(), Some("x/y"));
         assert_eq!(mc.get_expanded("C", &seed).as_deref(), Some("$A"));
+        let mc = parse("D=\"/a\\b\\$A\\\\c\"\n");
+        assert_eq!(mc.get_expanded("D", &seed).as_deref(), Some("/a\\b$A\\c"));
         assert_eq!(mc.get_expanded("EPREFIX", &seed), None);
     }
 
