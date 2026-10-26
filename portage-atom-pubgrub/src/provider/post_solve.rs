@@ -97,7 +97,10 @@ impl PortageDependencyProvider {
             for ud in &constraint.use_deps {
                 // Parent's flag state: currently active OR will be enabled after
                 // this build run (already recorded in by_target.required_enabled).
-                let parent_flag_enabled = if parent_is_installed {
+                // An || branch's constraints sit on its choice node, which has no USE of its own.
+                let parent_flag_enabled = if parent.is_virtual() {
+                    constraint.parent_enabled.contains(&ud.flag)
+                } else if parent_is_installed {
                     self.installed_use
                         .get(parent)
                         .is_some_and(|u| u.contains(&ud.flag))

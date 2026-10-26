@@ -1429,6 +1429,50 @@ fn or_group_conditional_use_dep_follows_parent_use() {
     assert_eq!(picked(false), "x", "USE=-f puts no demand on x");
 }
 
+// virtual/opengl: the only installable branch of `|| ( x[f?] missing )` still owes x USE=f.
+#[test]
+fn or_branch_conditional_use_dep_violation_is_reported() {
+    let pkg = |cpn: &str| PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0"));
+    let f = Interned::intern("f");
+    let mut repo = InMemoryRepository::new();
+    repo.add_version_with_iuse(
+        portage_atom::Cpv::parse("a/x-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        vec![f],
+        empty_deps(),
+    );
+    repo.add_package_versions(
+        portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+        PackageVersions {
+            slot: Some(Interned::intern("0")),
+            subslot: None,
+            repo: None,
+            iuse: vec![f],
+            iuse_defaults: HashMap::from([(f, IUseDefault::Enabled)]),
+            deps: PackageDeps {
+                rdepend: (DepEntry::parse("|| ( a/x[f?] a/missing )").unwrap()).into(),
+                ..empty_deps()
+            },
+            required_use: None,
+            empty_any_of_matches: true,
+            needs_unmask: false,
+            live: false,
+        },
+    );
+    let mut provider = PortageDependencyProvider::new(repo);
+    let solution = provider
+        .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
+        .unwrap();
+    assert!(solution.get(&pkg("a/x")).is_some());
+    let x = provider
+        .use_flag_requirements()
+        .iter()
+        .find(|r| r.package == pkg("a/x"))
+        .expect("x[f?] with consumer USE=f needs x USE=f");
+    assert_eq!(x.required_enabled, vec![f]);
+}
+
 // Two slotted atoms of one package in a branch are separate demands: one slot cannot excuse
 // the other the way the slot copies of a single unslotted atom do.
 #[test]
