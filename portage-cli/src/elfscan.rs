@@ -54,7 +54,7 @@ pub struct ElfInfo {
     pub machine: &'static str,
     /// Portage multilib category (e.g. `x86_64`)
     pub category: String,
-    /// `DT_SONAME`, if any
+    /// `DT_SONAME`, or the file name of a shared object that lacks one
     pub soname: Option<String>,
     /// `DT_RPATH` / `DT_RUNPATH`, if any
     pub rpath: Option<String>,
@@ -81,7 +81,11 @@ pub(crate) fn scan_file(path: &Path) -> Option<ElfInfo> {
     if mmap.len() < 4 || &mmap[..4] != b"\x7fELF" {
         return None;
     }
-    parse_elf(&mmap)
+    let (mut info, shared_object) = parse_elf(&mmap)?;
+    if info.soname.is_none() && shared_object {
+        info.soname = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    }
+    Some(info)
 }
 
 /// Walk `image_dir` and collect ELF link metadata for every dynamic ELF object
@@ -229,9 +233,9 @@ pub fn assemble_scan(entries: &[(String, ElfInfo)]) -> ElfScan {
     scan
 }
 
-/// Parse one file as an ELF, returning its link metadata, or `None` when it
-/// isn't a dynamic ELF.
-fn parse_elf(data: &[u8]) -> Option<ElfInfo> {
+/// Parse one file as an ELF, returning its link metadata and whether it is a
+/// shared object (not a PIE executable), or `None` when it isn't a dynamic ELF.
+fn parse_elf(data: &[u8]) -> Option<(ElfInfo, bool)> {
     match FileKind::parse(data).ok()? {
         FileKind::Elf32 => extract::<elf::FileHeader32<Endianness>>(data),
         FileKind::Elf64 => extract::<elf::FileHeader64<Endianness>>(data),
@@ -239,7 +243,7 @@ fn parse_elf(data: &[u8]) -> Option<ElfInfo> {
     }
 }
 
-fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<ElfInfo> {
+fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<(ElfInfo, bool)> {
     let header = Elf::parse(data).ok()?;
     let endian = header.endian().ok()?;
     let machine = header.e_machine(endian);
@@ -247,6 +251,10 @@ fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<ElfInfo>
     let (machine_name, category) = arch(machine, is_64);
 
     let segments = header.program_headers(endian, data).ok()?;
+    let has_interp = segments
+        .iter()
+        .any(|ph| ph.p_type(endian) == elf::PT_INTERP);
+    let mut pie_flag = false;
     let dynamic = segments
         .iter()
         .find_map(|ph| ph.dynamic(endian, data).ok().flatten())?;
@@ -262,6 +270,10 @@ fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<ElfInfo>
         match d.tag(endian) {
             elf::DT_STRTAB => strtab_addr = Some(d.d_val(endian).into()),
             elf::DT_STRSZ => strsz = Some(d.d_val(endian).into()),
+            elf::DT_FLAGS_1 => {
+                let flags: u64 = d.d_val(endian).into();
+                pie_flag = flags & elf::DF_1_PIE.0 != 0;
+            }
             _ => {}
         }
     }
@@ -292,13 +304,16 @@ fn extract<Elf: FileHeader<Endian = Endianness>>(data: &[u8]) -> Option<ElfInfo>
             _ => {}
         }
     }
-    Some(ElfInfo {
+    // file(1)'s "shared object" test, which portage uses to infer an implicit soname.
+    let shared_object = header.e_type(endian) == elf::ET_DYN && !has_interp && !pie_flag;
+    let info = ElfInfo {
         machine: machine_name,
         category,
         soname,
         rpath,
         needed,
-    })
+    };
+    Some((info, shared_object))
 }
 
 /// Map `DT_STRTAB` virtual address (+ `DT_STRSZ`) into a file-backed slice via
@@ -448,6 +463,84 @@ mod tests {
         std::fs::write(&p, &data).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(scan_file(&p).is_none());
+    }
+
+    /// Minimal x86_64 ELF with one `DT_NEEDED`, optional `DT_SONAME` and `PT_INTERP`.
+    fn mini_elf(e_type: u16, interp: bool, soname: Option<&str>) -> Vec<u8> {
+        let mut strtab = b"\0libc.so.6\0".to_vec();
+        let soname_off = soname.map(|s| {
+            let off = strtab.len() as u64;
+            strtab.extend_from_slice(s.as_bytes());
+            strtab.push(0);
+            off
+        });
+        let phnum: u64 = if interp { 3 } else { 2 };
+        let str_off = 64 + 56 * phnum;
+        let dyn_off = (str_off + strtab.len() as u64).next_multiple_of(8);
+        let mut dyns = vec![(5u64, str_off), (10, strtab.len() as u64), (1, 1)];
+        if let Some(off) = soname_off {
+            dyns.push((14, off));
+        }
+        dyns.push((0, 0));
+        let total = dyn_off + 16 * dyns.len() as u64;
+
+        let mut b = Vec::new();
+        b.extend_from_slice(b"\x7fELF\x02\x01\x01");
+        b.resize(16, 0);
+        b.extend_from_slice(&e_type.to_le_bytes());
+        b.extend_from_slice(&62u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&64u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        for v in [64u16, 56, phnum as u16, 64, 0, 0] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        let ph = |b: &mut Vec<u8>, p_type: u32, off: u64, size: u64| {
+            b.extend_from_slice(&p_type.to_le_bytes());
+            b.extend_from_slice(&4u32.to_le_bytes());
+            for v in [off, off, off, size, size, 8] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+        };
+        ph(&mut b, 1, 0, total);
+        ph(&mut b, 2, dyn_off, 16 * dyns.len() as u64);
+        if interp {
+            ph(&mut b, 3, 1, 9);
+        }
+        b.extend_from_slice(&strtab);
+        b.resize(dyn_off as usize, 0);
+        for (tag, val) in dyns {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn shared_object_without_dt_soname_provides_its_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("usr/lib64");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("plugin.so"), mini_elf(3, false, None)).unwrap();
+        std::fs::write(
+            lib.join("libnamed.so"),
+            mini_elf(3, false, Some("libnamed.so.1")),
+        )
+        .unwrap();
+        std::fs::write(lib.join("pie"), mini_elf(3, true, None)).unwrap();
+
+        let scan = scan_image(Utf8Path::from_path(tmp.path()).unwrap());
+        assert_eq!(
+            scan.needed_elf2,
+            [
+                "X86_64;/usr/lib64/libnamed.so;libnamed.so.1;;libc.so.6;x86_64",
+                "X86_64;/usr/lib64/pie;;;libc.so.6;x86_64",
+                "X86_64;/usr/lib64/plugin.so;plugin.so;;libc.so.6;x86_64",
+            ]
+        );
+        assert_eq!(scan.provides, ["x86_64: libnamed.so.1 plugin.so"]);
     }
 
     #[test]
