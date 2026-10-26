@@ -76,6 +76,11 @@ needed under the default profile).
   new dirs did not get the image's mode.
 - done `c0506725`: info dir index regenerated after unmerges too.
 - SIZE: portage measures `${D}` before compression, em after; left as is.
+- done upstream `84572e40`: binpkgs go to `PKGDIR/<cat>/<pn>/<pf>-<id>.gpkg.tar`, as emerge writes.
+- `Packages` index: em's header has only CHOST/VERSION/PACKAGES/TIMESTAMP (emerge adds ACCEPT_*,
+  ARCH, CBUILD, FEATURES, USE, USE_EXPAND*, PROFILE, ...); entries carry DESC, CFLAGS/CXXFLAGS/LDFLAGS,
+  BUILD_ENV_KEY and `SLOT: 0`, but no REPO_REVISIONS; no `Packages.gz` (compress-index, D3);
+  extra `.em-pkgdir.lock`.
 
 ## Follow-ups left by the fix batches
 
