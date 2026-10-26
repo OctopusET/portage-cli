@@ -628,8 +628,9 @@ only a package's own facts):
 
 - **Level A — validate & report (default).** `RequiredUseExpr::is_satisfied` /
   `unsatisfied` (in `portage-metadata`) evaluate each planned package's
-  constraint against its effective USE; violations are reported as an advisory
-  warning, matching Portage's default "fix your USE flags" behaviour. This is a
+  constraint against its effective USE. As emerge does, only the first
+  violation is reported, in graph-add order (targets first, then their deps),
+  and the `package.use` advisory and `--ask` prompt are skipped. This is a
   purely local, post-solve check, so it lives in the cli (`required_use.rs`)
   beside `conflicts.rs` — it needs no solver state, and therefore the solver
   crate does **not** depend on `portage-metadata`.
@@ -779,6 +780,9 @@ configured USE. Under `-K`, where a binpkg is installed and shown with its own U
 resolves that binpkg's dependencies instead. Rejected binpkgs get no "ignored binary packages" notice.
 Under `-pK`, a package with no acceptable binpkg shows as `[ebuild]` and fails only at merge
 time, where emerge fails the resolve.
+
+The `-p` status column never shows `g` (remote binary package): the preview
+does not query binhosts.
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
