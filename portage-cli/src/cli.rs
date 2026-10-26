@@ -2200,6 +2200,9 @@ pub struct WorkerArgs {
     /// `FEATURES=binpkg-request-signature`.
     #[arg(long)]
     pub force_verify_signature: bool,
+    /// `--nodeps`: the merge takes over no blocked package's files
+    #[arg(long)]
+    pub ignore_blockers: bool,
     #[arg(long)]
     pub buildpkg: bool,
     /// Parent activity session id — live FS phase updates only

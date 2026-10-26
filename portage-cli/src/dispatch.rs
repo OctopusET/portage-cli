@@ -100,6 +100,7 @@ impl RunAsync<&cli::Cli> for WorkerArgs {
             },
             binpkg: self.binpkg.as_deref(),
             force_verify_signature: self.force_verify_signature,
+            ignore_blockers: self.ignore_blockers,
             buildpkg: self.buildpkg,
             quiet: self.quiet,
             activity_job_id: self.activity_job_id.as_deref(),

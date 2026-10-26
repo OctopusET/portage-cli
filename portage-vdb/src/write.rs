@@ -283,6 +283,30 @@ impl Vdb {
         Ok(())
     }
 
+    /// Drop `paths` from `pkg`'s CONTENTS, as portage does for the files of a blocked package that
+    /// the blocking one now owns, and return the entries left
+    pub fn remove_from_contents(
+        &self,
+        pkg: &InstalledPackage,
+        paths: &std::collections::HashSet<&Utf8Path>,
+    ) -> Result<Vec<ContentsEntry>> {
+        let mut contents = pkg.contents()?;
+        let before = contents.len();
+        contents.retain(|e| !paths.contains(e.path.as_path()));
+        if contents.len() == before {
+            return Ok(contents);
+        }
+        let path = pkg.path().join("CONTENTS");
+        let tmp = pkg.path().join(format!(".CONTENTS.{}", std::process::id()));
+        let io = |path: &Utf8Path| {
+            let path = path.to_owned();
+            move |source| Error::Io { path, source }
+        };
+        std::fs::write(&tmp, format_contents(&contents)).map_err(io(&tmp))?;
+        std::fs::rename(&tmp, &path).map_err(io(&path))?;
+        Ok(contents)
+    }
+
     /// Find the installed package in the same main slot as the given CPN, if any
     ///
     /// Used before a merge to detect slot conflicts that require replacing the

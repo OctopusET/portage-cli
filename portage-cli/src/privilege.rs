@@ -228,6 +228,8 @@ pub struct WorkerArgs<'a> {
     /// of `FEATURES=binpkg-request-signature`. See `ebuild::PhaseGroupRun`'s
     /// field of the same name.
     pub force_verify_signature: bool,
+    /// See `ebuild::BuildAndMerge::ignore_blockers`
+    pub ignore_blockers: bool,
     pub buildpkg: bool,
     pub quiet: bool,
     /// Activity session id (same as parent `SessionStart.job_id`)
@@ -402,6 +404,9 @@ fn build_worker_command(
     }
     if args.force_verify_signature {
         cmd.arg("--force-verify-signature");
+    }
+    if args.ignore_blockers {
+        cmd.arg("--ignore-blockers");
     }
     if let Some(id) = args.activity_job_id {
         cmd.arg("--activity-job-id").arg(id);
@@ -796,6 +801,7 @@ mod worker_argv_tests {
             extra_path: "",
             binpkg: None,
             force_verify_signature: false,
+            ignore_blockers: false,
             buildpkg: false,
             quiet,
             activity_job_id: None,
