@@ -114,6 +114,8 @@ pub(crate) struct UseDepConstraint {
     pub parent_cpn_str: Interned<DefaultInterner>,
     /// Flags of `[flag?]`/`[flag=]`-style deps that are on in the parent's desired USE
     pub parent_enabled: Vec<Interned<DefaultInterner>>,
+    /// Shared by the per-slot copies of one unslotted atom on a multi-slot package
+    pub fanout: Option<u64>,
 }
 
 /// Slot info for a CPN: pre-computed `(slot_interned, slotted_package)` pairs
@@ -331,7 +333,7 @@ impl ConvertCtx<'_> {
                     op,
                 } => {
                     let pkg = PortagePackage::slotted(*cpn, slot.slot);
-                    self.collect_post_solve(&pkg, &version_set, dep);
+                    self.collect_post_solve(&pkg, &version_set, dep, None);
                     self.collect_slot_op(&pkg, &version_set, *op, Some(slot.slot));
                     self.requirements.push((pkg, version_set, self.gating_flag));
                 }
@@ -357,7 +359,13 @@ impl ConvertCtx<'_> {
         self.push_unslotted_or_choice(cpn, version_set);
     }
 
-    fn collect_post_solve(&mut self, pkg: &PortagePackage, vs: &PortageVersionSet, dep: &Dep) {
+    fn collect_post_solve(
+        &mut self,
+        pkg: &PortagePackage,
+        vs: &PortageVersionSet,
+        dep: &Dep,
+        fanout: Option<u64>,
+    ) {
         if let Some(use_deps) = &dep.use_deps
             && !use_deps.is_empty()
         {
@@ -377,6 +385,7 @@ impl ConvertCtx<'_> {
                 use_deps: use_deps.clone(),
                 parent_cpn_str: Interned::intern(self.cpn_str),
                 parent_enabled,
+                fanout,
             });
         }
         if let Some(repo) = dep.repo {
@@ -390,20 +399,21 @@ impl ConvertCtx<'_> {
     fn collect_post_solve_unslotted(&mut self, cpn: &Cpn, vs: &PortageVersionSet, dep: &Dep) {
         match self.slot_map.get(cpn).map(|v| v.as_slice()) {
             // Single accepted slot: attach to that exact PortagePackage key.
-            Some([(_, sole_pkg)]) => self.collect_post_solve(sole_pkg, vs, dep),
+            Some([(_, sole_pkg)]) => self.collect_post_solve(sole_pkg, vs, dep, None),
             // Multi-slot: the provider only ever selects slotted packages, so
             // an unslotted key never hits installed/solution lookups. Attach
             // the constraint to every slotted candidate for this CPN.
             Some(slots) if !slots.is_empty() => {
+                let fanout = Some(next_choice_id());
                 for (_, pkg) in slots {
-                    self.collect_post_solve(pkg, vs, dep);
+                    self.collect_post_solve(pkg, vs, dep, fanout);
                 }
             }
             // No slot info yet: fall back to unslotted (single-slot packages
             // that haven't been slot-mapped, or synthetic tests).
             _ => {
                 let pkg = PortagePackage::unslotted(*cpn);
-                self.collect_post_solve(&pkg, vs, dep);
+                self.collect_post_solve(&pkg, vs, dep, None);
             }
         }
     }

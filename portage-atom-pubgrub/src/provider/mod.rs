@@ -988,6 +988,7 @@ impl PortageDependencyProvider {
             target: (package, versions),
             use_deps,
             parent_cpn_str: Interned::intern(label),
+            fanout: None,
             parent_enabled: Vec::new(),
         });
     }

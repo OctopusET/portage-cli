@@ -1406,6 +1406,53 @@ fn or_group_conditional_use_dep_follows_parent_use() {
     assert_eq!(picked(false), "x", "USE=-f puts no demand on x");
 }
 
+// Two slotted atoms of one package in a branch are separate demands: one slot cannot excuse
+// the other the way the slot copies of a single unslotted atom do.
+#[test]
+fn or_branch_slotted_use_deps_do_not_excuse_each_other() {
+    let mut repo = InMemoryRepository::new();
+    repo.add_version(
+        portage_atom::Cpv::parse("a/p-1").unwrap(),
+        Some(Interned::intern("1")),
+        None,
+        empty_deps(),
+    );
+    repo.add_version_with_iuse(
+        portage_atom::Cpv::parse("a/p-2").unwrap(),
+        Some(Interned::intern("2")),
+        None,
+        vec![Interned::intern("s")],
+        empty_deps(),
+    );
+    repo.add_version(
+        portage_atom::Cpv::parse("a/y-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        empty_deps(),
+    );
+    repo.add_version(
+        portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        PackageDeps {
+            rdepend: (DepEntry::parse("|| ( ( a/p:2[s(+)] a/p:1[s(+)] ) a/y )").unwrap()).into(),
+            ..empty_deps()
+        },
+    );
+    let pkg = |cpn: &str, slot: &str| {
+        PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern(slot))
+    };
+    let mut provider = PortageDependencyProvider::new(repo);
+    let solution = provider
+        .resolve_targets(vec![(
+            pkg("app-misc/consumer", "0"),
+            PortageVersionSet::any(),
+        )])
+        .unwrap();
+    assert!(solution.get(&pkg("a/y", "0")).is_some());
+    assert!(solution.get(&pkg("a/p", "2")).is_none());
+}
+
 // dev-libs/libei `|| ( systemd? ( sys-apps/systemd ) sys-libs/basu )` with -systemd.
 #[test]
 fn or_branch_emptied_by_disabled_use_is_no_alternative() {

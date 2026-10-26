@@ -386,11 +386,10 @@ impl PortageDependencyProvider {
             .collect();
         udeps.iter().zip(&verdicts).all(|(c, v)| {
             *v != Some(false)
-                || udeps.iter().zip(&verdicts).any(|(o, ov)| {
-                    *ov == Some(true)
-                        && o.target.0.cpn() == c.target.0.cpn()
-                        && o.use_deps == c.use_deps
-                })
+                || udeps
+                    .iter()
+                    .zip(&verdicts)
+                    .any(|(o, ov)| *ov == Some(true) && c.fanout.is_some() && o.fanout == c.fanout)
         })
     }
 
