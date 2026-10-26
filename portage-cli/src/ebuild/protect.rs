@@ -208,8 +208,10 @@ impl ConfigMemory {
         let mut entries: Vec<(String, String)> = vec![];
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let mut words = line.split_whitespace().take_while(|w| !w.starts_with('#'));
-            if let (Some(path), Some(md5)) = (words.next(), words.next()) {
-                entries.retain(|(p, _)| p != path);
+            // A repeated path keeps its first md5, as portage reads the file.
+            if let (Some(path), Some(md5)) = (words.next(), words.next())
+                && !entries.iter().any(|(p, _)| p == path)
+            {
                 entries.push((path.to_string(), md5.to_string()));
             }
         }
@@ -404,7 +406,11 @@ mod tests {
         let root = Utf8Path::from_path(tmp.path()).unwrap();
         let file = root.join("var/lib/portage/config");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "# c\n/etc/a 111\n/etc/b 222 # x\nbroken\n").unwrap();
+        std::fs::write(
+            &file,
+            "# c\n/etc/a 111\n/etc/b 222 # x\nbroken\n/etc/b 999\n",
+        )
+        .unwrap();
         let mut m = ConfigMemory::load(root, vec![], true, false);
         assert_eq!(m.remembered("/etc/b"), Some("222"));
         m.remember("/etc/a", "333");
