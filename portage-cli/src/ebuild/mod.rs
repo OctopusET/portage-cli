@@ -3619,26 +3619,36 @@ fn merge_spec_from_env(
     }
 }
 
-/// `PORTAGE_REPO_REVISIONS` for a repository synced with git: `{"<name>": "<HEAD commit>"}`
+/// `PORTAGE_REPO_REVISIONS`, `{"<name>": "<commit>"}`: git's `HEAD`, or the commit an
+/// rsync snapshot was cut from (`metadata/timestamp.commit`)
 fn repo_revisions(repo: &Repository, repos_conf: Option<&ReposConf>) -> Option<String> {
     let name = repo.name();
-    let entry = repos_conf?.find(name.as_str())?;
-    if entry.sync_type.as_deref() != Some("git") {
-        return None;
-    }
+    let path = repo.path();
+    let revision = match repos_conf?.find(name.as_str())?.sync_type.as_deref()? {
+        "git" => git_head(path)?,
+        "rsync" => std::fs::read_to_string(path.join("metadata/timestamp.commit"))
+            .ok()?
+            .split_whitespace()
+            .next()?
+            .to_owned(),
+        _ => return None,
+    };
+    Some(format!("{{\"{name}\": \"{revision}\"}}"))
+}
+
+fn git_head(path: &Utf8Path) -> Option<String> {
     // The tree is often owned by another user than the one building.
     let out = std::process::Command::new("git")
         .arg("-c")
-        .arg(format!("safe.directory={}", repo.path()))
+        .arg(format!("safe.directory={path}"))
         .arg("-C")
-        .arg(repo.path())
+        .arg(path)
         .args(["rev-parse", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())?;
-    let head = String::from_utf8(out.stdout).ok()?;
-    Some(format!("{{\"{name}\": \"{}\"}}", head.trim()))
+    Some(String::from_utf8(out.stdout).ok()?.trim().to_owned())
 }
 
 /// The VDB of the tree the build runs from, when it is not `target_root`'s
@@ -3794,6 +3804,35 @@ mod tests {
     use portage_vdb::ContentsKind;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn repo_revisions_follow_the_sync_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let dir = root.join("repo");
+        fs::create_dir_all(dir.join("profiles")).unwrap();
+        fs::create_dir_all(dir.join("metadata")).unwrap();
+        fs::write(dir.join("profiles/repo_name"), "gentoo\n").unwrap();
+        fs::write(dir.join("metadata/layout.conf"), "masters =\n").unwrap();
+        fs::write(
+            dir.join("metadata/timestamp.commit"),
+            "2ddd40f4 1792881924 2026-10-24T22:45:24Z\n",
+        )
+        .unwrap();
+        let repo = Repository::builder().in_memory_cache().open(&dir).unwrap();
+        let conf = |sync: &str| {
+            let path = root.join(format!("{sync}.conf"));
+            let body = format!("[gentoo]\nlocation = {dir}\nsync-type = {sync}\n");
+            fs::write(&path, body).unwrap();
+            ReposConf::load_from(&[path]).unwrap()
+        };
+
+        assert_eq!(
+            repo_revisions(&repo, Some(&conf("rsync"))).as_deref(),
+            Some("{\"gentoo\": \"2ddd40f4\"}")
+        );
+        assert_eq!(repo_revisions(&repo, Some(&conf("svn"))), None);
+    }
 
     #[test]
     fn a_stale_vdb_stamp_drops_the_preserve_state() {
