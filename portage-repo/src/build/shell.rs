@@ -1073,6 +1073,11 @@ impl EbuildShell {
     async fn call_phase_function(&mut self, func_name: &str) -> Result<()> {
         let phase_defined = self.shell.funcs().get(func_name).is_some();
         if phase_defined {
+            let stdin = if self.phase_wants_terminal() {
+                ""
+            } else {
+                " < /dev/null"
+            };
             // Kept alive until after the phase returns: dropping it closes the
             // pty and joins its reader, so the phase's output is fully drained
             // to the console and the log before anything else happens.
@@ -1090,7 +1095,7 @@ impl EbuildShell {
                         .and_then(|mut f| std::io::Write::write_all(&mut f, marker.as_bytes()));
                     // `< /dev/null` on every shape below: a phase must never
                     // reach the user's terminal. Portage redirects the same way
-                    // (outside FEATURES=interactive), and brush's `read`/
+                    // (outside PROPERTIES=interactive and pkg_config), and brush's `read`/
                     // `mapfile` put whatever fd 0 names into non-canonical mode
                     // with echo off, restored only when their guard drops — an
                     // ebuild `read` would otherwise corrupt the real terminal.
@@ -1104,7 +1109,7 @@ impl EbuildShell {
                     // command (e.g. binutils' `find … -exec rmdir {} +` to trim
                     // empty dirs), which portage tolerates.
                     if *quiet {
-                        format!("{{ {func_name} ; }} < /dev/null >> {log} 2>&1")
+                        format!("{{ {func_name} ; }}{stdin} >> {log} 2>&1")
                     } else {
                         // A pty on fd 1, so the phase and everything it spawns
                         // sees a real terminal — the only thing that satisfies
@@ -1116,24 +1121,19 @@ impl EbuildShell {
                         pty = pty::PhasePty::open(log);
                         match &pty {
                             Some(pty) => {
-                                format!(
-                                    "{{ {func_name} ; }} < /dev/null > {} 2>&1",
-                                    pty.slave_path()
-                                )
+                                format!("{{ {func_name} ; }}{stdin} > {} 2>&1", pty.slave_path())
                             }
                             // The process-sub body may be polled after the
                             // phase (and even after the build tree is cleaned
                             // up); cd out of the cwd it cloned so the lazy
                             // `tee` spawn never starts from a deleted ${S}.
                             None => {
-                                format!(
-                                    "{{ {func_name} ; }} < /dev/null > >(cd / && tee -a {log}) 2>&1"
-                                )
+                                format!("{{ {func_name} ; }}{stdin} > >(cd / && tee -a {log}) 2>&1")
                             }
                         }
                     }
                 }
-                None => format!("{{ {func_name} ; }} < /dev/null"),
+                None => format!("{{ {func_name} ; }}{stdin}"),
             };
             let phase_result = self.run_string(&invocation).await;
             // Drain and close the pty before looking at how the phase went: a
@@ -1149,6 +1149,14 @@ impl EbuildShell {
             tracing::warn!("{func_name} not defined, nothing to do");
         }
         Ok(())
+    }
+
+    /// Whether the phase keeps em's stdin: `PROPERTIES=interactive` packages and `pkg_config`
+    fn phase_wants_terminal(&self) -> bool {
+        self.get_var("EBUILD_PHASE").as_deref() == Some("config")
+            || self
+                .get_var("PROPERTIES")
+                .is_some_and(|p| p.split_whitespace().any(|w| w == "interactive"))
     }
 
     /// `ROOT`, `EPREFIX`, `ED`, `EROOT`, `SYSROOT` and `ESYSROOT` for a package

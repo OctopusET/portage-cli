@@ -318,11 +318,26 @@ async fn bashrc_pre_and_post_phase_hooks_wrap_the_phase() {
 // A phase must never reach the caller's stdin: brush's `read`/`mapfile`
 // put whatever fd 0 names into non-canonical mode with echo off, so an
 // ebuild `read` on an inherited terminal corrupts the console it borrowed.
-//
-// The test replaces its own fd 0 first — the harness already hands tests
-// `/dev/null`, so without that the assertion would hold either way.
 #[tokio::test]
 async fn phase_stdin_is_dev_null() {
+    let (fd0, _) = phase_fd0("").await;
+    assert_eq!(fd0.trim(), "/dev/null", "phase fd 0 was {fd0:?}");
+}
+
+#[tokio::test]
+async fn interactive_phase_keeps_stdin() {
+    let (fd0, decoy) = phase_fd0("PROPERTIES=\"interactive\"\n").await;
+    assert_eq!(
+        fd0.trim(),
+        decoy.display().to_string(),
+        "phase fd 0 was {fd0:?}"
+    );
+}
+
+/// What `pkg_setup` of an ebuild with `globals` sees on fd 0, and the file em's own fd 0 named
+///
+/// fd 0 is swapped for a real file first: the harness already hands tests `/dev/null`.
+async fn phase_fd0(globals: &str) -> (String, std::path::PathBuf) {
     use std::os::fd::AsFd;
 
     let dir = tempfile::tempdir().unwrap();
@@ -337,7 +352,7 @@ async fn phase_stdin_is_dev_null() {
     std::fs::write(
         ebdir.join("pkg-1.ebuild"),
         format!(
-            "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${{WORKDIR}}\"\n\
+            "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${{WORKDIR}}\"\n{globals}\
              pkg_setup() {{ readlink /proc/self/fd/0 > {}; }}\n",
             out.display()
         ),
@@ -355,9 +370,10 @@ async fn phase_stdin_is_dev_null() {
     let work = dir.path().join("work");
 
     // Point fd 0 at a real file so an unredirected phase would inherit *it*,
-    // and restore it before asserting. Serialised against any other test that
-    // touches process-global fd 0 (there is none today).
-    let stdin_marker = dir.path().join("not-dev-null");
+    // and restore it before asserting.
+    let stdin_marker = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .join("not-dev-null");
     std::fs::write(&stdin_marker, "x").unwrap();
     let decoy = std::fs::File::open(&stdin_marker).unwrap();
     let _guard = STDIN_LOCK.lock().await;
@@ -374,11 +390,13 @@ async fn phase_stdin_is_dev_null() {
     rustix::io::dup2(saved.as_fd(), &mut fd0).unwrap();
     phase.unwrap();
 
-    let fd0 = std::fs::read_to_string(&out).unwrap_or_default();
-    assert_eq!(fd0.trim(), "/dev/null", "phase fd 0 was {fd0:?}");
+    (
+        std::fs::read_to_string(&out).unwrap_or_default(),
+        stdin_marker,
+    )
 }
 
-/// Serialises the one test that swaps process-global fd 0. Async because the
+/// Serialises the tests that swap process-global fd 0. Async because the
 /// swap has to span `run_phase`'s await.
 static STDIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
