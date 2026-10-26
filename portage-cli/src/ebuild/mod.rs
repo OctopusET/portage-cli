@@ -3395,7 +3395,7 @@ fn remove_old_unique_files(
         }
 
         match entry.kind {
-            ContentsKind::Obj | ContentsKind::Sym => {
+            ContentsKind::Obj | ContentsKind::Sym | ContentsKind::Fifo | ContentsKind::Dev => {
                 if let Err(e) = std::fs::remove_file(dest.as_std_path()) {
                     crate::style::warn_line!("could not remove {dest}: {e}");
                 }
@@ -3403,7 +3403,6 @@ fn remove_old_unique_files(
             ContentsKind::Dir => {
                 let _ = std::fs::remove_dir(dest.as_std_path());
             }
-            _ => {}
         }
     }
 }
@@ -3425,7 +3424,7 @@ fn keep_on_unmerge(
     owned: &HashSet<&Utf8Path>,
     rules: &UnmergeRules,
 ) -> Option<&'static str> {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let is_link = lstat.file_type().is_symlink();
     let libdir_link =
         is_link && ["/lib", "/usr/lib", "/usr/local/lib"].contains(&entry.path.as_str());
@@ -3456,7 +3455,10 @@ fn keep_on_unmerge(
                 .map(|d| format!("{:x}", md5::compute(d)));
             (!on_disk.is_some_and(|d| d.eq_ignore_ascii_case(md5))).then_some("!md5")
         }
-        _ => None,
+        ContentsKind::Fifo if !lstat.file_type().is_fifo() => Some("!fif"),
+        // Without unmerge-orphans portage never removes a FIFO or device node.
+        ContentsKind::Fifo | ContentsKind::Dev => Some(""),
+        ContentsKind::Sym | ContentsKind::Dir => None,
     }
 }
 
@@ -6545,6 +6547,44 @@ mod tests {
         assert!(!root.join("usr/share/a/data").exists());
         assert!(root.join("etc/a.conf").exists());
         assert!(!root.join("etc/b.conf").exists());
+    }
+
+    #[test]
+    fn remove_old_unique_files_removes_orphan_fifos_only_with_unmerge_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        fs::create_dir_all(root.join("run").as_std_path()).unwrap();
+        let pipe = root.join("run/pipe");
+        let fifo = ContentsEntry {
+            kind: ContentsKind::Fifo,
+            path: "/run/pipe".into(),
+            md5: None,
+            mtime: None,
+            target: None,
+        };
+        let mkfifo = || {
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                pipe.as_std_path(),
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )
+            .unwrap()
+        };
+        mkfifo();
+
+        let old_contents = std::slice::from_ref(&fifo);
+        remove_old_unique_files(old_contents, &[], &HashSet::new(), &root, &rules("", false));
+        assert!(fs::symlink_metadata(pipe.as_std_path()).is_ok());
+
+        remove_old_unique_files(old_contents, &[], &HashSet::new(), &root, &rules("", true));
+        assert!(fs::symlink_metadata(pipe.as_std_path()).is_err());
+
+        fs::write(pipe.as_std_path(), b"not a fifo").unwrap();
+        let lstat = fs::symlink_metadata(pipe.as_std_path()).unwrap();
+        let kept = keep_on_unmerge(&fifo, &pipe, &lstat, &HashSet::new(), &rules("", false));
+        assert_eq!(kept, Some("!fif"));
     }
 
     #[test]
