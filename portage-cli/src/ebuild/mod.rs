@@ -1523,6 +1523,7 @@ impl PackageSetup {
             clean_stale_tree(wd, subs, &features);
         }
 
+        let mut binpkg_metadata = None;
         if let (Some(wd), Some(bp)) = (work_dir, binpkg) {
             // FEATURES=binpkg-request-signature, or the origin's own
             // binrepos.conf verify-signature=yes.
@@ -1531,6 +1532,10 @@ impl PackageSetup {
             // Where src_install would have put it: the package holds `ED`.
             let image = shell.image_ed(&ebuild, wd.as_std_path(), root.as_std_path());
             let saved = extract_binpkg(&shell, bp, &image, config_root, require_signature)?;
+            binpkg_metadata = Some(
+                portage_binpkg::read_metadata(bp.as_std_path())
+                    .with_context(|| format!("reading the metadata of {bp}"))?,
+            );
             if let Some(shipped) = portage_binpkg::read_ebuild(bp.as_std_path())
                 .with_context(|| format!("reading the ebuild of {bp}"))?
             {
@@ -1609,6 +1614,7 @@ impl PackageSetup {
                         PhaseContext {
                             fetch_all_uri,
                             merge_state: _merge_guard.as_deref_mut(),
+                            binpkg_metadata: binpkg_metadata.as_ref(),
                         },
                     )
                     .await
@@ -1915,6 +1921,8 @@ fn post_process_after_install(
 struct PhaseContext<'a> {
     fetch_all_uri: bool,
     merge_state: Option<&'a mut MergeBatchState>,
+    /// The merged binpkg's own metadata, whose dependencies were bound when it was built
+    binpkg_metadata: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 async fn run_one_phase(
@@ -1929,7 +1937,14 @@ async fn run_one_phase(
     match phase {
         RunPhase::Fetch => run_fetch(shell, ebuild, repo, work_root, context.fetch_all_uri).await,
         RunPhase::Clean => run_clean(work_root),
-        RunPhase::Qmerge => run_merge(shell, ebuild, work_root, root, context.merge_state).await,
+        RunPhase::Qmerge => {
+            let PhaseContext {
+                merge_state,
+                binpkg_metadata,
+                ..
+            } = context;
+            run_merge(shell, ebuild, work_root, root, merge_state, binpkg_metadata).await
+        }
         RunPhase::Ebuild(p) => {
             // PMS: pkg_pretend takes no part in environment saving, so nothing
             // it sets may reach pkg_setup. An ebuild known not to define it
@@ -2184,7 +2199,7 @@ fn register_merged(
     env: EbuildEnv,
     contents: Vec<ContentsEntry>,
     size: u64,
-    image_dir: &Utf8Path,
+    elf: crate::elfscan::ElfScan,
     env_dump: &std::result::Result<Vec<u8>, String>,
 ) -> Result<(InstalledPackage, MergeSpec)> {
     let build_time = SystemTime::now()
@@ -2192,8 +2207,7 @@ fn register_merged(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let counter = vdb.next_counter()?;
-    let elf = crate::elfscan::scan_image(image_dir);
-    let mut spec = merge_spec_from_env(
+    let spec = merge_spec_from_env(
         env,
         ebuild.cpv().clone(),
         contents,
@@ -2202,7 +2216,6 @@ fn register_merged(
         build_time,
         counter,
     );
-    build_info::inject_libc_dep(&mut spec, vdb);
     let installed = vdb.register(&spec)?;
 
     // Copy the ebuild into the VDB entry as `<PF>.ebuild`, as portage does.
@@ -2253,6 +2266,7 @@ async fn run_merge(
     work_root: &Utf8Path,
     root: &Utf8Path,
     mut merge_state: Option<&mut MergeBatchState>,
+    binpkg_metadata: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<()> {
     let temp_dir = work_root.join("temp");
     std::fs::create_dir_all(temp_dir.as_std_path()).context("creating temp dir")?;
@@ -2273,7 +2287,10 @@ async fn run_merge(
     let vdb_root = vdb_root_for(root);
     let vdb = open_or_create_vdb(&vdb_root)?;
     let running = running_vdb(shell, &vdb_root);
-    build_info::reduce_env(&mut env, &vdb, running.as_ref().unwrap_or(&vdb));
+    match binpkg_metadata {
+        Some(metadata) => build_info::take_recorded(&mut env, metadata),
+        None => build_info::reduce_env(&mut env, &vdb, running.as_ref().unwrap_or(&vdb)),
+    }
 
     let slot_main = env.slot_main().to_owned();
     // The slot occupant (if any) is the package being replaced — its files are
@@ -2381,8 +2398,11 @@ async fn run_merge(
             }
         }
 
-        let (installed, spec) =
-            register_merged(&vdb, ebuild, env, contents, size, &image_dir, &env_dump)?;
+        let elf = crate::elfscan::scan_image(&image_dir);
+        if binpkg_metadata.is_none() {
+            build_info::inject_libc_dep(&mut env.rdepend, ebuild.cpv(), &elf, &vdb);
+        }
+        let (installed, spec) = register_merged(&vdb, ebuild, env, contents, size, elf, &env_dump)?;
         preserve.package_added(&installed);
         if let Some(index) = ownership_index.as_mut() {
             index.add_package(&installed, &spec.contents);
@@ -4086,6 +4106,7 @@ mod tests {
                 let context = PhaseContext {
                     fetch_all_uri: false,
                     merge_state: None,
+                    binpkg_metadata: None,
                 };
                 let root = self.path("root");
                 run_one_phase(&mut shell, ebuild, &repo, *phase, &work, &root, context).await?;
@@ -4514,6 +4535,46 @@ mod tests {
             .unwrap();
         assert_eq!(probe.log(), "shipped");
         assert!(probe.path("root/usr/share/probe/file").exists());
+    }
+
+    #[tokio::test]
+    async fn a_binpkg_records_the_dependencies_bound_when_it_was_built() {
+        let probe = Probe::new();
+        let tree = probe.ebuild("probe", "1", "RDEPEND=\"dev-libs/foo:=\"\n");
+        let foo = probe.path("root/var/db/pkg/dev-libs/foo-1");
+        fs::create_dir_all(&foo).unwrap();
+        fs::write(foo.join("SLOT"), "0/6\n").unwrap();
+
+        let image = probe.path("image");
+        fs::create_dir_all(&image).unwrap();
+        let meta = probe.path("meta");
+        fs::create_dir_all(&meta).unwrap();
+        for (file, value) in [
+            ("CATEGORY", "app-misc"),
+            ("PF", "probe-1"),
+            ("SLOT", "0"),
+            ("RDEPEND", "dev-libs/foo:0/5="),
+        ] {
+            fs::write(meta.join(file), format!("{value}\n")).unwrap();
+        }
+        let package = probe.path("probe-1-1.gpkg.tar");
+        portage_binpkg::write_gpkg(
+            &portage_binpkg::GpkgInput {
+                image_dir: image.as_std_path(),
+                metadata_dir: meta.as_std_path(),
+                basename: "probe-1",
+                signing: None,
+            },
+            package.as_std_path(),
+        )
+        .unwrap();
+
+        probe
+            .run_group(&tree, PhaseGroup::BinpkgMerge, "root", Some(&package))
+            .await
+            .unwrap();
+        let rdepend = fs::read_to_string(probe.path("root/var/db/pkg/app-misc/probe-1/RDEPEND"));
+        assert_eq!(rdepend.unwrap(), "dev-libs/foo:0/5=\n");
     }
 
     #[tokio::test]

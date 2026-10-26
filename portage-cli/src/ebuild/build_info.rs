@@ -4,12 +4,14 @@
 //! conditionals evaluated, redundant groups flattened and `:=` bound to the
 //! installed provider's slot; `RDEPEND` also gains an implicit `>=libc`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use portage_atom::{Cpv, Dep, Slot, SlotDep, SlotOperator, UseDep, UseDepKind};
 use portage_metadata::Eapi;
 use portage_repo::EbuildEnv;
-use portage_vdb::{MergeSpec, Vdb};
+use portage_vdb::Vdb;
+
+use crate::elfscan::ElfScan;
 
 /// Reduce `env`'s raw fields against its own USE and bind `:=` deps
 ///
@@ -43,13 +45,35 @@ pub(super) fn reduce_env(env: &mut EbuildEnv, target: &Vdb, running: &Vdb) {
     deps(&mut env.idepend, &[target]);
 }
 
+/// Take the reduced fields from a binpkg's metadata, already bound on its build host
+pub(super) fn take_recorded(env: &mut EbuildEnv, metadata: &BTreeMap<String, String>) {
+    let fields = [
+        ("LICENSE", &mut env.license),
+        ("RESTRICT", &mut env.restrict),
+        ("PROPERTIES", &mut env.properties),
+        ("DEPEND", &mut env.depend),
+        ("BDEPEND", &mut env.bdepend),
+        ("RDEPEND", &mut env.rdepend),
+        ("PDEPEND", &mut env.pdepend),
+        ("IDEPEND", &mut env.idepend),
+    ];
+    for (key, field) in fields {
+        *field = metadata.get(key).filter(|v| !v.is_empty()).cloned();
+    }
+}
+
 /// Append `>=<libc>` to `RDEPEND` of a package that links anything (has `NEEDED.ELF.2`)
-pub(super) fn inject_libc_dep(spec: &mut MergeSpec, target: &Vdb) {
-    if spec.needed_elf2.is_empty() {
+pub(super) fn inject_libc_dep(
+    rdepend: &mut Option<String>,
+    cpv: &Cpv,
+    elf: &ElfScan,
+    target: &Vdb,
+) {
+    if elf.needed_elf2.is_empty() {
         return;
     }
-    if let Some(libc) = libc_dep(target, &spec.cpv) {
-        spec.rdepend = Some(match spec.rdepend.take() {
+    if let Some(libc) = libc_dep(target, cpv) {
+        *rdepend = Some(match rdepend.take() {
             Some(r) => format!("{r} {libc}"),
             None => libc,
         });
