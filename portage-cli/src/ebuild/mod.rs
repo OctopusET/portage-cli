@@ -1611,6 +1611,11 @@ impl PackageSetup {
                     act.phase_leave(&phase_name, started);
                 }
                 phase_result?;
+                if *phase == RunPhase::Qmerge
+                    && let Some(bp) = binpkg
+                {
+                    record_binpkg_build_flags(bp, root, &ebuild.cpv().to_string())?;
+                }
                 drop(_merge_flock);
                 drop(_merge_guard);
 
@@ -1691,6 +1696,39 @@ impl PackageSetup {
 /// environment, still compressed
 ///
 /// Runs after the stale-tree clean, which wipes the image.
+/// A binary merge records the flags the package was built with, not the installing
+/// system's: Portage copies the package's metadata into the VDB
+fn record_binpkg_build_flags(binpkg: &Utf8Path, root: &Utf8Path, cpv: &str) -> Result<()> {
+    let dir = root.join("var/db/pkg").join(cpv);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let meta = portage_binpkg::read_metadata(binpkg.as_std_path())
+        .with_context(|| format!("reading the metadata of {binpkg}"))?;
+    for name in [
+        "CFLAGS",
+        "CXXFLAGS",
+        "LDFLAGS",
+        "RUSTFLAGS",
+        "CHOST",
+        "CBUILD",
+    ]
+    .into_iter()
+    .chain([portage_binpkg::BUILD_ENV_KEY_FIELD])
+    {
+        let path = dir.join(name);
+        match meta.get(name) {
+            Some(value) => std::fs::write(path.as_std_path(), format!("{value}\n"))
+                .with_context(|| format!("writing {path}"))?,
+            None if name.ends_with("FLAGS") => {
+                let _ = std::fs::remove_file(path.as_std_path());
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
 fn extract_binpkg(
     shell: &portage_repo::EbuildShell,
     bp: &Utf8Path,
