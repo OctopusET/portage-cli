@@ -867,6 +867,18 @@ pub struct MergeBinpkg<'a> {
     pub activity: Option<crate::activity::ActivityPkgCtx>,
 }
 
+/// The USE `binpkg_path` was built with; a reused binpkg installs with it, not with the plan's
+fn built_use(
+    binpkg_path: &Utf8Path,
+) -> Result<Vec<portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>>> {
+    use portage_atom::interner::Interned;
+    Ok(portage_binpkg::read_metadata(binpkg_path.as_std_path())
+        .with_context(|| format!("reading the metadata of {binpkg_path}"))?
+        .get("USE")
+        .map(|u| u.split_whitespace().map(Interned::intern).collect())
+        .unwrap_or_default())
+}
+
 /// Merge a pre-built binary package (`-k`/`--usepkg`): extract the GPKG's image
 /// and saved environment into the work tree, then run `pkg_pretend`,
 /// `pkg_setup` and the merge from `work_root/image`. The phase functions are
@@ -885,13 +897,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
         ignore_blockers,
         activity,
     } = opts;
-    use portage_atom::interner::{DefaultInterner, Interned};
-    let use_flags: Vec<Interned<DefaultInterner>> =
-        portage_binpkg::read_metadata(binpkg_path.as_std_path())
-            .with_context(|| format!("reading the metadata of {binpkg_path}"))?
-            .get("USE")
-            .map(|u| u.split_whitespace().map(Interned::intern).collect())
-            .unwrap_or_default();
+    let use_flags = built_use(binpkg_path)?;
     let use_flags = use_flags.as_slice();
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
@@ -4956,6 +4962,29 @@ mod tests {
         assert!(config("8", "").strip_mask.is_empty());
         assert!(config("8", "").split_debug.is_some());
         assert!(config("8", "test splitdebug").split_debug.is_none());
+    }
+
+    #[test]
+    fn a_reused_binpkg_installs_with_the_use_it_was_built_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let (image, meta) = (dir.path().join("image"), dir.path().join("meta"));
+        fs::create_dir_all(&image).unwrap();
+        fs::create_dir_all(&meta).unwrap();
+        fs::write(meta.join("CATEGORY"), "app-test\n").unwrap();
+        fs::write(meta.join("PF"), "foo-1.0\n").unwrap();
+        fs::write(meta.join("USE"), "amd64 nls\n").unwrap();
+        let container = Utf8PathBuf::try_from(dir.path().join("foo-1.0-1.gpkg.tar")).unwrap();
+        let input = portage_binpkg::GpkgInput {
+            image_dir: &image,
+            metadata_dir: &meta,
+            basename: "foo-1.0",
+            signing: None,
+            build_id: Some(1),
+        };
+        portage_binpkg::write_gpkg(&input, container.as_std_path()).unwrap();
+        let use_flags = built_use(&container).unwrap();
+        let use_flags: Vec<&str> = use_flags.iter().map(|f| f.as_str()).collect();
+        assert_eq!(use_flags, ["amd64", "nls"]);
     }
 
     #[tokio::test]
