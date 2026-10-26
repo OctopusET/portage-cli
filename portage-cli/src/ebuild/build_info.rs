@@ -254,6 +254,8 @@ fn reduce_into(
         reduce_into(children, use_flags, map, false, &mut inner);
         if inner.len() > 1 {
             out.push(Reduced::AllOf(inner));
+        } else if let Some(Reduced::AnyOf(choices)) = inner.last_mut() {
+            out.append(choices);
         } else {
             out.extend(inner);
         }
@@ -305,6 +307,10 @@ mod tests {
             Some("|| ( a b c ) || ( ( g h ) i )")
         );
         assert_eq!(plain("|| ( ( a b ) )", &[]).as_deref(), Some("a b"));
+        assert_eq!(
+            plain("|| ( p? ( || ( a b ) ) c ) || ( ( || ( d e ) ) f )", &["p"]).as_deref(),
+            Some("|| ( a b c ) || ( d e f )")
+        );
     }
 
     #[test]
