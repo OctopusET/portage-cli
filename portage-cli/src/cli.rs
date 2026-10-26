@@ -166,7 +166,9 @@ pub fn parse_cli_or_exit() -> Validated {
                     .config()
                     .unwrap_or(camino::Utf8Path::new("/"))
                     .to_owned();
-                emerge_default_opts(std::env::var("EMERGE_DEFAULT_OPTS").ok(), &config_root)
+                let words =
+                    emerge_default_opts(std::env::var("EMERGE_DEFAULT_OPTS").ok(), &config_root);
+                known_default_opts(words)
             }
             _ => Vec::new(),
         };
@@ -185,19 +187,53 @@ pub fn parse_cli_or_exit() -> Validated {
 /// `EMERGE_DEFAULT_OPTS`, the environment's value `env` or else `config_root`'s make.conf one,
 /// split into words by shell quoting rules
 fn emerge_default_opts(env: Option<String>, config_root: &camino::Utf8Path) -> Vec<OsString> {
-    let value = env.or_else(|| {
-        let files = crate::settings::make_conf_files(config_root).ok()?;
-        files.iter().rev().find_map(|f| {
-            let conf = portage_repo::MakeConf::load(camino::Utf8Path::from_path(f)?).ok()?;
-            conf.get("EMERGE_DEFAULT_OPTS").map(str::to_owned)
-        })
-    });
-    value
+    env.or_else(|| make_conf_default_opts(config_root))
         .and_then(|v| shlex::split(&v))
         .unwrap_or_default()
         .into_iter()
         .map(OsString::from)
         .collect()
+}
+
+/// make.conf's `EMERGE_DEFAULT_OPTS` as sourcing every file in order leaves it
+fn make_conf_default_opts(config_root: &camino::Utf8Path) -> Option<String> {
+    let files = crate::settings::make_conf_files(config_root).ok()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let mut env = std::collections::BTreeMap::new();
+        for f in &files {
+            let conf = portage_repo::MakeConf::load(camino::Utf8Path::from_path(f)?).ok()?;
+            conf.apply_to(&mut env).await.ok()?;
+        }
+        env.remove("EMERGE_DEFAULT_OPTS")
+    })
+}
+
+/// The options of `words` em's emerge accepts, each with the values that follow it; the others
+/// are warned about and dropped, since emerge has options em lacks
+fn known_default_opts(words: Vec<OsString>) -> Vec<OsString> {
+    let mut groups: Vec<Vec<OsString>> = Vec::new();
+    for word in words {
+        match groups.last_mut() {
+            Some(group) if !word.to_string_lossy().starts_with('-') => group.push(word),
+            _ => groups.push(vec![word]),
+        }
+    }
+    let mut known = Vec::new();
+    for group in groups {
+        let argv = std::iter::once(OsString::from("emerge")).chain(group.iter().cloned());
+        match Cli::parse_from(argv.collect::<Vec<_>>()) {
+            Ok(_) => known.extend(group),
+            Err(e) => {
+                let words: Vec<_> = group.iter().map(|w| w.to_string_lossy()).collect();
+                crate::style::warn_line!("ignoring EMERGE_DEFAULT_OPTS `{}`: {e}", words.join(" "));
+            }
+        }
+    }
+    known
 }
 
 /// `args` with `defaults` ahead of the user's own emerge options, so those still override them
@@ -714,6 +750,11 @@ mod tests {
             with_default_opts(os(&["-p", "foo"]), os(&["--ask"])),
             os(&["--ask", "-p", "foo"])
         );
+        let user_wins = Cli::parse_from(with_default_opts(
+            os(&["emerge", "-j2", "foo"]),
+            os(&["-j4"]),
+        ));
+        assert_eq!(user_wins.unwrap().merge_flags().jobs, Some(2));
         let Some(Applet::Emerge(a)) = emerge(["--ignore-default-opts", "foo"]).applet else {
             panic!("not emerge");
         };
@@ -727,7 +768,9 @@ mod tests {
         std::fs::create_dir_all(root.join("etc/portage")).unwrap();
         std::fs::write(
             root.join("etc/portage/make.conf"),
-            "EMERGE_DEFAULT_OPTS=\"--jobs=4 --exclude 'a/b c/d'\"\n",
+            "EMERGE_DEFAULT_OPTS=\"--jobs=4\"\n\
+             EMERGE_DEFAULT_OPTS=\"${EMERGE_DEFAULT_OPTS} --exclude 'a/b c/d'\"\n\
+             EMERGE_DEFAULT_OPTS+=\" --ask\"\n",
         )
         .unwrap();
         let words = |env: Option<&str>| -> Vec<String> {
@@ -736,8 +779,25 @@ mod tests {
                 .map(|w| w.into_string().unwrap())
                 .collect()
         };
-        assert_eq!(words(None), ["--jobs=4", "--exclude", "a/b c/d"]);
+        assert_eq!(words(None), ["--jobs=4", "--exclude", "a/b c/d", "--ask"]);
         assert_eq!(words(Some("--ask")), ["--ask"]);
+    }
+
+    #[test]
+    fn default_opts_em_lacks_are_dropped_with_their_values() {
+        let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            known_default_opts(os(&[
+                "--quiet-build=y",
+                "--jobs",
+                "4",
+                "--backtrack",
+                "30",
+                "-X",
+                "a/b"
+            ])),
+            os(&["--jobs", "4", "-X", "a/b"])
+        );
     }
 
     #[test]
