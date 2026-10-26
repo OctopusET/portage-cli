@@ -4287,6 +4287,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fetch_mirror_repos_adds_each_other_configured_repo_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let open = |name: &str| {
+            let dir = root.join(name);
+            fs::create_dir_all(dir.join("profiles")).unwrap();
+            fs::create_dir_all(dir.join("metadata")).unwrap();
+            fs::write(dir.join("profiles/repo_name"), format!("{name}\n")).unwrap();
+            fs::write(dir.join("metadata/layout.conf"), "masters =\n").unwrap();
+            Repository::builder().in_memory_cache().open(&dir).unwrap()
+        };
+        let (own, master) = (open("own"), open("gentoo"));
+        open("other");
+        let conf_path = root.join("repos.conf");
+        let body: String = ["own", "gentoo", "other"]
+            .iter()
+            .map(|n| format!("[{n}]\nlocation = {root}/{n}\n"))
+            .collect();
+        fs::write(&conf_path, body).unwrap();
+        let conf = ReposConf::load_from(&[conf_path]).unwrap();
+
+        let repos = fetch_mirror_repos(&own, vec![master], Some(&conf));
+        let names: Vec<String> = repos.iter().map(|r| r.name().to_string()).collect();
+        assert_eq!(names, ["gentoo", "other"]);
+    }
+
+    #[test]
     fn checksum_try_mirrors_falls_back_on_a_bad_value() {
         assert_eq!(checksum_try_mirrors(Some("2"), 5), 2);
         assert_eq!(checksum_try_mirrors(None, 5), 5);
