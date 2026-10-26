@@ -159,6 +159,7 @@ const SEEDED: &[&str] = &[
     "GENTOO_MIRRORS",
     "PORTAGE_ELOG_CLASSES",
     "PORTAGE_ELOG_SYSTEM",
+    "UNINSTALL_IGNORE",
 ];
 
 /// Give a build shell the [`SEEDED`] values
