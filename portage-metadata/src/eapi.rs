@@ -38,6 +38,9 @@ pub enum Eapi {
 }
 
 impl Eapi {
+    /// The newest EAPI this package manager supports
+    pub const LATEST: Eapi = Eapi::Nine;
+
     /// Whether this EAPI supports `BDEPEND` (build-host dependencies)
     ///
     /// Introduced in EAPI 7.

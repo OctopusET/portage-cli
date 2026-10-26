@@ -599,17 +599,35 @@ fn target_lines(target: &UnsatisfiableTarget, data: &RepoData, multi_repo: bool)
             seg(plain_style, format!(" ({})", masked_by(&c.reasons))),
         ]
     }));
-    let eapi_masked = target
-        .reasons
-        .iter()
-        .any(|c| c.reasons.iter().any(|r| matches!(r, FilterReason::Eapi(_))));
-    if eapi_masked {
-        lines.push(vec![seg(
-            plain_style,
-            "  em must be upgraded before EAPI masked packages can be installed",
-        )]);
-    }
     lines
+}
+
+/// Portage's upgrade hint, once after a masked list that has an EAPI-masked version, wrapped at 75
+fn eapi_hint<'a>(targets: impl IntoIterator<Item = &'a UnsatisfiableTarget>) -> Option<String> {
+    let eapi_masked = targets.into_iter().any(|t| {
+        t.reasons
+            .iter()
+            .any(|c| c.reasons.iter().any(|r| matches!(r, FilterReason::Eapi(_))))
+    });
+    if !eapi_masked {
+        return None;
+    }
+    let msg = format!(
+        "The current version of em supports EAPI '{}'. You must upgrade to a newer version \
+         of em before EAPI masked packages can be installed.",
+        portage_metadata::Eapi::LATEST
+    );
+    let mut lines: Vec<String> = Vec::new();
+    for word in msg.split(' ') {
+        match lines.last_mut() {
+            Some(line) if line.len() + 1 + word.len() <= 75 => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    Some(lines.join("\n"))
 }
 
 /// The fatal message for a root target that cannot be satisfied — an explicit
@@ -628,6 +646,10 @@ pub(super) fn unsatisfiable_target_message(
     if let Some(trailer) = target.origin.trailer() {
         msg.push('\n');
         msg.push_str(&trailer);
+    }
+    if let Some(hint) = eapi_hint([target]) {
+        msg.push_str("\n\n");
+        msg.push_str(&hint);
     }
     msg
 }
@@ -674,6 +696,9 @@ pub(super) fn report_unsatisfiable_targets(
                 writeln!(out).ok();
             }
         }
+    }
+    if let Some(hint) = eapi_hint(targets) {
+        writeln!(out, "\n{hint}").ok();
     }
 }
 
@@ -2351,6 +2376,36 @@ mod tests {
             }
             out
         })
+    }
+
+    #[test]
+    fn eapi_hint_follows_an_eapi_masked_target_only() {
+        let target = |reason: FilterReason| UnsatisfiableTarget {
+            atom: "app-misc/thing".into(),
+            origin: super::super::TargetOrigin::Explicit,
+            problem: super::super::targets::TargetProblem::AllFiltered,
+            reasons: vec![super::super::repo::AutounmaskCandidate {
+                cpv: Cpv::parse("app-misc/thing-1.0").unwrap(),
+                slot: None,
+                reasons: vec![reason],
+                widened: false,
+                live_upper_bound: None,
+                is_live: false,
+            }],
+            missing_iuse: Vec::new(),
+        };
+        let masked = target(FilterReason::Masked);
+        assert_eq!(eapi_hint([&masked]), None);
+        let eapi = target(FilterReason::Eapi("10".into()));
+        let hint = eapi_hint([&masked, &eapi]).unwrap();
+        assert_eq!(
+            hint,
+            format!(
+                "The current version of em supports EAPI '{}'. You must upgrade to a newer\n\
+                 version of em before EAPI masked packages can be installed.",
+                portage_metadata::Eapi::LATEST
+            )
+        );
     }
 
     #[test]
