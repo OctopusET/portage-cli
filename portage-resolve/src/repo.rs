@@ -1568,6 +1568,19 @@ pub struct Adapter<'a> {
 }
 
 impl Adapter<'_> {
+    /// `meta`'s IUSE_EFFECTIVE, which a USE dep judges its flag against
+    fn iuse_effective(
+        &self,
+        meta: &portage_metadata::EbuildMetadata,
+    ) -> Vec<Interned<DefaultInterner>> {
+        // `Interned::from` wraps the key the cache parse already interned; re-interning
+        // `iu.name()` would pay an interner resolve (an epoch pin) for the same key.
+        let iuse = meta.iuse.iter().map(Interned::from).collect();
+        self.force_mask
+            .iuse_injection
+            .with_implicit(meta.eapi, iuse)
+    }
+
     /// The shared version filter: keywords, package.mask/unmask, license
     /// `versions_for` and `slots_for` must agree, or the slot map would carry
     /// phantom slots for versions the solver can never select
@@ -1829,10 +1842,7 @@ impl PackageRepository for Adapter<'_> {
                         (self.autounmask_widen || self.version_accepted(cpv, cache))
                             && !deps_invalid(&cache.metadata)
                     })
-                    .map(|(cpv, cache)| {
-                        let iuse = cache.metadata.iuse.iter().map(Interned::from).collect();
-                        (cpv.version.clone(), iuse)
-                    })
+                    .map(|(cpv, cache)| (cpv.version.clone(), self.iuse_effective(&cache.metadata)))
                     .collect()
             })
             .unwrap_or_default()
@@ -1854,27 +1864,7 @@ impl PackageRepository for Adapter<'_> {
                         let slot = Some(meta.slot.slot);
                         let subslot = meta.slot.subslot;
                         let repo = Some(repo_name_of(self.data, cpv));
-                        // `Interned::from(iu)` wraps the key `CacheEntry::parse`
-                        // already produced (same `DefaultInterner`) — zero-cost.
-                        // `Interned::intern(iu.name())` would instead resolve that
-                        // key back to a `&str` just to look the same string up
-                        // again, paying a full interner resolve+get_or_intern
-                        // round trip (each pinning an epoch handle on the
-                        // lock-free backend) for a result identical to the key
-                        // already in hand.
-                        let mut iuse: Vec<Interned<DefaultInterner>> =
-                            meta.iuse.iter().map(Interned::from).collect();
-                        // A USE dep judges its flag against IUSE_EFFECTIVE (amd64's implicit `abi_x86_64`).
-                        let mut implicit: Vec<_> = self
-                            .force_mask
-                            .iuse_injection
-                            .profile_part(meta.eapi)
-                            .iter()
-                            .filter(|f| !iuse.contains(f))
-                            .copied()
-                            .collect();
-                        implicit.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
-                        iuse.extend(implicit);
+                        let iuse = self.iuse_effective(meta);
                         let iuse_defaults =
                             crate::effective_use::enabled_iuse_defaults_from_metadata(meta);
                         if deps_invalid(meta) {
@@ -4932,25 +4922,15 @@ mod tests {
         );
     }
 
-    // virtual/mpi: openmpi lacks `abi_x86_64` in IUSE but amd64's IUSE_IMPLICIT has it, so the
-    // first branch's `[abi_x86_64(-)?]` holds and wins over mpich.
-    #[test]
-    fn an_or_branch_use_dep_holds_on_an_implicit_iuse_flag() {
-        let leaf =
-            |iuse: &str| format!("EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE={iuse}\n");
-        let entries = [
-            (
-                "virtual/mpi-1",
-                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE=abi_x86_64\n\
-                 RDEPEND=|| ( a/openmpi[abi_x86_64(-)?] a/mpich[abi_x86_64(-)?] )\n"
-                    .to_string(),
-            ),
-            ("a/openmpi-1", leaf("")),
-            ("a/mpich-1", leaf("abi_x86_64")),
-        ];
+    /// Solve `target` over md5-cache `entries` on a profile whose IUSE_IMPLICIT is `abi_x86_64`;
+    /// `None` when it fails, else the solved packages and whether any USE change is required
+    fn solve_with_implicit_abi(
+        entries: &[(&str, String)],
+        target: &str,
+    ) -> Option<(Vec<String>, bool)> {
         let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
         let mut cpns = Vec::new();
-        for (cpv, text) in &entries {
+        for (cpv, text) in entries {
             let cpv = Cpv::parse(cpv).unwrap();
             cpns.push(cpv.cpn);
             versions
@@ -4999,22 +4979,57 @@ mod tests {
             autosolve_use: false,
             autounmask_widen: false,
         };
-        let pkg = |cpn: &str| {
-            portage_atom_pubgrub::PortagePackage::slotted(
-                Cpn::try_new(cpn).unwrap(),
-                Interned::intern("0"),
-            )
-        };
         let mut provider = portage_atom_pubgrub::PortageDependencyProvider::new(adapter);
         let solution = provider
             .resolve_targets(vec![(
-                pkg("virtual/mpi"),
+                portage_atom_pubgrub::PortagePackage::slotted(
+                    Cpn::try_new(target).unwrap(),
+                    Interned::intern("0"),
+                ),
                 portage_atom_pubgrub::PortageVersionSet::any(),
             )])
-            .unwrap();
-        assert!(solution.get(&pkg("a/openmpi")).is_some());
-        assert!(solution.get(&pkg("a/mpich")).is_none());
-        assert!(provider.use_flag_requirements().is_empty());
+            .ok()?;
+        let mut names: Vec<String> = solution.iter().map(|(p, _)| p.cpn().to_string()).collect();
+        names.sort();
+        Some((names, provider.use_flag_requirements().is_empty()))
+    }
+
+    fn leaf_with_iuse(iuse: &str) -> String {
+        format!("EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE={iuse}\n")
+    }
+
+    // virtual/mpi: openmpi lacks `abi_x86_64` in IUSE but amd64's IUSE_IMPLICIT has it, so the
+    // first branch's `[abi_x86_64(-)?]` holds and wins over mpich.
+    #[test]
+    fn an_or_branch_use_dep_holds_on_an_implicit_iuse_flag() {
+        let entries = [
+            (
+                "virtual/mpi-1",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE=abi_x86_64\n\
+                 RDEPEND=|| ( a/openmpi[abi_x86_64(-)?] a/mpich[abi_x86_64(-)?] )\n"
+                    .to_string(),
+            ),
+            ("a/openmpi-1", leaf_with_iuse("")),
+            ("a/mpich-1", leaf_with_iuse("abi_x86_64")),
+        ];
+        let (names, no_use_change) = solve_with_implicit_abi(&entries, "virtual/mpi").unwrap();
+        assert_eq!(names, ["a/openmpi", "virtual/mpi"]);
+        assert!(no_use_change);
+    }
+
+    #[test]
+    fn a_defaultless_use_dep_matches_a_version_by_its_implicit_iuse() {
+        let entries = [
+            (
+                "app-misc/app-1",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nRDEPEND=a/lib[abi_x86_64]\n"
+                    .to_string(),
+            ),
+            ("a/lib-1", leaf_with_iuse("")),
+        ];
+        let (names, no_use_change) = solve_with_implicit_abi(&entries, "app-misc/app").unwrap();
+        assert_eq!(names, ["a/lib", "app-misc/app"]);
+        assert!(no_use_change);
     }
 
     #[test]

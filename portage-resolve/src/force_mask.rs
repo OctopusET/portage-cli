@@ -93,6 +93,10 @@ pub struct IuseInjection {
     injected: HashSet<Flag>,
     /// Same for non-injection EAPIs (≤4, PMS table 5.6)
     non_injected: HashSet<Flag>,
+    /// `injected` sorted by name
+    injected_sorted: Vec<Flag>,
+    /// `non_injected` sorted by name
+    non_injected_sorted: Vec<Flag>,
 }
 
 impl IuseInjection {
@@ -108,9 +112,10 @@ impl IuseInjection {
         use_expand_unprefixed: Vec<String>,
         expand_values: HashMap<String, Vec<String>>,
     ) -> Self {
-        let intern_all =
-            |set: BTreeSet<String>| set.into_iter().map(|s| Interned::intern(&s)).collect();
-        let injected = intern_all(portage_metadata::iuse_effective_profile_part(
+        let intern_all = |set: BTreeSet<String>| -> Vec<Flag> {
+            set.into_iter().map(|s| Interned::intern(&s)).collect()
+        };
+        let injected_sorted = intern_all(portage_metadata::iuse_effective_profile_part(
             true,
             &iuse_implicit,
             &use_expand,
@@ -127,16 +132,34 @@ impl IuseInjection {
             &expand_values,
         );
         non_injected.extend(force_mask_flags);
-        let non_injected = intern_all(non_injected);
+        let non_injected_sorted = intern_all(non_injected);
         Self {
-            injected,
-            non_injected,
+            injected: injected_sorted.iter().copied().collect(),
+            non_injected: non_injected_sorted.iter().copied().collect(),
+            injected_sorted,
+            non_injected_sorted,
         }
     }
 
     /// Whether no profile contributed anything, so `IUSE_EFFECTIVE` is only the ebuild's IUSE
     pub fn is_empty(&self) -> bool {
         self.injected.is_empty() && self.non_injected.is_empty()
+    }
+
+    /// `IUSE_EFFECTIVE`: `iuse`, then the profile's implicit flags it lacks in name order
+    pub fn with_implicit(&self, eapi: Eapi, mut iuse: Vec<Flag>) -> Vec<Flag> {
+        let implicit = if eapi.has_profile_iuse_injection() {
+            &self.injected_sorted
+        } else {
+            &self.non_injected_sorted
+        };
+        let own = iuse.len();
+        for f in implicit {
+            if !iuse[..own].contains(f) {
+                iuse.push(*f);
+            }
+        }
+        iuse
     }
 
     /// The cached profile-invariant `IUSE_EFFECTIVE` half for `eapi`'s injection class
