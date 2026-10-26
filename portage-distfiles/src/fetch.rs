@@ -254,6 +254,13 @@ impl Fetcher {
             });
         }
 
+        if manifest_entry.is_some_and(|e| !e.has_supported_hash()) {
+            return Err(Error::Verify {
+                filename: df.filename.clone(),
+                reason: "insufficient data for checksum verification: no supported hash".to_owned(),
+            });
+        }
+
         // Fast path: already present and valid (writable dir first, then the
         // read-only locations).
         for dir in std::iter::once(&self.distdir).chain(self.ro_distdirs.iter()) {
@@ -964,6 +971,24 @@ mod tests {
             !temp.as_std_path().exists(),
             "the atomic temp file must not linger after a failed attempt"
         );
+    }
+
+    #[tokio::test]
+    async fn an_entry_with_no_supported_hash_is_refused_before_any_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![ManifestEntry::Dist {
+                filename: "foo.tar.gz".to_string(),
+                size: 7,
+                hashes: vec![("WHIRLPOOL".to_string(), "00".to_string())],
+            }],
+        });
+        let err = Fetcher::new(distdir, FetchConfig::default())
+            .fetch_distfile_digests(&one_url("foo.tar.gz"), &digests)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Verify { .. }));
     }
 
     // Regression: two independent fetch calls for the same filename (e.g. one

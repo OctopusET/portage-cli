@@ -61,7 +61,23 @@ impl ManifestEntry {
             | ManifestEntry::SubManifest { size, hashes, .. } => verify_hashes(path, *size, hashes),
         }
     }
+
+    /// Whether this entry lists a hash [`Self::verify_file`] can check
+    ///
+    /// Always `true` for `Ignore` and `Timestamp`, which need none.
+    pub fn has_supported_hash(&self) -> bool {
+        match self {
+            ManifestEntry::Ignore { .. } | ManifestEntry::Timestamp { .. } => true,
+            ManifestEntry::Dist { hashes, .. }
+            | ManifestEntry::Data { hashes, .. }
+            | ManifestEntry::SubManifest { hashes, .. } => hashes
+                .iter()
+                .any(|(a, _)| SUPPORTED_HASHES.contains(&a.as_str())),
+        }
+    }
 }
+
+const SUPPORTED_HASHES: [&str; 3] = ["BLAKE2B", "SHA512", "SHA256"];
 
 /// Single-pass size + multi-hash verification
 fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -> Result<()> {
@@ -88,8 +104,10 @@ fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -
     let need_sha256 = hashes.iter().any(|(a, _)| a == "SHA256");
 
     if !need_blake2b && !need_sha512 && !need_sha256 {
-        // No recognised algorithm → nothing to verify.
-        return Ok(());
+        return Err(Error::ManifestVerifyFailed {
+            path: path.to_path_buf(),
+            reason: "insufficient data: no supported hash".to_owned(),
+        });
     }
 
     // --- single read pass ---
@@ -481,16 +499,21 @@ TIMESTAMP 2024-06-01T00:00:00Z
     }
 
     #[test]
-    fn verify_unknown_algo_skipped() {
+    fn verify_refuses_an_entry_with_no_supported_hash() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut f, b"hello").unwrap();
-        let entry = ManifestEntry::Dist {
+        let entry = |hashes| ManifestEntry::Dist {
             filename: "test".into(),
             size: 5,
-            hashes: vec![("FUTURE_HASH".to_string(), "doesnotmatter".to_string())],
+            hashes,
         };
-        // Unknown algo → no hashers → Ok(())
-        assert!(entry.verify_file(f.path()).is_ok());
+        let only_unknown = vec![("WHIRLPOOL".to_string(), "doesnotmatter".to_string())];
+        let err = entry(only_unknown).verify_file(f.path()).unwrap_err();
+        assert!(err.to_string().contains("no supported hash"));
+
+        let mut mixed = hello_hashes();
+        mixed.push(("WHIRLPOOL".to_string(), "doesnotmatter".to_string()));
+        assert!(entry(mixed).verify_file(f.path()).is_ok());
     }
 
     #[test]
