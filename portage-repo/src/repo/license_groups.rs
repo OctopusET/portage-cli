@@ -522,4 +522,16 @@ OSI Apache-2.0
         let expr = LicenseExpr::parse("|| ( foo? ( MIT ) A )").unwrap();
         assert_eq!(acc.licenses_needed(&expr, &off), vec!["A"]);
     }
+
+    #[test]
+    fn an_inactive_any_of_alternative_does_not_accept_the_group() {
+        let reg = LicenseGroupRegistry::default();
+        let acc = AcceptSet::from_tokens(&["MIT".into()], &reg);
+        let off = |_: &str| false;
+        let expr = LicenseExpr::parse("|| ( foo? ( MIT ) A )").unwrap();
+        assert!(!acc.accepts_expr(&expr, &off));
+        assert!(acc.accepts_expr(&expr, &|f: &str| f == "foo"));
+        let expr = LicenseExpr::parse("|| ( foo? ( A ) )").unwrap();
+        assert!(acc.accepts_expr(&expr, &off));
+    }
 }
