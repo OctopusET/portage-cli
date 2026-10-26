@@ -292,6 +292,11 @@ impl BinpkgIndex {
         self.entries.is_empty()
     }
 
+    /// The `PKGDIR` this index was read from
+    pub fn pkgdir(&self) -> &Path {
+        &self.pkgdir
+    }
+
     /// Find the newest binpkg of `cpv` that `query` accepts, returning the absolute container path
     ///
     /// `None` if there is none, so it must be built. Version and slot match by the `cpv`

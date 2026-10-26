@@ -153,8 +153,20 @@ fn find_binpkg_reuse(
         desired_env,
         desired_build_env_key,
         |query| {
-            let local = binpkg_index.and_then(|idx| idx.find_reusable_entry(&cpv, query));
-            let local_pretend = local.as_ref().is_some_and(|(_, entry)| entry.pretend);
+            let find = |idx: &portage_binpkg::BinpkgIndex| {
+                idx.find_reusable_entry(&cpv, query)
+                    .map(|(path, entry)| (path, entry.pretend))
+            };
+            // The index is read once per run: a package this run already built for another root
+            // (the sysroot, then the target) is only in the file.
+            let local = binpkg_index.and_then(|idx| {
+                find(idx).or_else(|| {
+                    portage_binpkg::BinpkgIndex::open(idx.pkgdir())
+                        .ok()
+                        .and_then(|fresh| find(&fresh))
+                })
+            });
+            let local_pretend = local.as_ref().is_some_and(|&(_, pretend)| pretend);
             let local = local.map(|(path, _)| path);
             let remote = if local.is_none() {
                 remote_indices.iter().find_map(|idx| {
