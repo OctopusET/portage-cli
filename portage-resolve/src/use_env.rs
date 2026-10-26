@@ -431,7 +431,18 @@ async fn compute_use_env(
                 package_use.push((atom, overrides));
                 continue;
             }
-            for ov in overrides {
+            // make.conf's own USE_EXPAND assignment replaces the group after its USE.
+            let assigned = |flag: &str| {
+                resolved.conf_expand_assigned.iter().any(|var| {
+                    flag.len() > var.len()
+                        && flag.as_bytes()[var.len()] == b'_'
+                        && flag[..var.len()].eq_ignore_ascii_case(var)
+                })
+            };
+            for ov in overrides
+                .into_iter()
+                .filter(|ov| !assigned(ov.flag.as_str()))
+            {
                 let sign = if ov.enable { "" } else { "-" };
                 let glob = if ov.prefix { "*" } else { "" };
                 conf_use.push_str(&format!(" {sign}{}{glob}", ov.flag));
@@ -1113,33 +1124,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_match_all_group_clear_reaches_make_conf_and_iuse() {
-        let env = env_with(
-            &[("make.defaults", "USE_EXPAND=\"L10N\"\n")],
-            &[
-                ("make.conf", "L10N=\"en\"\n"),
-                ("package.use", "*/* L10N: -* de\n"),
-            ],
-        )
-        .await;
-        let flag = portage_atom::interner::Interned::intern;
-        let iuse_defaults = [(flag("l10n_fr"), portage_atom_pubgrub::IUseDefault::Enabled)];
-        let cfg = portage_atom_pubgrub::resolve_effective_use(
-            &iuse_defaults.into_iter().collect(),
-            &[flag("l10n_en"), flag("l10n_de"), flag("l10n_fr")],
-            &env.defaults,
-            &Cpv::parse("dev-libs/foo-1").unwrap(),
-            None,
-            &env.package_use,
-            &env.env_use,
-            &env.profile_package_use,
-            &env.conf,
-        );
-        let state = |f| cfg.get(flag(f));
+    async fn a_match_all_group_line_folds_into_make_conf_unless_it_assigns_the_group() {
         use portage_atom_pubgrub::UseFlagState::{Disabled, Enabled};
-        assert_eq!(state("l10n_en"), Disabled);
-        assert_eq!(state("l10n_fr"), Disabled);
-        assert_eq!(state("l10n_de"), Enabled);
+        let flag = portage_atom::interner::Interned::intern;
+        let l10n = async |make_conf: &str| {
+            let env = env_with(
+                &[("make.defaults", "USE_EXPAND=\"L10N\"\nUSE=\"l10n_en\"\n")],
+                &[
+                    ("make.conf", make_conf),
+                    ("package.use", "*/* L10N: -* de\n"),
+                ],
+            )
+            .await;
+            let iuse_defaults = [(flag("l10n_fr"), portage_atom_pubgrub::IUseDefault::Enabled)];
+            let cfg = portage_atom_pubgrub::resolve_effective_use(
+                &iuse_defaults.into_iter().collect(),
+                &[flag("l10n_en"), flag("l10n_de"), flag("l10n_fr")],
+                &env.defaults,
+                &Cpv::parse("dev-libs/foo-1").unwrap(),
+                None,
+                &env.package_use,
+                &env.env_use,
+                &env.profile_package_use,
+                &env.conf,
+            );
+            ["l10n_en", "l10n_de", "l10n_fr"].map(|f| cfg.get(flag(f)))
+        };
+        assert_eq!(l10n("").await, [Disabled, Enabled, Disabled]);
+        assert_eq!(l10n("L10N=\"en\"\n").await, [Enabled, Disabled, Disabled]);
     }
 
     #[tokio::test]
