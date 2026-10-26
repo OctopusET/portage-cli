@@ -232,27 +232,17 @@ impl<'a> ParseState<'a> {
             check("LICENSE", self.license, parsed);
         }
 
-        let mut keywords_val: Vec<Keyword<I>> = Vec::new();
-        if !self.keywords.is_empty() {
-            let parsed = self
-                .keywords
-                .split_whitespace()
-                .map(|token| Keyword::parse(token))
-                .collect::<Result<_>>()
-                .map(|k| keywords_val = k);
-            check("KEYWORDS", self.keywords, parsed);
-        }
-
-        let mut iuse_val: Vec<IUse<I>> = Vec::new();
-        if !self.iuse.is_empty() {
-            let parsed = self
-                .iuse
-                .split_whitespace()
-                .map(|token| IUse::parse(token))
-                .collect::<Result<_>>()
-                .map(|i| iuse_val = i);
-            check("IUSE", self.iuse, parsed);
-        }
+        // Portage does not validate KEYWORDS or IUSE syntax: a token em cannot parse is skipped.
+        let keywords_val: Vec<Keyword<I>> = self
+            .keywords
+            .split_whitespace()
+            .filter_map(|token| Keyword::parse(token).ok())
+            .collect();
+        let iuse_val: Vec<IUse<I>> = self
+            .iuse
+            .split_whitespace()
+            .filter_map(|token| IUse::parse(token).ok())
+            .collect();
 
         let mut required_use_val = None;
         if !self.required_use.is_empty() {
@@ -831,7 +821,7 @@ _md5_=4539d849d3cea8ac84debad9b3154143
 
     #[test]
     fn malformed_license_is_recorded_not_fatal() {
-        let input = "DESCRIPTION=t\nSLOT=0\nEAPI=8\nLICENSE=|| (\nKEYWORDS=amd64\n";
+        let input = "DESCRIPTION=t\nSLOT=0\nEAPI=8\nLICENSE=|| (\nKEYWORDS=amd64 ~\nIUSE=+ foo\n";
         let entry = CacheEntry::parse(input).unwrap();
         let keys: Vec<_> = entry
             .metadata
@@ -842,6 +832,7 @@ _md5_=4539d849d3cea8ac84debad9b3154143
         assert_eq!(keys, ["LICENSE"]);
         assert!(entry.metadata.license.is_none());
         assert_eq!(entry.metadata.keywords.len(), 1);
+        assert_eq!(entry.metadata.iuse.len(), 1);
         let reparsed = CacheEntry::parse(&entry.serialize()).unwrap();
         assert_eq!(reparsed.metadata.invalid, entry.metadata.invalid);
     }
