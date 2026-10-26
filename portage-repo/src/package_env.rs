@@ -5,10 +5,8 @@
 //! `FEATURES`, `CFLAGS`/`CXXFLAGS`/`LDFLAGS`, `MAKEOPTS`, and arbitrary build
 //! variables take effect per package (portage `config._grab_pkg_env`).
 //!
-//! Scope: this is the **build-environment** application only. `USE` set by an
-//! env file is *not* reflected in dependency resolution — the resolved plan's
-//! USE wins at build time — because the resolver does not yet read
-//! `package.env`. That is a separate, resolver-side follow-up.
+//! Scope: this is the build-environment application only; the resolver reads an
+//! env file's `USE` separately, and the resolved plan's USE wins at build time.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

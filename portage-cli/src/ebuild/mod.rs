@@ -1424,8 +1424,8 @@ impl PackageSetup {
         // Per-package build environment: `/etc/portage/package.env` maps this package
         // to env files under `/etc/portage/env/`, sourced on top of `make.conf` so
         // FEATURES, *FLAGS, MAKEOPTS, … take effect per package. Sourced before the
-        // resolved USE is applied (below) so the plan's USE wins — USE set by an env
-        // file is intentionally not reflected here (a resolver-side follow-up).
+        // resolved USE is applied (below) so the plan's USE, which already folds in
+        // an env file's USE, wins.
         {
             let base = config_root.unwrap_or_else(|| Utf8Path::new("/"));
             let mut portage_dirs = vec![base.join("etc/portage").into_std_path_buf()];
