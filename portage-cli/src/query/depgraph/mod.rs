@@ -1078,7 +1078,7 @@ fn rebuild_visible(
 ///
 /// Each consumer joins the targets at its installed version or newer and is registered as a
 /// rebuild, so the solver picks its version and orders it after the triggers. A round that fails
-/// to solve is dropped with a warning; the last good one stands.
+/// to solve, or a rebuild still pending after the last round, is dropped with a warning.
 fn settle_slot_op_rebuilds(
     ctx: &round::RoundCtx<'_>,
     targets: &mut Vec<(PortagePackage, PortageVersionSet)>,
@@ -1088,13 +1088,24 @@ fn settle_slot_op_rebuilds(
     metrics: &mut ResolveMetrics,
 ) -> round::RoundOutcome {
     const MAX_ROUNDS: usize = 3;
-    for _ in 0..MAX_ROUNDS {
+    for round in 0..=MAX_ROUNDS {
         let pending: Vec<_> = outcome
             .slot_op_rebuilds
             .iter()
             .filter(|rb| !rebuild.contains(&installed_package(rb.cpn, rb.slot)))
             .collect();
         if pending.is_empty() {
+            break;
+        }
+        if round == MAX_ROUNDS {
+            let names: Vec<String> = pending
+                .iter()
+                .map(|rb| format!("{}-{}", rb.cpn, rb.version))
+                .collect();
+            crate::style::warn_line!(
+                "skipping slot-operator rebuilds still pending after {MAX_ROUNDS} rounds: {}",
+                names.join(" ")
+            );
             break;
         }
         let mut next_targets = targets.clone();
