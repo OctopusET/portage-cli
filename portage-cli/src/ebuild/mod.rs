@@ -2651,15 +2651,16 @@ async fn unmerge_package(u: UnmergePackage<'_>) -> Result<()> {
         preserve_paths.iter().cloned().collect(),
     );
 
-    let uninstall_ignore =
-        uninstall_ignore_patterns(&shell.get_var("UNINSTALL_IGNORE").unwrap_or_default());
-    remove_old_unique_files(
-        &old_contents,
-        new_contents,
-        &preserve_paths,
-        root,
-        &uninstall_ignore,
-    );
+    let rules = UnmergeRules {
+        uninstall_ignore: uninstall_ignore_patterns(
+            &shell.get_var("UNINSTALL_IGNORE").unwrap_or_default(),
+        ),
+        protect: ConfigProtect::from_shell(shell),
+        orphans: shell
+            .get_var("FEATURES")
+            .is_some_and(|f| f.split_whitespace().any(|x| x == "unmerge-orphans")),
+    };
+    remove_old_unique_files(&old_contents, new_contents, &preserve_paths, root, &rules);
 
     vdb.unregister(old_pkg)
         .context("unregistering old package")?;
@@ -2884,12 +2885,21 @@ fn safe_dest_under(root: &Utf8Path, path: &Utf8Path) -> Result<Utf8PathBuf> {
     Ok(root.join(rel))
 }
 
+/// What decides whether an unmerge removes a file of the package being removed
+struct UnmergeRules {
+    uninstall_ignore: Vec<glob::Pattern>,
+    protect: ConfigProtect,
+    /// FEATURES=unmerge-orphans (on in make.globals): a file outside CONFIG_PROTECT is removed
+    /// even when it changed since the merge
+    orphans: bool,
+}
+
 fn remove_old_unique_files(
     old_contents: &[ContentsEntry],
     new_contents: &[ContentsEntry],
     preserve: &HashSet<Utf8PathBuf>,
     root: &Utf8Path,
-    uninstall_ignore: &[glob::Pattern],
+    rules: &UnmergeRules,
 ) {
     let new_paths: HashSet<&Utf8PathBuf> = new_contents.iter().map(|e| &e.path).collect();
     let owned: HashSet<&Utf8Path> = old_contents.iter().map(|e| e.path.as_path()).collect();
@@ -2908,7 +2918,7 @@ fn remove_old_unique_files(
         let Ok(lstat) = std::fs::symlink_metadata(dest.as_std_path()) else {
             continue;
         };
-        if let Some(reason) = keep_on_unmerge(entry, &dest, &lstat, &owned, uninstall_ignore) {
+        if let Some(reason) = keep_on_unmerge(entry, &dest, &lstat, &owned, rules) {
             tracing::debug!("--- {reason} {}", entry.path);
             continue;
         }
@@ -2942,18 +2952,23 @@ fn keep_on_unmerge(
     dest: &Utf8Path,
     lstat: &std::fs::Metadata,
     owned: &HashSet<&Utf8Path>,
-    uninstall_ignore: &[glob::Pattern],
+    rules: &UnmergeRules,
 ) -> Option<&'static str> {
     use std::os::unix::fs::MetadataExt;
     let is_link = lstat.file_type().is_symlink();
     let libdir_link =
         is_link && ["/lib", "/usr/lib", "/usr/local/lib"].contains(&entry.path.as_str());
     if libdir_link
-        || uninstall_ignore
+        || rules
+            .uninstall_ignore
             .iter()
             .any(|p| p.matches(entry.path.as_str()))
     {
         return Some("cfgpro");
+    }
+    let dir_or_dir_link = lstat.is_dir() || (is_link && dest.is_dir());
+    if rules.orphans && !dir_or_dir_link && !rules.protect.is_protected(&entry.path) {
+        return None;
     }
     let mtime_changed = entry
         .mtime
@@ -5286,7 +5301,13 @@ mod tests {
             ["/usr/bin", "/usr/bin/old-only", "/usr/bin/shared"].map(|p| recorded(&root, p));
         let new_contents = [recorded(&root, "/usr/bin/shared")];
 
-        remove_old_unique_files(&old_contents, &new_contents, &HashSet::new(), &root, &[]);
+        remove_old_unique_files(
+            &old_contents,
+            &new_contents,
+            &HashSet::new(),
+            &root,
+            &rules("", false),
+        );
 
         assert!(!root.join("usr/bin/old-only").exists());
         assert!(root.join("usr/bin/shared").exists());
@@ -5353,17 +5374,51 @@ mod tests {
         let reason = |e: &ContentsEntry| {
             let dest = root.join(e.path.as_str().trim_start_matches('/'));
             let lstat = fs::symlink_metadata(dest.as_std_path()).unwrap();
-            keep_on_unmerge(e, &dest, &lstat, &HashSet::new(), &[])
+            keep_on_unmerge(e, &dest, &lstat, &HashSet::new(), &rules("", false))
         };
         assert_eq!(reason(&old_contents[2]), Some("!obj"));
         assert_eq!(reason(&old_contents[3]), Some("!sym"));
 
-        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root, &[]);
+        remove_old_unique_files(
+            &old_contents,
+            &[],
+            &HashSet::new(),
+            &root,
+            &rules("", false),
+        );
 
         assert_eq!(fs::read(edited.as_std_path()).unwrap(), b"user");
         assert!(root.join("etc/touched").exists());
         assert!(root.join("etc/retyped").is_dir());
         assert!(root.join("etc/unlinked").is_file());
+    }
+
+    fn rules(uninstall_ignore: &str, orphans: bool) -> UnmergeRules {
+        UnmergeRules {
+            uninstall_ignore: uninstall_ignore_patterns(uninstall_ignore),
+            protect: ConfigProtect::for_test(&["/etc"], &[]),
+            orphans,
+        }
+    }
+
+    #[test]
+    fn unmerge_orphans_removes_changed_files_outside_config_protect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        for p in ["usr/share/a/data", "etc/a.conf", "etc/b.conf"] {
+            fs::create_dir_all(root.join(p).parent().unwrap().as_std_path()).unwrap();
+            fs::write(root.join(p).as_std_path(), b"orig").unwrap();
+        }
+        let old_contents =
+            ["/usr/share/a/data", "/etc/a.conf", "/etc/b.conf"].map(|p| recorded(&root, p));
+        fs::write(root.join("usr/share/a/data").as_std_path(), b"edited").unwrap();
+        fs::write(root.join("etc/a.conf").as_std_path(), b"edited").unwrap();
+
+        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root, &rules("", true));
+
+        assert!(!root.join("usr/share/a/data").exists());
+        assert!(root.join("etc/a.conf").exists());
+        assert!(!root.join("etc/b.conf").exists());
     }
 
     #[test]
@@ -5392,9 +5447,13 @@ mod tests {
             "/usr/share/own-link",
         ]
         .map(|p| recorded(&root, p));
-        let ignore = uninstall_ignore_patterns("/lib/modules/*");
-
-        remove_old_unique_files(&old_contents, &[], &HashSet::new(), &root, &ignore);
+        remove_old_unique_files(
+            &old_contents,
+            &[],
+            &HashSet::new(),
+            &root,
+            &rules("/lib/modules/*", false),
+        );
 
         assert!(root.join("lib").as_std_path().is_symlink());
         assert!(root.join("lib64/modules/m.ko").exists());
