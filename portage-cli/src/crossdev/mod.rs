@@ -1060,6 +1060,7 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
         // below; the plan preview `depgraph` would otherwise print is a
         // stray merge list the user never asked for.
         quiet: true,
+        display: Default::default(),
     })
     .await
     .ok()?;

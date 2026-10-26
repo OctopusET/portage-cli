@@ -667,6 +667,10 @@ async fn emerge_atoms_inner(
         },
         complete_graph: merge_flags.complete_graph,
         quiet: false,
+        display: query::depgraph::PlanDisplay {
+            quiet: cli.quiet(),
+            verb: plan_header_verb(merge_flags),
+        },
     })
     .await?;
 
@@ -1729,8 +1733,29 @@ fn packages_for_unmerge(
     packages
 }
 
+/// The plan header's `would be ...` verb for this run's merge mode
+fn plan_header_verb(merge_flags: &cli::MergeFlags) -> &'static str {
+    if merge_flags.fetchonly || merge_flags.fetch_all_uri {
+        "fetched"
+    } else if merge_flags.buildpkgonly {
+        "built"
+    } else {
+        "merged"
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plan_header_verb_follows_the_merge_mode() {
+        let mut flags = crate::cli::MergeFlags::default();
+        assert_eq!(super::plan_header_verb(&flags), "merged");
+        flags.buildpkgonly = true;
+        assert_eq!(super::plan_header_verb(&flags), "built");
+        flags.fetch_all_uri = true;
+        assert_eq!(super::plan_header_verb(&flags), "fetched");
+    }
+
     use super::*;
 
     #[test]

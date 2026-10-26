@@ -373,6 +373,26 @@ pub struct DepgraphOpts<'a> {
     /// are unaffected — pass `nodeps`/`autounmask_persist: Never`/
     /// `ask: false` too so those paths have nothing to report.
     pub quiet: bool,
+    /// How the Pretty plan is laid out
+    pub display: PlanDisplay,
+}
+
+/// emerge's plan layout switches for the Pretty display
+#[derive(Debug, Clone, Copy)]
+pub struct PlanDisplay {
+    /// `--quiet`: no header, no mask column, no USE string unless `--verbose`
+    pub quiet: bool,
+    /// The header's `would be ...` verb: `merged`, `fetched` or `built`
+    pub verb: &'static str,
+}
+
+impl Default for PlanDisplay {
+    fn default() -> Self {
+        Self {
+            quiet: false,
+            verb: "merged",
+        }
+    }
 }
 
 /// The settled solve: last good round, plus `--complete-graph` repair notes.

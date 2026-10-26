@@ -45,6 +45,7 @@ pub(super) struct Prepared<'a> {
     pub(super) resume_completed: std::collections::HashSet<(MergeRoot, String)>,
     pub(super) complete_graph: bool,
     pub(super) quiet: bool,
+    pub(super) display: super::PlanDisplay,
     pub(super) exclude_atoms: Vec<Dep>,
     pub(super) selective: bool,
     pub(super) cross: root_aware::CrossContext,
@@ -125,6 +126,7 @@ pub(super) async fn prepare<'a>(
         resume_completed,
         complete_graph,
         quiet,
+        display,
     } = opts;
     let exclude_atoms: Vec<Dep> = exclude
         .iter()
@@ -510,6 +512,7 @@ pub(super) async fn prepare<'a>(
         resume_completed,
         complete_graph,
         quiet,
+        display,
         exclude_atoms,
         selective,
         cross,

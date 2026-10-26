@@ -229,6 +229,7 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         resume_completed: opts.resume,
         complete_graph: opts.complete_graph,
         quiet: true,
+        display: Default::default(),
     }))
 }
 
@@ -616,6 +617,7 @@ fn a_missing_explicit_atom_is_fatal() {
             resume_completed: HashSet::new(),
             complete_graph: false,
             quiet: true,
+            display: Default::default(),
         }));
     let Err(err) = result else {
         panic!("a missing explicit atom must abort the resolve");

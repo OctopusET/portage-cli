@@ -634,6 +634,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 resume_completed: std::collections::HashSet::new(),
                 complete_graph: false,
                 quiet: false,
+                display: Default::default(),
             })
             .await?;
             if outcome.exit_code != 0 {

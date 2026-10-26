@@ -1576,6 +1576,8 @@ pub(super) struct PrettyCtx<'a> {
     pub package_mask: &'a portage_resolve::repo::PolicyMaskList,
     /// [`portage_resolve::download_size::fetch_restricted`] of the plan, for `F`/`f`
     pub fetch_restrict: &'a HashMap<Cpv, bool>,
+    /// emerge's `--quiet` layout and the header's verb
+    pub display: super::PlanDisplay,
 }
 
 /// Print the emerge-style pretty plan, honouring each entry's
@@ -1709,7 +1711,7 @@ fn row_attrs(
 ) -> RowAttrs {
     let Some(c) = cache else {
         return RowAttrs {
-            mask: Some(b' '),
+            mask: (!ctx.display.quiet).then_some(b' '),
             ..RowAttrs::default()
         };
     };
@@ -1742,7 +1744,7 @@ fn row_attrs(
         } else {
             ctx.fetch_restrict.get(cpv).copied()
         },
-        mask: Some(mask),
+        mask: (!ctx.display.quiet).then_some(mask),
     }
 }
 
@@ -1812,6 +1814,7 @@ pub(super) fn format_plan_parts(
         requested,
         package_mask: _,
         fetch_restrict: _,
+        display,
     } = ctx;
 
     let dest_suffix = match super::root_aware::display_root(merge_root, &cross.target, cross) {
@@ -1832,7 +1835,12 @@ pub(super) fn format_plan_parts(
 
     let previous = previous_entry(pkg, ver, installed_entries);
 
+    // emerge's `--quiet` drops the USE string unless `--verbose` asks for it,
+    // and every other verbose-only detail regardless.
+    let show_flags = !display.quiet || verbose >= 1;
+    let verbose = if display.quiet { 0 } else { verbose };
     let flag_str = cache
+        .filter(|_| show_flags)
         .map(|c| {
             format_flags(
                 c,
@@ -1843,7 +1851,7 @@ pub(super) fn format_plan_parts(
                     req,
                     previous,
                     forced: &forced_display,
-                    all_flags: verbose >= 1,
+                    all_flags: display.quiet || verbose >= 1,
                 },
             )
         })
@@ -1929,7 +1937,8 @@ pub(super) fn format_plan_parts(
             colorize_status_field(&field),
         )
     } else {
-        ("nomerge", "", " ".repeat(7))
+        let width = if display.quiet { 6 } else { 7 };
+        ("nomerge", "", " ".repeat(width))
     };
     let bracket = format!("[{name_color}{kind}{name_color:#}{pad}{colored_field}]");
     // Portage's `pkg_str oldbest` leaves a trailing space when there is no old version column.
@@ -1947,17 +1956,12 @@ pub(super) fn format_plan_parts(
     (bracket, rest)
 }
 
-fn print_pretty_with_roots(
-    ctx: &PrettyCtx,
-    order: &[(PortagePackage, Version)],
-    merge_roots: &[portage_atom_pubgrub::MergeRoot],
-    cross: &super::root_aware::CrossContext,
-) {
-    let mut out = anstream::stdout();
-
+/// The `These are the packages that would be ...` header and resolve timing
+fn print_header(out: &mut impl std::io::Write, ctx: &PrettyCtx) {
+    let verb = ctx.display.verb;
     writeln!(
         out,
-        "{C_PKG}These are the packages that would be merged, in order:{C_PKG:#}\n"
+        "{C_PKG}These are the packages that would be {verb}, in order:{C_PKG:#}\n"
     )
     .ok();
     // Real portage pairs a `Calculating dependencies... done!` line with a
@@ -1973,6 +1977,19 @@ fn print_pretty_with_roots(
         ctx.resolve_secs
     )
     .ok();
+}
+
+fn print_pretty_with_roots(
+    ctx: &PrettyCtx,
+    order: &[(PortagePackage, Version)],
+    merge_roots: &[portage_atom_pubgrub::MergeRoot],
+    cross: &super::root_aware::CrossContext,
+) {
+    let mut out = anstream::stdout();
+
+    if !ctx.display.quiet {
+        print_header(&mut out, ctx);
+    }
 
     for ((pkg, ver), merge_root) in order.iter().zip(merge_roots) {
         let (bracket, rest) = format_plan_parts(ctx, pkg, ver, *merge_root, cross, true);
@@ -3190,5 +3207,80 @@ mod tests {
         let hard_cycle: Vec<_> = hard_cycle_edges(&edges, &ok).collect();
         assert_eq!(hard_cycle.len(), 1, "only the BDEPEND edge is a hard cycle");
         assert_eq!(hard_cycle[0].class, DepClass::Bdepend);
+    }
+
+    // The bracket and rest of a new `app-misc/foo-1` row, ANSI stripped
+    fn new_row(quiet: bool) -> (String, String) {
+        let cpn = Cpn::parse("app-misc/foo").unwrap();
+        let cpv = Cpv::new(cpn, ver("1"));
+        let cache = CacheEntry::parse("EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE=+doc\n")
+            .unwrap();
+        let data = RepoData::from_parts(
+            vec![cpn],
+            HashMap::from([(cpn, vec![(cpv, cache)])]),
+            "gentoo".into(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let layer = portage_atom_pubgrub::UseLayer::default();
+        let arch = gentoo_core::Arch::intern("amd64");
+        let accept_keywords = portage_resolve::repo::AcceptKeywords::from_global(&arch, &["amd64"]);
+        let ctx = PrettyCtx {
+            data: &data,
+            installed: &HashMap::new(),
+            installed_entries: &[],
+            defaults: &layer,
+            conf: &layer,
+            env_use: &layer,
+            package_use: &[],
+            profile_package_use: &[],
+            use_expand: &[],
+            use_expand_hidden: &[],
+            flag_reqs: &HashMap::new(),
+            sizes: &HashMap::new(),
+            slot_op_cpns: &HashSet::new(),
+            verbose: 0,
+            ceded: &[],
+            force_mask: &portage_resolve::force_mask::ForceMask::default(),
+            accept_keywords: &accept_keywords,
+            binpkg_index: None,
+            resolve_secs: 0.0,
+            selected: &HashSet::new(),
+            requested: &HashSet::new(),
+            package_mask: &portage_resolve::repo::PolicyMaskList::EMPTY,
+            fetch_restrict: &HashMap::new(),
+            display: super::super::PlanDisplay {
+                quiet,
+                ..Default::default()
+            },
+        };
+        let cross = super::super::root_aware::detect(
+            &portage_resolve::Roots::default(),
+            camino::Utf8Path::new("/"),
+        );
+        let (bracket, rest) = format_plan_parts(
+            &ctx,
+            &pkg("app-misc/foo"),
+            &ver("1"),
+            portage_atom_pubgrub::MergeRoot::Target,
+            &cross,
+            true,
+        );
+        (strip_ansi(&bracket), strip_ansi(&rest))
+    }
+
+    #[test]
+    fn quiet_rows_drop_the_mask_column_and_use_string() {
+        assert_eq!(
+            new_row(false),
+            (
+                "[ebuild  N     ]".to_string(),
+                "app-misc/foo-1  USE=\"doc\"".to_string()
+            )
+        );
+        assert_eq!(
+            new_row(true),
+            ("[ebuild  N    ]".to_string(), "app-misc/foo-1".to_string())
+        );
     }
 }

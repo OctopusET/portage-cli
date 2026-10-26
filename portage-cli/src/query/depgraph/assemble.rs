@@ -41,6 +41,7 @@ pub(super) fn assemble(
         roots,
         binpkg_preview,
         quiet,
+        display,
         cross,
         config_root,
         vdb_snapshots,
@@ -274,6 +275,7 @@ pub(super) fn assemble(
         requested: &root_cpns,
         package_mask: &package_mask,
         fetch_restrict: &fetch_restrict,
+        display,
     };
 
     if !quiet {
@@ -498,7 +500,7 @@ pub(super) fn assemble(
     // estimate prints immediately after this, once `depgraph()` returns, and
     // the two must be adjacent — previously the advisory block sat between
     // them, splitting one logical summary in two.
-    if matches!(format, DepgraphFormat::Pretty) && verbose >= 1 {
+    if matches!(format, DepgraphFormat::Pretty) && verbose >= 1 && !display.quiet {
         use std::io::Write as _;
         let mut out = anstream::stdout();
         let rows: Vec<_> = order
