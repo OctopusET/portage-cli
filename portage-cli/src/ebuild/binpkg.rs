@@ -5,6 +5,7 @@
 //! when a key is configured. The build id and the output path come from
 //! [`crate::binpkg::reserve_container`].
 
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -39,13 +40,15 @@ pub(crate) fn ed_image_dir(shell: &portage_repo::EbuildShell, work_root: &Utf8Pa
 ///
 /// CONTENTS and metadata are computed as a merge would — `walk_image` +
 /// `Vdb::register` — against a scratch VDB under `work_root/temp`.
+///
+/// Returns the package path and the [`BinpkgRecord`] a merge of this build writes.
 pub(crate) async fn build_binpkg_standalone(
     shell: &mut portage_repo::EbuildShell,
     ebuild: &Ebuild,
     work_root: &Utf8Path,
     root: &Utf8Path,
     build_env_key: &str,
-) -> Result<Utf8PathBuf> {
+) -> Result<(Utf8PathBuf, BinpkgRecord)> {
     shell.apply_iuse_effective();
     let mut env = shell.collect_env();
     let env_dump = capture_environment(shell, work_root).await;
@@ -104,19 +107,63 @@ pub(crate) async fn build_binpkg_standalone(
     std::fs::write(key_file.as_std_path(), format!("{key}\n"))
         .with_context(|| format!("writing {key_file}"))?;
 
-    write_binpkg(shell, ebuild, work_root, root, installed.path())
+    let (out, build_id) = write_binpkg(shell, ebuild, work_root, root, installed.path())?;
+    let record = vec![
+        ("BINPKGMD5", binpkg_md5(&out)?),
+        ("BUILD_ID", build_id.to_string()),
+    ];
+    Ok((out, record))
+}
+
+/// VDB files naming the binary package a merge came from or produced, as `(name, value)`
+pub(crate) type BinpkgRecord = Vec<(&'static str, String)>;
+
+/// The [`BinpkgRecord`] of a merge from `bp`, whose metadata is `metadata`
+///
+/// `BUILD_TIME` stays the package's. A package without `BUILD_ID` takes it from its
+/// `<PF>-<N>.gpkg.tar` name.
+pub(crate) fn binpkg_record(
+    bp: &Utf8Path,
+    pf: &str,
+    metadata: &BTreeMap<String, String>,
+) -> Result<BinpkgRecord> {
+    let mut record = BinpkgRecord::new();
+    let named_id = || {
+        bp.file_name()?
+            .strip_prefix(pf)?
+            .strip_prefix('-')?
+            .strip_suffix(".gpkg.tar")?
+            .parse::<u32>()
+            .ok()
+    };
+    match metadata.get("BUILD_ID") {
+        Some(id) => record.push(("BUILD_ID", id.clone())),
+        None => record.extend(named_id().map(|id| ("BUILD_ID", id.to_string()))),
+    }
+    if let Some(time) = metadata.get("BUILD_TIME") {
+        record.push(("BUILD_TIME", time.clone()));
+    }
+    record.push(("BINPKGMD5", binpkg_md5(bp)?));
+    Ok(record)
+}
+
+fn binpkg_md5(bp: &Utf8Path) -> Result<String> {
+    Ok(portage_binpkg::checksum(bp.as_std_path())
+        .with_context(|| format!("checksumming {bp}"))?
+        .0)
 }
 
 /// Shared GPKG-writing core: pack `image_dir` (`${D}`) + `metadata_dir` (a
 /// VDB-shaped directory -- the real VDB entry for a normal `-b` merge via
-/// [`build_binpkg_standalone`]) into a GPKG under `PKGDIR`.
+/// [`build_binpkg_standalone`]) into a GPKG under `PKGDIR`, returning its
+/// path and `BUILD_ID`.
 fn write_binpkg(
     shell: &portage_repo::EbuildShell,
     ebuild: &Ebuild,
     work_root: &Utf8Path,
     root: &Utf8Path,
     metadata_dir: &Utf8Path,
-) -> Result<Utf8PathBuf> {
+) -> Result<(Utf8PathBuf, u32)> {
     let cat = ebuild.category();
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let image_dir = ed_image_dir(shell, work_root);
@@ -192,7 +239,7 @@ fn write_binpkg(
     if let Err(e) = portage_binpkg::index_pkgdir(&pkgdir, &chost) {
         crate::style::warn_line!("could not refresh Packages index after {out}: {e:#}");
     }
-    Ok(out)
+    Ok((out, build_id))
 }
 
 /// Resolve `BINPKG_GPG_SIGNING_KEY` (+ `_GPG_HOME`/`_DIGEST`/passphrase

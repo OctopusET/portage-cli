@@ -22,7 +22,7 @@ mod build_info;
 mod flock;
 mod protect;
 
-use binpkg::{build_binpkg_standalone, ed_image_dir};
+use binpkg::{BinpkgRecord, binpkg_record, build_binpkg_standalone, ed_image_dir};
 use flock::{CleanWhen, acquire_flock, filter_clean_subs, lock_builddir, lock_merge_flock};
 use protect::scan_cfg;
 // `etc`/`quickpkg` resolve config protection through this path.
@@ -1529,6 +1529,7 @@ impl PackageSetup {
         }
 
         let mut binpkg_metadata = None;
+        let mut record = BinpkgRecord::new();
         if let (Some(wd), Some(bp)) = (work_dir, binpkg) {
             // FEATURES=binpkg-request-signature, or the origin's own
             // binrepos.conf verify-signature=yes.
@@ -1537,10 +1538,11 @@ impl PackageSetup {
             // Where src_install would have put it: the package holds `ED`.
             let image = shell.image_ed(&ebuild, wd.as_std_path(), root.as_std_path());
             let saved = extract_binpkg(&shell, bp, &image, config_root, require_signature)?;
-            binpkg_metadata = Some(
-                portage_binpkg::read_metadata(bp.as_std_path())
-                    .with_context(|| format!("reading the metadata of {bp}"))?,
-            );
+            let metadata = portage_binpkg::read_metadata(bp.as_std_path())
+                .with_context(|| format!("reading the metadata of {bp}"))?;
+            let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+            record = binpkg_record(bp, &pf, &metadata)?;
+            binpkg_metadata = Some(metadata);
             if let Some(shipped) = portage_binpkg::read_ebuild(bp.as_std_path())
                 .with_context(|| format!("reading the ebuild of {bp}"))?
             {
@@ -1620,6 +1622,7 @@ impl PackageSetup {
                             fetch_all_uri,
                             merge_state: _merge_guard.as_deref_mut(),
                             binpkg_metadata: binpkg_metadata.as_ref(),
+                            binpkg_record: &record,
                         },
                     )
                     .await
@@ -1652,7 +1655,10 @@ impl PackageSetup {
                         )
                         .await
                         {
-                            Ok(path) => tracing::info!("Created binary package: {path}"),
+                            Ok((path, built)) => {
+                                tracing::info!("Created binary package: {path}");
+                                record = built;
+                            }
                             Err(e) if matches!(group, PhaseGroup::BuildOnly) => {
                                 return Err(e.context("--buildpkgonly: creating binary package"));
                             }
@@ -1943,6 +1949,8 @@ struct PhaseContext<'a> {
     merge_state: Option<&'a mut MergeBatchState>,
     /// The merged binpkg's own metadata, whose dependencies were bound when it was built
     binpkg_metadata: Option<&'a std::collections::BTreeMap<String, String>>,
+    /// Written over the VDB entry: the binary package this merge came from or produced
+    binpkg_record: &'a [(&'static str, String)],
 }
 
 async fn run_one_phase(
@@ -1961,9 +1969,19 @@ async fn run_one_phase(
             let PhaseContext {
                 merge_state,
                 binpkg_metadata,
+                binpkg_record,
                 ..
             } = context;
-            run_merge(shell, ebuild, work_root, root, merge_state, binpkg_metadata).await
+            run_merge(
+                shell,
+                ebuild,
+                work_root,
+                root,
+                merge_state,
+                binpkg_metadata,
+                binpkg_record,
+            )
+            .await
         }
         RunPhase::Ebuild(p) => {
             // PMS: pkg_pretend takes no part in environment saving, so nothing
@@ -2295,6 +2313,7 @@ async fn run_merge(
     root: &Utf8Path,
     mut merge_state: Option<&mut MergeBatchState>,
     binpkg_metadata: Option<&std::collections::BTreeMap<String, String>>,
+    binpkg_record: &[(&'static str, String)],
 ) -> Result<()> {
     let temp_dir = work_root.join("temp");
     std::fs::create_dir_all(temp_dir.as_std_path()).context("creating temp dir")?;
@@ -2431,6 +2450,11 @@ async fn run_merge(
             build_info::inject_libc_dep(&mut env.rdepend, ebuild.cpv(), &elf, &vdb);
         }
         let (installed, spec) = register_merged(&vdb, ebuild, env, contents, size, elf, &env_dump)?;
+        for (name, value) in binpkg_record {
+            let file = installed.path().join(name);
+            std::fs::write(file.as_std_path(), format!("{value}\n"))
+                .with_context(|| format!("writing {file}"))?;
+        }
         preserve.package_added(&installed);
         if let Some(index) = ownership_index.as_mut() {
             index.add_package(&installed, &spec.contents);
@@ -4229,6 +4253,7 @@ mod tests {
                     fetch_all_uri: false,
                     merge_state: None,
                     binpkg_metadata: None,
+                    binpkg_record: &[],
                 };
                 let root = self.path("root");
                 run_one_phase(&mut shell, ebuild, &repo, *phase, &work, &root, context).await?;
@@ -4472,6 +4497,43 @@ mod tests {
         };
         assert!(contents("root").contains("/usr/share/probe"));
         assert_eq!(contents("root"), contents("root2"));
+    }
+
+    #[tokio::test]
+    async fn a_merge_records_its_package_and_a_binary_install_how_it_was_built() {
+        if pkgdir_is_redirected() {
+            return;
+        }
+        let probe = Probe::new();
+        let ebuild = probe.ebuild(
+            "probe",
+            "1",
+            &format!(
+                "{INSTALLS_A_FILE}pkg_setup() {{ \
+                 [[ ${{MERGE_TYPE}} == binary ]] && CFLAGS=installing || CFLAGS=building; }}\n"
+            ),
+        );
+        probe
+            .run_group(&ebuild, PhaseGroup::Full, "root", None)
+            .await
+            .unwrap();
+        let package = probe.package("root").unwrap();
+        fs::create_dir_all(probe.path("root2")).unwrap();
+        probe
+            .run_group(&ebuild, PhaseGroup::BinpkgMerge, "root2", Some(&package))
+            .await
+            .unwrap();
+
+        let md5 = format!("{:x}\n", md5::compute(fs::read(&package).unwrap()));
+        let vdb = |root: &str| probe.path(root).join("var/db/pkg/app-misc/probe-1");
+        for root in ["root", "root2"] {
+            let read = |file: &str| fs::read_to_string(vdb(root).join(file)).unwrap();
+            assert_eq!(read("BINPKGMD5"), md5, "{root}");
+            assert_eq!(read("BUILD_ID"), "1\n", "{root}");
+            assert_eq!(read("CFLAGS"), "building\n", "{root}");
+        }
+        let build_time = |root: &str| fs::read_to_string(vdb(root).join("BUILD_TIME")).unwrap();
+        assert_eq!(build_time("root"), build_time("root2"));
     }
 
     // A package carries the code it was built with: what the tree or the VDB's
