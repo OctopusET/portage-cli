@@ -189,6 +189,12 @@ impl PortageDependencyProvider {
                             continue;
                         };
                         for &(sol_pkg, sol_ver) in candidates {
+                            if dp
+                                .slot()
+                                .is_some_and(|s| sol_pkg.slot().is_some_and(|t| t != s))
+                            {
+                                continue;
+                            }
                             if dvs.contains(sol_ver) && emitted.insert((sol_pkg, sol_ver)) {
                                 edges.push(DepEdge {
                                     from: (pkg.clone(), version.clone()),
@@ -806,6 +812,81 @@ mod tests {
         assert_eq!(measured.stats.graph_builds, 1);
         assert_eq!(measured.stats.graph_nodes, solution.iter().count());
         assert_eq!(measured.stats.graph_edges, edges.len());
+    }
+
+    #[test]
+    fn slotted_dep_edges_only_reach_the_named_slot() {
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
+        };
+        let depend = |atoms: &str| PackageDeps {
+            depend: DepEntry::parse(atoms).unwrap().into(),
+            ..empty()
+        };
+        let slot = |s: &str| Some(Interned::intern(s));
+        repo.add_version(
+            Cpv::parse("dev-java/junit-3.8.2").unwrap(),
+            slot("0"),
+            None,
+            empty(),
+        );
+        repo.add_version(
+            Cpv::parse("dev-java/junit-4.13.2").unwrap(),
+            slot("4"),
+            None,
+            depend("dev-java/hamcrest"),
+        );
+        repo.add_version(
+            Cpv::parse("dev-java/hamcrest-1.3").unwrap(),
+            slot("0"),
+            None,
+            depend("dev-java/jmock"),
+        );
+        repo.add_version(
+            Cpv::parse("dev-java/jmock-1.2.0").unwrap(),
+            slot("0"),
+            None,
+            depend("dev-java/junit:0"),
+        );
+        repo.add_version(
+            Cpv::parse("app-misc/top-1").unwrap(),
+            None,
+            None,
+            depend("dev-java/junit:4 dev-java/junit:0"),
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        let top = PortagePackage::unslotted(Cpn::parse("app-misc/top").unwrap());
+        let solution = provider
+            .resolve_targets(vec![(top, PortageVersionSet::any())])
+            .unwrap();
+
+        let jmock_edges: Vec<_> = provider
+            .dependency_graph(&solution)
+            .into_iter()
+            .filter(|e| e.from.0.cpn().package.as_str() == "jmock")
+            .collect();
+        assert_eq!(jmock_edges.len(), 1, "{jmock_edges:?}");
+        assert_eq!(jmock_edges[0].to.0.slot(), slot("0"));
+        let order: Vec<String> = provider
+            .install_order(&solution)
+            .iter()
+            .map(|(p, v)| format!("{}-{v}", p.cpn().package))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "junit-3.8.2",
+                "jmock-1.2.0",
+                "hamcrest-1.3",
+                "junit-4.13.2",
+                "top-1"
+            ]
+        );
     }
 
     #[test]
