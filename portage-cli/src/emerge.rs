@@ -1169,19 +1169,36 @@ async fn unmerge_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     remove_matched_packages(cli, vdb, matched, "unmerge", "unmerged").await
 }
 
-/// `-P`/`--prune`: like `-C`, except each matched package's *highest*
-/// installed version is always kept — only the older versions among the
-/// matched set are removal candidates. No dependency graph at all, same
-/// caveat as `-C` (real emerge recommends `--depclean` for a
-/// dependency-aware clean instead). Requires at least one atom, same as
-/// `-C` — there is no "prune everything" bare form.
+/// `-P`/`--prune`: remove the older installed versions of the matched packages (of every
+/// package without atoms) that no other installed package still depends on; each package's
+/// highest version is always kept. `--nodeps` skips the dependency check.
 async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     let vdb = open_cli_vdb(cli)?;
-    let candidates = match_installed_atoms(&vdb, atoms, "-P/--prune")?;
-    let matched = drop_highest_version_per_cpn(candidates);
+    let installed: Vec<portage_vdb::InstalledPackage> = vdb.packages().into_iter().collect();
+    let candidates = if atoms.is_empty() {
+        installed.clone()
+    } else {
+        match_installed_atoms(&vdb, atoms, "-P/--prune")?
+    };
+    let mut matched = drop_highest_version_per_cpn(candidates);
+    if !cli.mode().nodeps {
+        let merge_flags = cli.merge_flags();
+        let exclude = parse_atoms_strict(&merge_flags.exclude)?;
+        let removable: std::collections::HashSet<portage_atom::Cpv> =
+            crate::depclean::prune_candidates(
+                &installed,
+                &matched,
+                &exclude,
+                merge_flags.depclean_bdeps(),
+            )
+            .iter()
+            .map(|p| p.cpv().clone())
+            .collect();
+        matched.retain(|p| removable.contains(p.cpv()));
+    }
 
     if matched.is_empty() {
-        println!(">>> Nothing to prune (only one installed version per matched package).");
+        println!(">>> No packages selected for removal by prune");
         return Ok(());
     }
 

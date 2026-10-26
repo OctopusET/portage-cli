@@ -112,7 +112,7 @@ Pick a different operation than a merge.
 
   Same behavior as the `em depclean [atoms]` applet — this flag exists for scripting convenience within a single `emerge`-style invocation.
   Effect: destructive (may delete or irreversibly overwrite).
-* `-P, --prune` — Remove all but the highest installed version of each atom given, ignoring dependencies (real emerge's own historical caveat applies — prefer `--depclean` for a dependency-aware clean). Effect: destructive (may delete or irreversibly overwrite).
+* `-P, --prune` — Remove all but the highest installed version of each atom given (of every package without atoms), keeping older versions another installed package still depends on unless `--nodeps` is given. Effect: destructive (may delete or irreversibly overwrite).
 * `-W, --deselect` — Remove atoms and/or `@set`s from the world file, without unmerging anything.
 * `-r, --resume` — Resume the last saved merge (see `em maint cleanresume` to discard it instead)
 

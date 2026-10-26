@@ -22,7 +22,7 @@
 //! biased toward over-keeping, but coarser than the other
 //! simplifications: it can leave real orphans (an alternative branch's
 //! otherwise-unneeded package) un-removed where real depclean would
-//! clean them. No `-P`/`--prune`.
+//! clean them.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -234,6 +234,24 @@ fn compute_cleanlist(
         .filter(|p| !kept.contains(p.cpv()))
         .cloned()
         .collect()
+}
+
+/// The `candidates` of a `-P`/`--prune` that no other installed package still needs: every
+/// installed package but the candidates is protected, as portage's prune does.
+pub(crate) fn prune_candidates(
+    installed: &[InstalledPackage],
+    candidates: &[InstalledPackage],
+    exclude_atoms: &[Dep],
+    with_bdeps: bool,
+) -> Vec<InstalledPackage> {
+    let targets: Vec<Dep> = candidates
+        .iter()
+        .filter_map(|p| Dep::parse(&format!("={}", p.cpv())).ok())
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    compute_cleanlist(installed, &[], exclude_atoms, &targets, with_bdeps)
 }
 
 /// Safe removal order within `cleanlist`: a dependent (something in
@@ -475,6 +493,29 @@ mod tests {
             Dep::parse("app-misc/tool").unwrap(),
         ];
         assert!(compute_cleanlist(&installed, &world, &[], &[], false).is_empty());
+    }
+
+    #[test]
+    fn prune_keeps_an_older_slot_something_still_needs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "dev-libs", "lib-1", "", "");
+        write_fake_package(&vdb_root, "dev-libs", "lib-2", "", "");
+        std::fs::write(vdb_root.join("dev-libs/lib-1/SLOT"), "1").unwrap();
+        std::fs::write(vdb_root.join("dev-libs/lib-2/SLOT"), "2").unwrap();
+        let installed: Vec<InstalledPackage> =
+            open_vdb(tmp.path()).packages().into_iter().collect();
+        let old: Vec<InstalledPackage> = installed
+            .iter()
+            .filter(|p| p.cpv().to_string() == "dev-libs/lib-1")
+            .cloned()
+            .collect();
+        assert_eq!(prune_candidates(&installed, &old, &[], false).len(), 1);
+
+        write_fake_package(&vdb_root, "app-misc", "app-1", "dev-libs/lib:1", "");
+        let installed: Vec<InstalledPackage> =
+            open_vdb(tmp.path()).packages().into_iter().collect();
+        assert!(prune_candidates(&installed, &old, &[], false).is_empty());
     }
 
     #[test]

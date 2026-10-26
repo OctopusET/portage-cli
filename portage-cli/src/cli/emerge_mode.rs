@@ -51,9 +51,9 @@ pub struct EmergeModeArgs {
     #[arg(short = 'c', long, effect = "destructive")]
     pub depclean: bool,
 
-    /// Remove all but the highest installed version of each atom given,
-    /// ignoring dependencies (real emerge's own historical caveat applies —
-    /// prefer `--depclean` for a dependency-aware clean).
+    /// Remove all but the highest installed version of each atom given (of
+    /// every package without atoms), keeping older versions another installed
+    /// package still depends on unless `--nodeps` is given.
     #[arg(short = 'P', long, effect = "destructive")]
     pub prune: bool,
 
