@@ -1180,8 +1180,16 @@ async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     } else {
         match_installed_atoms(&vdb, atoms, "-P/--prune")?
     };
-    let mut matched = drop_highest_version_per_cpn(candidates);
-    if !cli.mode().nodeps {
+    // The dependency-aware prune keeps each cp's highest installed version; `--nodeps` keeps
+    // the highest match of the atoms, as portage's plain unmerge prune does.
+    let nodeps = cli.mode().nodeps;
+    let pool = if nodeps {
+        candidates.clone()
+    } else {
+        installed.clone()
+    };
+    let mut matched = drop_highest_version_per_cpn(candidates, &pool);
+    if !nodeps {
         let merge_flags = cli.merge_flags();
         let exclude = parse_atoms_strict(&merge_flags.exclude)?;
         let roots = cli.roots();
@@ -1209,15 +1217,16 @@ async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
 }
 
 /// From `candidates` (already matched installed packages, possibly several
-/// versions per `Cpn`), drop each `Cpn`'s single highest version — real
+/// versions per `Cpn`), drop each `Cpn`'s highest version in `pool` — real
 /// emerge's `--prune` rule ("removes all but the highest installed version
 /// of a package"). Relative order of the survivors is otherwise unchanged.
 fn drop_highest_version_per_cpn(
     candidates: Vec<portage_vdb::InstalledPackage>,
+    pool: &[portage_vdb::InstalledPackage],
 ) -> Vec<portage_vdb::InstalledPackage> {
     let mut highest: std::collections::HashMap<portage_atom::Cpn, portage_atom::Cpv> =
         std::collections::HashMap::new();
-    for pkg in &candidates {
+    for pkg in pool {
         highest
             .entry(pkg.cpv().cpn)
             .and_modify(|best| {
@@ -1839,7 +1848,7 @@ mod tests {
         let vdb = open_vdb(tmp.path());
         let installed: Vec<_> = vdb.packages().into_iter().collect();
 
-        let removable = drop_highest_version_per_cpn(installed);
+        let removable = drop_highest_version_per_cpn(installed.clone(), &installed);
 
         let versions: Vec<String> = removable.iter().map(|p| p.cpv().to_string()).collect();
         assert_eq!(versions.len(), 2);
@@ -1857,7 +1866,7 @@ mod tests {
         let vdb = open_vdb(tmp.path());
         let installed: Vec<_> = vdb.packages().into_iter().collect();
 
-        assert!(drop_highest_version_per_cpn(installed).is_empty());
+        assert!(drop_highest_version_per_cpn(installed.clone(), &installed).is_empty());
     }
 
     #[test]
@@ -1871,10 +1880,32 @@ mod tests {
         let vdb = open_vdb(tmp.path());
         let installed: Vec<_> = vdb.packages().into_iter().collect();
 
-        let removable = drop_highest_version_per_cpn(installed);
+        let removable = drop_highest_version_per_cpn(installed.clone(), &installed);
 
         let versions: Vec<String> = removable.iter().map(|p| p.cpv().to_string()).collect();
         assert_eq!(versions, vec!["app-misc/foo-1.0".to_string()]);
+    }
+
+    #[test]
+    fn drop_highest_version_per_cpn_keeps_the_highest_of_the_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_pkg(&vdb_root, "dev-libs", "lib-1");
+        write_pkg(&vdb_root, "dev-libs", "lib-1.5");
+        write_pkg(&vdb_root, "dev-libs", "lib-2");
+
+        let installed: Vec<_> = open_vdb(tmp.path()).packages().into_iter().collect();
+        let older: Vec<_> = installed
+            .iter()
+            .filter(|p| p.cpv().to_string() != "dev-libs/lib-2")
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            drop_highest_version_per_cpn(older.clone(), &installed).len(),
+            2
+        );
+        assert_eq!(drop_highest_version_per_cpn(older.clone(), &older).len(), 1);
     }
 
     #[test]
