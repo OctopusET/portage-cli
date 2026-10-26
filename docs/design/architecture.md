@@ -101,6 +101,7 @@ PMS atom parser — the vocabulary every other crate speaks.
 - `struct Cpv` — Category/Package/Version (`dev-lang/rust-1.75.0`)
 - `struct Pf` — Package-version string (`rust-1.75.0`)
 - `struct Dep` — Full dependency atom with blocker, operator, version, slot, USE, repo
+- `enum ConfigAtom` / `struct ExtendedAtom`: atom of a user `package.*` line: a `Dep` or Portage's wildcard form (`*/*`, `cat/*`, `*/pkg`, `=cat/pkg-*ver*`); `order_by_specificity()`
 - `enum Blocker` — `Weak` (!) or `Strong` (!!)
 - `enum DepEntry` — Dependency tree node: `Atom`, `UseConditional`, `AllOf`, `AnyOf`, `ExactlyOneOf`, `AtMostOneOf`
 - `struct Version` — PMS version with suffixes and revision: `glob_matches()`, `matches_operator()`, `base()`
@@ -558,6 +559,22 @@ That shape matters because of bugs already hit by folding it differently:
 So: `-arch` and `-~arch` are independent negations; `~arch` does not accept
 stable `arch` and vice versa at match time; `-*` is an incremental clear-all
 (same family as make.conf(5) incremental clear-all for `USE`/`ACCEPT_*`).
+
+## Per-package config atoms
+
+Site `/etc/portage/package.{use,env,accept_keywords,license,properties,accept_restrict,mask,unmask}`
+lines take `portage_atom::ConfigAtom`: a PMS `Dep` or Portage's extended wildcard
+syntax (not PMS). Each file is reordered by `order_by_specificity` (Portage's
+`ordered_by_atom_specificity`) at load, so folding in order applies the most
+specific matching line last; profile files are ordered per profile node.
+A bare `*/*` line in `package.use`/`package.env` (USE), `package.license`,
+`package.properties` or `package.accept_restrict` extends the global
+`USE`/`ACCEPT_*` setting instead, as Portage does. `::repo` is honoured in
+masks, keywords, licenses, properties and restrict.
+
+Divergences: Portage's version-distance tie-break between two ranged atoms
+(`>=a` vs `<b`) is not reproduced (the line written first applies last), and `::repo` on a
+`package.use`/`package.env` line is not evaluated (the USE fold has no repo).
 
 ## Post-solve validation
 
