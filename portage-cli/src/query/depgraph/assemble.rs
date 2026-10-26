@@ -364,7 +364,7 @@ pub(super) fn assemble(
 
         let hits = provider.check_blockers_detailed(&solution);
         let classified = conflicts::classify_blockers(&hits, &target_installed, &proposed);
-        output::report_blockers(&classified);
+        output::report_blockers(&classified, display.quiet);
         let hard_conflict = conflicts::is_hard_conflict(&classified);
         let unmerges = conflicts::planned_unmerges(&classified);
 

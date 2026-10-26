@@ -394,11 +394,12 @@ pub(super) fn report_held_back_targets(held_back: &[portage_atom_pubgrub::HeldBa
 /// (`PKG_BLOCKER`, red) for a hit nothing auto-resolves. `atom` is the
 /// blocker atom with its `!`/`!!` stripped; real portage shows it in both
 /// the identity column and the quote, which is what a reader actually
-/// searches for.
-fn blocker_bracket_line(atom: &str, owner_cpv: &str, strong: bool) -> String {
+/// searches for. `quiet` drops the mask column, as on the `[ebuild ...]` rows.
+fn blocker_bracket_line(atom: &str, owner_cpv: &str, strong: bool, quiet: bool) -> String {
     let blocking = if strong { "hard" } else { "soft" };
+    let pad = if quiet { "     " } else { "      " };
     format!(
-        "[blocks {C_ERROR}B{C_ERROR:#}      ] {C_ERROR}{atom}{C_ERROR:#} \
+        "[blocks {C_ERROR}B{C_ERROR:#}{pad}] {C_ERROR}{atom}{C_ERROR:#} \
          (\"{atom}\" is {blocking} blocking {owner_cpv})"
     )
 }
@@ -424,7 +425,10 @@ fn uninstall_row(cpv: &Cpv) -> String {
 ///
 /// `PreExisting` is not printed (emerge: "the damage is already done").
 /// Hard-conflict wording matches emerge's "cannot be installed at the same time".
-pub(super) fn report_blockers(classified: &[portage_resolve::conflicts::ClassifiedBlocker]) {
+pub(super) fn report_blockers(
+    classified: &[portage_resolve::conflicts::ClassifiedBlocker],
+    quiet: bool,
+) {
     use portage_resolve::conflicts::BlockerVerdict;
 
     if classified.is_empty() {
@@ -475,7 +479,12 @@ pub(super) fn report_blockers(classified: &[portage_resolve::conflicts::Classifi
                     would_unmerge.push(cpv.clone());
                 }
                 BlockerVerdict::StillNeeded { cpv, obstacles } => {
-                    writeln!(out, "{}", blocker_bracket_line(atom_text, &owner, strong)).ok();
+                    writeln!(
+                        out,
+                        "{}",
+                        blocker_bracket_line(atom_text, &owner, strong, quiet)
+                    )
+                    .ok();
                     for o in obstacles {
                         writeln!(
                             out,
@@ -486,7 +495,12 @@ pub(super) fn report_blockers(classified: &[portage_resolve::conflicts::Classifi
                     }
                 }
                 BlockerVerdict::PlannedCoexistence { cpv } => {
-                    writeln!(out, "{}", blocker_bracket_line(atom_text, &owner, strong)).ok();
+                    writeln!(
+                        out,
+                        "{}",
+                        blocker_bracket_line(atom_text, &owner, strong, quiet)
+                    )
+                    .ok();
                     writeln!(
                         out,
                         "      {cpv} is itself part of this plan — cannot coexist"
@@ -2530,6 +2544,16 @@ mod tests {
             }
             out
         })
+    }
+
+    #[test]
+    fn quiet_drops_the_mask_column_from_a_blocker_row() {
+        let line = |quiet| {
+            let raw = blocker_bracket_line("app-misc/b", "app-misc/a-1", false, quiet);
+            anstream::adapter::strip_str(&raw).to_string()
+        };
+        assert!(line(false).starts_with("[blocks B      ] app-misc/b "));
+        assert!(line(true).starts_with("[blocks B     ] app-misc/b "));
     }
 
     const SHOWN: RowAttrs = RowAttrs {
