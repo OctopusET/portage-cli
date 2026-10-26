@@ -208,16 +208,7 @@ impl ConfigMemory {
         let file = eroot.join("var/lib/portage/config");
         let lock = crate::util::lock_state_file(&file);
         let text = crate::util::read_state_file(&file, lock.as_ref()).unwrap_or_default();
-        let mut entries: Vec<(String, String)> = vec![];
-        for line in text.lines().filter(|l| !l.starts_with('#')) {
-            let mut words = line.split_whitespace().take_while(|w| !w.starts_with('#'));
-            // A repeated path keeps its first md5, as portage reads the file.
-            if let (Some(path), Some(md5)) = (words.next(), words.next())
-                && !entries.iter().any(|(p, _)| p == path)
-            {
-                entries.push((path.to_string(), md5.to_string()));
-            }
-        }
+        let entries = parse_memory(&text);
         Self {
             file,
             entries,
@@ -226,6 +217,17 @@ impl ConfigMemory {
             if_modified,
             old: old.into_iter().map(|e| (e.path.clone(), e)).collect(),
             _lock: lock,
+        }
+    }
+
+    /// Read `<eroot>/var/lib/portage/config` without locking or creating it, for a report
+    fn peek(eroot: &Utf8Path) -> Self {
+        let file = eroot.join("var/lib/portage/config");
+        let text = std::fs::read_to_string(file.as_std_path()).unwrap_or_default();
+        Self {
+            entries: parse_memory(&text),
+            file,
+            ..Self::default()
         }
     }
 
@@ -341,10 +343,29 @@ impl ConfigMemory {
     }
 }
 
+/// The `path md5` pairs of a config memory file
+fn parse_memory(text: &str) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = vec![];
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let mut words = line.split_whitespace().take_while(|w| !w.starts_with('#'));
+        // A repeated path keeps its first md5, as portage reads the file.
+        if let (Some(path), Some(md5)) = (words.next(), words.next())
+            && !entries.iter().any(|(p, _)| p == path)
+        {
+            entries.push((path.to_string(), md5.to_string()));
+        }
+    }
+    entries
+}
+
 /// `em maint cleanconfmem`: the report of emaint's, on the config memory of `eroot` whose
 /// file is gone; `fix` drops those entries
 pub(crate) fn clean_config_memory(eroot: &Utf8Path, fix: bool) -> std::io::Result<Vec<String>> {
-    let mut memory = ConfigMemory::load(eroot, vec![], false, false);
+    let mut memory = if fix {
+        ConfigMemory::load(eroot, vec![], false, false)
+    } else {
+        ConfigMemory::peek(eroot)
+    };
     let gone = memory.prune_missing(eroot);
     if fix {
         memory.store()?;
@@ -444,6 +465,14 @@ mod tests {
             Landing::Replace
         );
         assert_eq!(m.remembered("/etc/foo.conf"), Some("same"));
+    }
+
+    #[test]
+    fn cleanconfmem_report_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        assert!(clean_config_memory(root, false).unwrap().is_empty());
+        assert!(!root.join("var").exists());
     }
 
     #[test]
