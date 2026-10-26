@@ -84,7 +84,7 @@ How the solver and build scheduler behave.
   * `n`: No
 * `--changed-deps[=<y|n>]` — Rebuild installed packages whose ebuild's dependencies changed since they were built
 
-  Compares the same version's dependencies under the installed USE, ignoring slot-operator bindings; build-time classes count under `--with-bdeps`.
+  Compares the same version's dependencies under the installed USE, ignoring slot-operator bindings; build-time classes count unless `--with-bdeps` is off (by default with binary packages).
   * `y`: Yes
   * `n`: No
 * `--changed-slot[=<y|n>]` — Rebuild installed packages whose ebuild's SLOT or sub-slot changed since they were built

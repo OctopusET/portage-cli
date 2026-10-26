@@ -164,7 +164,7 @@ pub struct MergeFlags {
     /// Rebuild installed packages whose ebuild's dependencies changed since they were built
     ///
     /// Compares the same version's dependencies under the installed USE, ignoring slot-operator
-    /// bindings; build-time classes count under `--with-bdeps`.
+    /// bindings; build-time classes count unless `--with-bdeps` is off (by default with binary packages).
     #[arg(long, require_equals, default_missing = "y", value_name = "y|n")]
     pub changed_deps: Option<YesNo>,
 
