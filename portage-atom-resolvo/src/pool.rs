@@ -233,6 +233,9 @@ impl std::fmt::Display for VersionConstraint {
                 write!(f, "/{}", subslot)?;
             }
         }
+        if let Some(repo) = &self.repo {
+            write!(f, "::{}", repo)?;
+        }
         if !self.use_constraints.is_empty() {
             write!(f, "[")?;
             for (i, (flag, enabled)) in self.use_constraints.iter().enumerate() {
@@ -246,9 +249,6 @@ impl std::fmt::Display for VersionConstraint {
                 }
             }
             write!(f, "]")?;
-        }
-        if let Some(repo) = &self.repo {
-            write!(f, "::{}", repo)?;
         }
         Ok(())
     }
@@ -474,6 +474,24 @@ impl InstalledSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_constraint_displays_a_parsable_atom() {
+        let constraint = VersionConstraint {
+            cpn: Cpn::new("dev-lang", "rust"),
+            operator: Operator::GreaterOrEqual,
+            version: Version::parse("1.75").unwrap(),
+            glob: false,
+            slot: Some(Interned::intern("0")),
+            subslot: None,
+            repo: Some(Interned::intern("gentoo")),
+            use_constraints: vec![(Interned::intern("llvm"), false)],
+            inverted: false,
+        };
+        let text = constraint.to_string();
+        assert_eq!(text, ">=dev-lang/rust-1.75:0::gentoo[-llvm]");
+        assert!(portage_atom::Dep::parse(&text).is_ok());
+    }
 
     #[test]
     fn intern_name_roundtrip() {
