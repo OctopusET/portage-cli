@@ -25,6 +25,7 @@ const DEFAULT_OPTS: &[&str] = &[
     "--exclude=/distfiles",
     "--exclude=/local",
     "--exclude=/packages",
+    "--exclude=/.git",
 ];
 
 /// Added to a user's `PORTAGE_RSYNC_OPTS` when missing; the excludes keep `--delete` off local data
@@ -39,6 +40,7 @@ const REQUIRED_OPTS: &[&str] = &[
 /// rsync's options before source and destination: `PORTAGE_RSYNC_OPTS`, the verbosity, then
 /// the repo's `sync-rsync-extra-opts` (or `PORTAGE_RSYNC_EXTRA_OPTS`)
 pub(super) fn options(
+    uri: &str,
     rsync_opts: &str,
     extra_opts: &str,
     quiet: bool,
@@ -54,6 +56,22 @@ pub(super) fn options(
                     "adding required option {req} not included in PORTAGE_RSYNC_OPTS"
                 ));
                 opts.push(req.to_string());
+            }
+        }
+        if uri
+            .trim_end_matches('/')
+            .ends_with(".gentoo.org/gentoo-portage")
+        {
+            if !opts.iter().any(|o| o.starts_with("--timeout=")) {
+                opts.push("--timeout=180".to_string());
+            }
+            for req in ["--compress", "--whole-file"] {
+                if !opts.iter().any(|o| o == req) {
+                    warn_line(&format!(
+                        "adding required option {req} not included in PORTAGE_RSYNC_OPTS"
+                    ));
+                    opts.push(req.to_string());
+                }
             }
         }
         opts
@@ -151,16 +169,50 @@ fn ensure_trailing_slash(s: &str) -> String {
 mod tests {
     use super::*;
 
+    const GENTOO: &str = "rsync://rsync.gentoo.org/gentoo-portage/";
+    const OTHER: &str = "rsync://example.org/repo";
+
     #[test]
     fn empty_rsync_opts_use_defaults() {
-        let opts = options("", "", false, false).unwrap();
+        let opts = options(OTHER, "", "", false, false).unwrap();
         assert_eq!(opts[..DEFAULT_OPTS.len()], *DEFAULT_OPTS);
         assert_eq!(opts.last().unwrap(), "--verbose");
+        assert!(opts.iter().any(|o| o == "--exclude=/.git"));
+    }
+
+    #[test]
+    fn gentoo_mirror_forces_timeout_compress_whole_file() {
+        let opts = options(GENTOO, "-a", "", true, false).unwrap();
+        for req in ["--timeout=180", "--compress", "--whole-file"] {
+            assert!(opts.iter().any(|o| o == req), "{req} missing: {opts:?}");
+        }
+        let opts = options(OTHER, "-a", "", true, false).unwrap();
+        assert!(
+            !opts
+                .iter()
+                .any(|o| o.starts_with("--timeout") || o == "--compress")
+        );
+    }
+
+    #[test]
+    fn gentoo_mirror_keeps_user_timeout() {
+        let opts = options(GENTOO, "--timeout=30", "", true, false).unwrap();
+        assert_eq!(
+            opts.iter().filter(|o| o.starts_with("--timeout=")).count(),
+            1
+        );
     }
 
     #[test]
     fn user_rsync_opts_keep_required_excludes() {
-        let opts = options("-a --delete", "--bwlimit=100 '--exclude=/a b'", true, false).unwrap();
+        let opts = options(
+            OTHER,
+            "-a --delete",
+            "--bwlimit=100 '--exclude=/a b'",
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             opts,
             [
@@ -181,6 +233,7 @@ mod tests {
     #[test]
     fn present_required_opts_are_not_duplicated() {
         let opts = options(
+            OTHER,
             "--recursive --times --exclude=/distfiles --exclude=/local --exclude=/packages",
             "",
             false,
@@ -192,6 +245,6 @@ mod tests {
 
     #[test]
     fn unbalanced_quote_is_an_error() {
-        assert!(options("--exclude='x", "", false, false).is_err());
+        assert!(options(OTHER, "--exclude='x", "", false, false).is_err());
     }
 }

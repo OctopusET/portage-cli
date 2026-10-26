@@ -268,6 +268,7 @@ async fn rsync_options(entry: &RepoEntry, globals: &Cli) -> Result<Vec<String>> 
         .get("sync-rsync-extra-opts")
         .map_or_else(|| var("PORTAGE_RSYNC_EXTRA_OPTS"), String::as_str);
     rsync_cmd::options(
+        entry.sync_uri.as_deref().unwrap_or("").trim(),
         var("PORTAGE_RSYNC_OPTS"),
         extra,
         globals.quiet(),
