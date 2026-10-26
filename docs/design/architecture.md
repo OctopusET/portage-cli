@@ -260,7 +260,7 @@ Gentoo binary package (GPKG) read/write per [GLEP 78](https://www.gentoo.org/gle
   outer members needed for a check are staged in one `tar` pass. The detached
   OpenPGP API still requires a contiguous member buffer.
 - `struct GpkgInput` — input specification for writing
-- `fn index_pkgdir()` + `struct IndexConfig` — write `Packages` (and `Packages.gz`) in the
+- `fn index_pkgdir()` + `struct IndexConfig`: write `Packages` (and `Packages.gz`) in the
   shape of portage's `PackageIndex.write`; the header comes from the caller's settings
 - Used by `em` for `-b`/`--buildpkg`, `-k`/`--usepkg`, and `-g`/`--getbinpkg`
 
