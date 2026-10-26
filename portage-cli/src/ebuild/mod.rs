@@ -854,8 +854,6 @@ pub struct MergeBinpkg<'a> {
     pub binpkg_path: &'a Utf8Path,
     pub ebuild_path: &'a Utf8Path,
     pub cpv: &'a portage_atom::Cpv,
-    pub use_flags:
-        &'a [portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
     pub work_base: &'a Utf8Path,
     pub root: &'a Utf8Path,
     pub quiet: bool,
@@ -872,15 +870,12 @@ pub struct MergeBinpkg<'a> {
 /// Merge a pre-built binary package (`-k`/`--usepkg`): extract the GPKG's image
 /// and saved environment into the work tree, then run `pkg_pretend`,
 /// `pkg_setup` and the merge from `work_root/image`. The phase functions are
-/// the package's own, from its saved environment. The caller has already
-/// validated the binpkg is reusable (version + USE + slot match) via
-/// [`portage_binpkg::BinpkgIndex`].
+/// the package's own, from its saved environment, and its USE is the one it was built with.
 pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
     let MergeBinpkg {
         binpkg_path,
         ebuild_path,
         cpv,
-        use_flags,
         work_base,
         root,
         quiet,
@@ -890,6 +885,14 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
         ignore_blockers,
         activity,
     } = opts;
+    use portage_atom::interner::{DefaultInterner, Interned};
+    let use_flags: Vec<Interned<DefaultInterner>> =
+        portage_binpkg::read_metadata(binpkg_path.as_std_path())
+            .with_context(|| format!("reading the metadata of {binpkg_path}"))?
+            .get("USE")
+            .map(|u| u.split_whitespace().map(Interned::intern).collect())
+            .unwrap_or_default();
+    let use_flags = use_flags.as_slice();
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let work_dir = package_work_dir(work_base, root, ebuild.category(), &pf);
