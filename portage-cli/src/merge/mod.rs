@@ -749,6 +749,12 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
     );
 }
 
+/// Whether `planned` may fall back to a source build when no binary package is reused
+fn source_build_allowed(enforce_no_source: bool, planned: &query::depgraph::PlannedMerge) -> bool {
+    // A build-id atom names one binary package, which no source build reproduces.
+    !enforce_no_source && planned.build_id.is_none()
+}
+
 /// Act on one plan entry: fetch-only, binpkg merge, or source build
 async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
     let PackageAction {
@@ -779,8 +785,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         local: reused,
         remote: remote_match,
     } = reuse;
-    // A build-id atom names one binary package, which no source build reproduces.
-    let enforce_no_source = enforce_no_source || planned.build_id.is_some();
+    let enforce_no_source = !source_build_allowed(enforce_no_source, planned);
 
     let root_ctx = ebuild::RootContext {
         config_root: entry_roots.config(),
@@ -1823,6 +1828,23 @@ mod entry_roots_tests {
         let target_idx = portage_binpkg::BinpkgIndex::open(target_dir.path()).unwrap();
         let host_entry = planned(MergeRoot::Host)?;
         assert!(entry_binpkg_index(&host_entry, Some(&target_idx), None).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pinned_build_missing_from_the_index_refuses_a_source_build() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        seed_index(dir.path());
+        let local = portage_binpkg::BinpkgIndex::open(dir.path()).unwrap();
+        let mut p = planned(MergeRoot::Target)?;
+        assert!(source_build_allowed(false, &p));
+        p.build_id = Some(7);
+        assert!(
+            find_binpkg_reuse(&p, Some(&local), &[], "", "")
+                .local
+                .is_none()
+        );
+        assert!(!source_build_allowed(false, &p));
         Ok(())
     }
 
