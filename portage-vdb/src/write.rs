@@ -115,8 +115,10 @@ impl Vdb {
         };
         let path = self.counter_path();
         let mut current = read(&path)?.max(read(&self.root().join("COUNTER"))?);
-        for cat in std::fs::read_dir(self.root()).into_iter().flatten().flatten() {
-            for pkg in std::fs::read_dir(cat.path()).into_iter().flatten().flatten() {
+        let entries =
+            |dir: &std::path::Path| std::fs::read_dir(dir).into_iter().flatten().flatten();
+        for cat in entries(self.root().as_std_path()) {
+            for pkg in entries(&cat.path()) {
                 if let Ok(s) = std::fs::read_to_string(pkg.path().join("COUNTER")) {
                     current = current.max(s.trim().parse().unwrap_or(0));
                 }
