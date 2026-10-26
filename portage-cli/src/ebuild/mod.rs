@@ -1873,6 +1873,11 @@ impl PackageSetup {
                     act.phase_leave(&phase_name, started);
                 }
                 phase_result?;
+                if *phase == RunPhase::Qmerge
+                    && let Some(bp) = binpkg
+                {
+                    record_binpkg_build_flags(bp, root, &ebuild.cpv().to_string())?;
+                }
                 drop(_merge_flock);
                 drop(_merge_guard);
 
@@ -2013,6 +2018,23 @@ fn signature_policy(
             None => (false, false),
         }
     }
+}
+
+/// A binary merge records the binpkg's own reuse key, not one computed from the installing
+/// system's flags
+fn record_binpkg_build_flags(binpkg: &Utf8Path, root: &Utf8Path, cpv: &str) -> Result<()> {
+    let dir = root.join("var/db/pkg").join(cpv);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let meta = portage_binpkg::read_metadata(binpkg.as_std_path())
+        .with_context(|| format!("reading the metadata of {binpkg}"))?;
+    if let Some(value) = meta.get(portage_binpkg::BUILD_ENV_KEY_FIELD) {
+        let path = dir.join(portage_binpkg::BUILD_ENV_KEY_FIELD);
+        std::fs::write(path.as_std_path(), format!("{value}\n"))
+            .with_context(|| format!("writing {path}"))?;
+    }
+    Ok(())
 }
 
 /// Extract a binary package's image into `image_dir`, or with none only check it, and return
