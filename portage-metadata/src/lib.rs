@@ -55,7 +55,7 @@ pub use iuse::{IUse, IUseDefault};
 pub use iuse_effective::{iuse_effective, iuse_effective_profile_part};
 pub use keyword::{Keyword, Stability};
 pub use license::LicenseExpr;
-pub use metadata::EbuildMetadata;
+pub use metadata::{EbuildMetadata, InvalidField};
 pub use phase::Phase;
 pub use required_use::RequiredUseExpr;
 pub use restrict::RestrictExpr;

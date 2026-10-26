@@ -10,7 +10,7 @@ use crate::license::LicenseExpr;
 use crate::phase::Phase;
 use crate::required_use::RequiredUseExpr;
 use crate::restrict::RestrictExpr;
-use crate::src_uri::LazySrcUriList;
+use crate::src_uri::{LazySrcUriList, SrcUriEntry};
 
 /// Metadata for a single ebuild, as produced by the metadata cache
 ///
@@ -111,6 +111,124 @@ where
 
     /// Defined phase functions
     pub defined_phases: Vec<Phase>,
+
+    /// Values that failed to parse; portage masks such a package instead of hiding it
+    ///
+    /// An unsupported `EAPI` is recorded here too, with every other field left empty.
+    pub invalid: Vec<InvalidField>,
+}
+
+/// A metadata value that failed validation, kept verbatim so a cache write round-trips it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidField {
+    /// The metadata key, e.g. `LICENSE`
+    pub key: String,
+    /// The value as read
+    pub raw: String,
+    /// Why it was rejected
+    pub message: String,
+}
+
+impl<I: Interner> EbuildMetadata<I> {
+    /// The raw `EAPI` when this package manager does not support it
+    pub fn unsupported_eapi(&self) -> Option<&str> {
+        self.invalid
+            .iter()
+            .find(|f| f.key == "EAPI")
+            .map(|f| f.raw.as_str())
+    }
+
+    /// Every USE flag a `flag?` conditional names, with its key, in the dependency classes,
+    /// `SRC_URI`, `LICENSE`, `PROPERTIES` and `RESTRICT`, plus every flag in `REQUIRED_USE`
+    ///
+    /// Forces the lazy fields' parse.
+    pub fn conditional_flags(&self) -> Vec<(&'static str, &str)> {
+        fn deps<'a>(
+            key: &'static str,
+            list: &'a [DepEntry],
+            out: &mut Vec<(&'static str, &'a str)>,
+        ) {
+            for e in list {
+                match e {
+                    DepEntry::Atom(_) => {}
+                    DepEntry::UseConditional { flag, children, .. } => {
+                        out.push((key, flag.as_str()));
+                        deps(key, children, out);
+                    }
+                    DepEntry::AllOf(c)
+                    | DepEntry::AnyOf(c)
+                    | DepEntry::ExactlyOneOf(c)
+                    | DepEntry::AtMostOneOf(c) => deps(key, c, out),
+                }
+            }
+        }
+        fn src_uri<'a>(list: &'a [SrcUriEntry], out: &mut Vec<(&'static str, &'a str)>) {
+            for e in list {
+                match e {
+                    SrcUriEntry::UseConditional { flag, entries, .. } => {
+                        out.push(("SRC_URI", flag));
+                        src_uri(entries, out);
+                    }
+                    SrcUriEntry::Group(entries) => src_uri(entries, out),
+                    SrcUriEntry::Uri { .. } | SrcUriEntry::Renamed { .. } => {}
+                }
+            }
+        }
+        fn license<'a>(e: &'a LicenseExpr, out: &mut Vec<(&'static str, &'a str)>) {
+            match e {
+                LicenseExpr::License(_) => {}
+                LicenseExpr::UseConditional { flag, entries, .. } => {
+                    out.push(("LICENSE", flag));
+                    entries.iter().for_each(|e| license(e, out));
+                }
+                LicenseExpr::AnyOf(entries) | LicenseExpr::All(entries) => {
+                    entries.iter().for_each(|e| license(e, out));
+                }
+            }
+        }
+        fn restrict<'a>(
+            key: &'static str,
+            list: &'a [RestrictExpr],
+            out: &mut Vec<(&'static str, &'a str)>,
+        ) {
+            for e in list {
+                if let RestrictExpr::UseConditional { flag, entries, .. } = e {
+                    out.push((key, flag));
+                    restrict(key, entries, out);
+                }
+            }
+        }
+        fn required<'a>(e: &'a RequiredUseExpr, out: &mut Vec<(&'static str, &'a str)>) {
+            match e {
+                RequiredUseExpr::Flag { name, .. } => out.push(("REQUIRED_USE", name)),
+                RequiredUseExpr::UseConditional { flag, entries, .. } => {
+                    out.push(("REQUIRED_USE", flag));
+                    entries.iter().for_each(|e| required(e, out));
+                }
+                RequiredUseExpr::AnyOf(entries)
+                | RequiredUseExpr::ExactlyOne(entries)
+                | RequiredUseExpr::AtMostOne(entries)
+                | RequiredUseExpr::All(entries) => entries.iter().for_each(|e| required(e, out)),
+            }
+        }
+
+        let mut out = Vec::new();
+        deps("DEPEND", self.depend.list(), &mut out);
+        deps("RDEPEND", self.rdepend.list(), &mut out);
+        deps("BDEPEND", self.bdepend.list(), &mut out);
+        deps("PDEPEND", self.pdepend.list(), &mut out);
+        deps("IDEPEND", self.idepend.list(), &mut out);
+        src_uri(self.src_uri.list(), &mut out);
+        if let Some(l) = &self.license {
+            license(l, &mut out);
+        }
+        restrict("PROPERTIES", &self.properties, &mut out);
+        restrict("RESTRICT", &self.restrict, &mut out);
+        if let Some(r) = &self.required_use {
+            required(r, &mut out);
+        }
+        out
+    }
 }
 
 impl<I: Interner + Clone> EbuildMetadata<I> {

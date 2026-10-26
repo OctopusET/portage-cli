@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::iuse::IUse;
 use crate::keyword::Keyword;
 use crate::license::LicenseExpr;
-use crate::metadata::EbuildMetadata;
+use crate::metadata::{EbuildMetadata, InvalidField};
 use crate::phase::Phase;
 use crate::required_use::RequiredUseExpr;
 use crate::restrict::RestrictExpr;
@@ -191,9 +191,20 @@ impl<'a> ParseState<'a> {
         let eapi_val = if self.eapi.is_empty() {
             Eapi::Zero
         } else {
-            self.eapi
-                .parse::<Eapi>()
-                .map_err(|_| Error::InvalidEapi(self.eapi.to_string()))?
+            match self.eapi.parse::<Eapi>() {
+                Ok(eapi) => eapi,
+                Err(_) => return Ok(CacheEntry::unsupported_eapi(self.eapi, self.md5)),
+            }
+        };
+        let mut invalid = Vec::new();
+        let mut check = |key: &str, raw: &str, parsed: Result<()>| {
+            if let Err(e) = parsed {
+                invalid.push(InvalidField {
+                    key: key.to_string(),
+                    raw: raw.to_string(),
+                    message: e.to_string(),
+                });
+            }
         };
 
         let description_val = self
@@ -215,47 +226,52 @@ impl<'a> ParseState<'a> {
                 .collect()
         };
 
-        let license_val = if self.license.is_empty() {
-            None
-        } else {
-            Some(LicenseExpr::parse(self.license)?)
-        };
+        let mut license_val = None;
+        if !self.license.is_empty() {
+            let parsed = LicenseExpr::parse(self.license).map(|l| license_val = Some(l));
+            check("LICENSE", self.license, parsed);
+        }
 
-        let keywords_val: Vec<Keyword<I>> = if self.keywords.is_empty() {
-            Vec::new()
-        } else {
-            self.keywords
+        let mut keywords_val: Vec<Keyword<I>> = Vec::new();
+        if !self.keywords.is_empty() {
+            let parsed = self
+                .keywords
                 .split_whitespace()
                 .map(|token| Keyword::parse(token))
-                .collect::<Result<_>>()?
-        };
+                .collect::<Result<_>>()
+                .map(|k| keywords_val = k);
+            check("KEYWORDS", self.keywords, parsed);
+        }
 
-        let iuse_val: Vec<IUse<I>> = if self.iuse.is_empty() {
-            Vec::new()
-        } else {
-            self.iuse
+        let mut iuse_val: Vec<IUse<I>> = Vec::new();
+        if !self.iuse.is_empty() {
+            let parsed = self
+                .iuse
                 .split_whitespace()
                 .map(|token| IUse::parse(token))
-                .collect::<Result<_>>()?
-        };
+                .collect::<Result<_>>()
+                .map(|i| iuse_val = i);
+            check("IUSE", self.iuse, parsed);
+        }
 
-        let required_use_val = if self.required_use.is_empty() {
-            None
-        } else {
-            Some(RequiredUseExpr::parse(self.required_use)?)
-        };
+        let mut required_use_val = None;
+        if !self.required_use.is_empty() {
+            let parsed =
+                RequiredUseExpr::parse(self.required_use).map(|r| required_use_val = Some(r));
+            check("REQUIRED_USE", self.required_use, parsed);
+        }
 
-        let restrict_val = if self.restrict.is_empty() {
-            Vec::new()
-        } else {
-            RestrictExpr::parse(self.restrict)?
-        };
+        let mut restrict_val = Vec::new();
+        if !self.restrict.is_empty() {
+            let parsed = RestrictExpr::parse(self.restrict).map(|r| restrict_val = r);
+            check("RESTRICT", self.restrict, parsed);
+        }
 
-        let properties_val = if self.properties.is_empty() {
-            Vec::new()
-        } else {
-            RestrictExpr::parse(self.properties)?
-        };
+        let mut properties_val = Vec::new();
+        if !self.properties.is_empty() {
+            let parsed = RestrictExpr::parse(self.properties).map(|p| properties_val = p);
+            check("PROPERTIES", self.properties, parsed);
+        }
 
         // `parse_eclasses` interns the name directly: the same few hundred
         // eclasses recur across every ebuild in a tree, so `inherited_val`
@@ -297,6 +313,7 @@ impl<'a> ParseState<'a> {
                 inherit: inherit_val,
                 inherited: inherited_val,
                 defined_phases: defined_phases_val,
+                invalid,
             },
             md5: self.md5.map(|s| s.to_string()),
             eclasses,
@@ -305,6 +322,40 @@ impl<'a> ParseState<'a> {
 }
 
 impl<I: Interner> CacheEntry<I> {
+    /// An entry carrying only an `EAPI` this package manager cannot read; nothing else is parsed
+    pub fn unsupported_eapi(eapi: &str, md5: Option<&str>) -> Self {
+        CacheEntry {
+            metadata: EbuildMetadata {
+                eapi: Eapi::Zero,
+                description: String::new(),
+                slot: Slot::new("0"),
+                homepage: Vec::new(),
+                src_uri: LazySrcUriList::from_raw(""),
+                license: None,
+                keywords: Vec::new(),
+                iuse: Vec::new(),
+                required_use: None,
+                restrict: Vec::new(),
+                properties: Vec::new(),
+                depend: LazyDepList::from_raw(""),
+                rdepend: LazyDepList::from_raw(""),
+                bdepend: LazyDepList::from_raw(""),
+                pdepend: LazyDepList::from_raw(""),
+                idepend: LazyDepList::from_raw(""),
+                inherit: Vec::new(),
+                inherited: Vec::new(),
+                defined_phases: Vec::new(),
+                invalid: vec![InvalidField {
+                    key: "EAPI".to_string(),
+                    raw: eapi.to_string(),
+                    message: format!("EAPI {eapi} unsupported"),
+                }],
+            },
+            md5: md5.map(str::to_string),
+            eclasses: Vec::new(),
+        }
+    }
+
     fn parse_impl(input: &str) -> Result<CacheEntry<I>> {
         let mut state = ParseState::new();
         for (key, value) in RawCacheEntry::new(input).lines() {
@@ -320,6 +371,17 @@ impl<I: Interner> CacheEntry<I> {
     pub fn serialize(&self) -> String {
         let m = &self.metadata;
         let mut out = String::new();
+
+        if let Some(eapi) = m.unsupported_eapi() {
+            write_field(&mut out, "EAPI", eapi);
+            if let Some(md5) = &self.md5 {
+                write_field(&mut out, "_md5_", md5);
+            }
+            return out;
+        }
+        for field in &m.invalid {
+            write_field(&mut out, &field.key, field.raw.as_str());
+        }
 
         out.push_str("DEFINED_PHASES=");
         write_phases(&mut out, &m.defined_phases);
@@ -765,6 +827,32 @@ _md5_=4539d849d3cea8ac84debad9b3154143
     fn has_parse_failure_is_false_for_a_well_formed_entry() {
         let entry = CacheEntry::parse(EXAMPLE_CACHE).unwrap();
         assert!(!entry.metadata.has_parse_failure());
+    }
+
+    #[test]
+    fn malformed_license_is_recorded_not_fatal() {
+        let input = "DESCRIPTION=t\nSLOT=0\nEAPI=8\nLICENSE=|| (\nKEYWORDS=amd64\n";
+        let entry = CacheEntry::parse(input).unwrap();
+        let keys: Vec<_> = entry
+            .metadata
+            .invalid
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect();
+        assert_eq!(keys, ["LICENSE"]);
+        assert!(entry.metadata.license.is_none());
+        assert_eq!(entry.metadata.keywords.len(), 1);
+        let reparsed = CacheEntry::parse(&entry.serialize()).unwrap();
+        assert_eq!(reparsed.metadata.invalid, entry.metadata.invalid);
+    }
+
+    #[test]
+    fn unsupported_eapi_is_a_stub_entry() {
+        let entry = CacheEntry::parse("EAPI=10\nSLOT=( bad\n_md5_=abc\n").unwrap();
+        assert_eq!(entry.metadata.unsupported_eapi(), Some("10"));
+        let text = entry.serialize();
+        assert_eq!(text, "EAPI=10\n_md5_=abc\n");
+        assert_eq!(CacheEntry::parse(&text).unwrap(), entry);
     }
 
     #[test]
