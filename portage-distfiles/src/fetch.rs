@@ -573,6 +573,22 @@ pub fn is_partial_download_name(name: &str) -> bool {
     name.ends_with(DOWNLOAD_SUFFIX)
 }
 
+/// Suffix of portage's distlocks lock file, `.<name>.portage_lockfile`
+const LOCK_SUFFIX: &str = ".portage_lockfile";
+
+/// Whether a DISTDIR entry is a fetch lock file, never a distfile
+pub fn is_fetch_lock_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(LOCK_SUFFIX)
+}
+
+/// Whether a fetch currently holds the lock for the distfile the partial download at `partial` belongs to
+pub fn partial_download_is_live(partial: &Utf8Path) -> bool {
+    partial
+        .as_str()
+        .strip_suffix(DOWNLOAD_SUFFIX)
+        .is_some_and(|dest| lock_path(Utf8Path::new(dest)).as_std_path().exists())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -619,7 +635,7 @@ impl Drop for DistLock {
 /// Path of portage's distlocks lock file for `dest` (`.<name>.portage_lockfile` beside it)
 fn lock_path(dest: &Utf8Path) -> Utf8PathBuf {
     let name = dest.file_name().unwrap_or("");
-    dest.with_file_name(format!(".{name}.portage_lockfile"))
+    dest.with_file_name(format!(".{name}{LOCK_SUFFIX}"))
 }
 
 /// Acquire the exclusive lock guarding `dest`, or `None` when it cannot be taken (read-only DISTDIR)

@@ -33,7 +33,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::{Cpn, Cpv};
 use portage_distfiles::{
     DistDigests, Distfile, DistfileResolver, FetchConfig, FetchStatus, Fetcher, ResolveOpts,
-    RestrictGate, is_partial_download_name,
+    RestrictGate, is_fetch_lock_name, is_partial_download_name, partial_download_is_live,
 };
 use portage_metadata::{RawCacheEntry, RestrictExpr, SrcUriEntry};
 use portage_repo::{
@@ -525,22 +525,19 @@ fn parse_whitelist(paths: &[Utf8PathBuf]) -> Result<HashSet<String>> {
 pub(crate) struct DistdirState {
     pub(crate) present: BTreeMap<String, u64>,
     pub(crate) orphans: Vec<String>,
-    /// Leftover `.__download__` partial downloads found at scan
-    /// time — always from an interrupted previous run, never legitimate
-    /// (see [`is_partial_download_name`]). Without active cleanup these are
-    /// invisible to both `present`/`orphans` forever, which would leak disk
-    /// space silently (in particular for a filename that later falls out of
-    /// the referenced set entirely and so is never attempted again).
+    /// Leftover `.__download__` partials whose fetch lock is not held, i.e. from an interrupted run.
+    /// Without cleanup they stay invisible to both `present` and `orphans` forever.
     stale_partials: usize,
 }
 
-/// Skips directories and `layout.conf` itself (real emirrordist's flat
+/// Skips directories, fetch lock files and `layout.conf` itself (real emirrordist's flat
 /// layout happily treats it as an ordinary file and schedules it for
-/// deletion — a known quirk, not inherited here).
+/// deletion, a known quirk not inherited here).
 ///
 /// A leftover partial download (`is_partial_download_name`) is removed
 /// when `remove_stale_partials` is set (real fetch runs; never under
 /// `-p`) and always excluded from `present`/`orphans` either way.
+/// A partial whose lock is held belongs to a live fetch (emerge shares the name) and is left alone.
 pub(crate) fn scan_distdir(
     distfiles: &Utf8Path,
     referenced: &HashSet<&str>,
@@ -560,10 +557,13 @@ pub(crate) fn scan_distdir(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "layout.conf" {
+        if name == "layout.conf" || is_fetch_lock_name(&name) {
             continue;
         }
         if is_partial_download_name(&name) {
+            if partial_download_is_live(&distfiles.join(&name)) {
+                continue;
+            }
             stale_partials += 1;
             if remove_stale_partials {
                 let _ = std::fs::remove_file(entry.path());
@@ -1054,6 +1054,22 @@ mod tests {
         assert!(state.present.contains_key("foo.tar.gz"));
         assert!(state.orphans.is_empty());
         assert_eq!(state.stale_partials, 1);
+    }
+
+    #[test]
+    fn scan_distdir_keeps_a_locked_partial_and_its_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let distfiles = Utf8Path::from_path(dir.path()).unwrap();
+        let temp = distfiles.join("foo.tar.gz.__download__");
+        std::fs::write(temp.as_std_path(), b"partial").unwrap();
+        let lock = distfiles.join(".foo.tar.gz.portage_lockfile");
+        std::fs::write(lock.as_std_path(), b"").unwrap();
+
+        let state = scan_distdir(distfiles, &HashSet::new(), &HashSet::new(), true).unwrap();
+
+        assert_eq!(state.stale_partials, 0);
+        assert!(state.present.is_empty() && state.orphans.is_empty());
+        assert!(temp.as_std_path().exists() && lock.as_std_path().exists());
     }
 
     #[test]
