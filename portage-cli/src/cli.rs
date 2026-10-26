@@ -895,6 +895,8 @@ mod tests {
 
     #[test]
     fn target_takes_a_spec_file_and_reads_its_tuple() {
+        // Topology consults the active registration under HOME, which another test swaps.
+        let _home_lock = crate::test_support::home_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("board.toml");
         let target =
