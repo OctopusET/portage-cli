@@ -14,9 +14,9 @@
 //!
 //! Deliberately simplified vs. real portage (documented, not silent):
 //! no USE-dep bracket verification when matching an atom against an
-//! installed package (only CPN/version/slot via `Dep::matches_cpv`) — a
-//! mismatched USE-dep atom still counts its target as kept, over-keeping
-//! rather than risking an under-keep. No virtual/provider indirection
+//! installed package (only CPN/version/slot via `Dep::matches_cpv`) — an
+//! atom with USE deps keeps every installed match instead of only the
+//! highest one satisfying them, over-keeping rather than risking an under-keep. No virtual/provider indirection
 //! beyond literal atom matching. A `||` group walks *every* branch rather
 //! than preferring the one already satisfied by what's installed — also
 //! biased toward over-keeping, but coarser than the other
@@ -193,11 +193,20 @@ fn compute_cleanlist(
         }
     };
     // A set or dependency atom pulls in one package, as the resolver would pick: the highest
-    // installed match, so an unslotted atom does not keep every older slot.
-    let best = |dep: &Dep| matching(dep, installed).max_by(|a, b| a.cpv().cmp(b.cpv()));
+    // installed match, so an unslotted atom does not keep every older slot. USE deps are not
+    // checked, so an atom with them keeps every match rather than possibly the wrong one.
+    let best = |dep: &Dep| -> Vec<&InstalledPackage> {
+        if dep.use_deps.is_some() {
+            return matching(dep, installed).collect();
+        }
+        matching(dep, installed)
+            .max_by(|a, b| a.cpv().cmp(b.cpv()))
+            .into_iter()
+            .collect()
+    };
 
     for dep in world_atoms {
-        if let Some(pkg) = best(dep) {
+        for pkg in best(dep) {
             keep(pkg, &mut kept, &mut queue);
         }
     }
@@ -223,7 +232,7 @@ fn compute_cleanlist(
             continue;
         };
         for dep in own_atoms(pkg, with_bdeps) {
-            if let Some(dep_pkg) = best(&dep) {
+            for dep_pkg in best(&dep) {
                 keep(dep_pkg, &mut kept, &mut queue);
             }
         }
@@ -492,6 +501,29 @@ mod tests {
             Dep::parse("dev-lang/python").unwrap(),
             Dep::parse("app-misc/tool").unwrap(),
         ];
+        assert!(compute_cleanlist(&installed, &world, &[], &[], false).is_empty());
+    }
+
+    #[test]
+    fn unslotted_use_dep_atom_keeps_every_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "x11-libs", "gtk+-2.24", "", "");
+        write_fake_package(&vdb_root, "x11-libs", "gtk+-3.24", "", "");
+        std::fs::write(vdb_root.join("x11-libs/gtk+-2.24/SLOT"), "2").unwrap();
+        std::fs::write(vdb_root.join("x11-libs/gtk+-2.24/USE"), "introspection").unwrap();
+        std::fs::write(vdb_root.join("x11-libs/gtk+-3.24/SLOT"), "3").unwrap();
+        write_fake_package(
+            &vdb_root,
+            "app-misc",
+            "tool-1.0",
+            ">=x11-libs/gtk+-2[introspection]",
+            "",
+        );
+
+        let installed: Vec<InstalledPackage> =
+            open_vdb(tmp.path()).packages().into_iter().collect();
+        let world = vec![Dep::parse("app-misc/tool").unwrap()];
         assert!(compute_cleanlist(&installed, &world, &[], &[], false).is_empty());
     }
 
