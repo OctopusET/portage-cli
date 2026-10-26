@@ -291,6 +291,9 @@ impl Roots {
         let cfg = self.config().unwrap_or_else(|| Utf8Path::new("/"));
         let extra: Vec<&Utf8Path> = self.config_overlay().into_iter().collect();
         let conf = portage_repo::ReposConf::load_rooted(cfg, &extra)?;
+        if portage_repo::ReposConf::inline_env().is_some() {
+            return Ok(conf);
+        }
         Ok(conf.with_portdir_overlay(&self.portdir_overlay()))
     }
 

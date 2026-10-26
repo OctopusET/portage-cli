@@ -106,6 +106,15 @@ pub struct ReposConf {
 /// The running Portage install's own defaults, which `--config-root` does not move
 const GLOBAL_REPOS_CONF: &str = "/usr/share/portage/config/repos.conf";
 
+/// The base repos.conf: the host install's `global`, else `config_root`'s copy of it
+fn base_repos_conf(global: &Utf8Path, config_root: &Utf8Path) -> Utf8PathBuf {
+    if global.exists() {
+        global.to_path_buf()
+    } else {
+        config_root.join(global.as_str().trim_start_matches('/'))
+    }
+}
+
 impl ReposConf {
     /// Load `repos.conf` for a system rooted at `/` (`config_root = /`, no
     /// overlay).
@@ -117,24 +126,24 @@ impl ReposConf {
     /// defaults (the host's, else `config_root`'s copy), `<config_root>/etc/portage/repos.conf`,
     /// then each `extra` confdir's `repos.conf` (a `--local`/`--prefix` overlay).
     ///
-    /// A non-empty `PORTAGE_REPOSITORIES` in the environment replaces the first two.
+    /// `PORTAGE_REPOSITORIES` in the environment, even empty, replaces the first two.
     /// Missing paths are skipped.
     pub fn load_rooted(config_root: &Utf8Path, extra: &[&Utf8Path]) -> Result<Self> {
-        let inline = std::env::var("PORTAGE_REPOSITORIES")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
+        let inline = Self::inline_env().map(|v| v.to_string_lossy().into_owned());
+        let global = Utf8Path::new(GLOBAL_REPOS_CONF);
         let mut paths: Vec<Utf8PathBuf> = Vec::new();
         if inline.is_none() {
-            let global = Utf8Path::new(GLOBAL_REPOS_CONF);
-            paths.push(if global.exists() {
-                global.to_path_buf()
-            } else {
-                config_root.join(GLOBAL_REPOS_CONF.trim_start_matches('/'))
-            });
+            paths.push(base_repos_conf(global, config_root));
             paths.push(config_root.join("etc/portage/repos.conf"));
         }
         paths.extend(extra.iter().map(|d| d.join("repos.conf")));
         Self::load_with(inline.as_deref(), &paths)
+    }
+
+    /// `PORTAGE_REPOSITORIES` from the environment; when set, portage also ignores
+    /// make.conf's `PORTDIR` and `PORTDIR_OVERLAY`
+    pub fn inline_env() -> Option<std::ffi::OsString> {
+        std::env::var_os("PORTAGE_REPOSITORIES")
     }
 
     /// Load from explicit paths in override order. Each path may be a file or a
@@ -585,6 +594,18 @@ priority = 10
         let names: Vec<_> = rc.repos().iter().map(|r| r.name.as_str()).collect();
         // gentoo (-1000, implicit) < first (-5, explicit) < second (10, explicit)
         assert_eq!(names, vec!["gentoo", "first", "second"]);
+    }
+
+    #[test]
+    fn base_repos_conf_falls_back_to_config_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let host = root.join("host/usr/share/portage/config/repos.conf");
+        let cfg = root.join("cfg");
+        let fallback = cfg.join(host.as_str().trim_start_matches('/'));
+        assert_eq!(base_repos_conf(&host, &cfg), fallback);
+        write(host.as_std_path(), "[gentoo]\nlocation = /a\n");
+        assert_eq!(base_repos_conf(&host, &cfg), host);
     }
 
     /// A repo with an explicit priority more negative than the main repo's
