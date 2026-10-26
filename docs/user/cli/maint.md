@@ -13,7 +13,7 @@ em maint [OPTIONS] <COMMAND>
 
 * [`binhost`](maint/binhost.md) — Generate binary package metadata index
 * [`binpkg`](maint/binpkg.md) — Inspect/verify/prune local binary packages (em-only, no emaint equivalent)
-* [`cleanconfmem`](maint/cleanconfmem.md) — No-op: em keeps no config-memory file to go stale
+* [`cleanconfmem`](maint/cleanconfmem.md) — List config-memory entries whose file is no longer installed
 * [`cleanresume`](maint/cleanresume.md) — Discard saved resume lists
 * [`logs`](maint/logs.md) — Prune the build.log files finished merges leave in the build tree
 * [`merges`](maint/merges.md) — Unavailable: em keeps no failed-merge registry

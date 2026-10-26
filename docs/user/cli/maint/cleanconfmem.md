@@ -1,7 +1,7 @@
 <!-- @generated from em's command line; do not edit -->
 # em maint cleanconfmem
 
-No-op: em keeps no config-memory file to go stale
+List config-memory entries whose file is no longer installed
 
 ## Usage
 
@@ -11,6 +11,7 @@ em maint cleanconfmem [OPTIONS]
 
 ## Options
 
+* `-f, --fix` — Drop them from the config memory (default: just report them).
 * `-h, --help` — Print help (see a summary with '-h')
 
 ## Global options

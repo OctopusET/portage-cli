@@ -105,7 +105,7 @@ and install-image ELF scan benches are also there (`benchmarks/bench-elfscan.sh`
 | `moveinst` | Partial | Detects installed packages needing rename from `profiles/updates/`; report-only — does not apply moves or scan installed dependency metadata |
 | `movebin` | Partial | The binpkg twin of `moveinst`, sharing its `profiles/updates/` reader. Report-only for a stronger reason: renaming a GPKG container would leave the archive metadata *and* the `Packages` index still naming the old cpv |
 | `logs` | Working | Prunes the `build.log` files a finished merge leaves under `<work_base>/<root-key>/<category>/<PF>/`. **Not portage's target** — real `emaint logs` cleans `PORTAGE_LOGDIR`, which for `em` holds only elog output that `em read --delete` owns. `--fix` removes, `-t 30d` bounds by age |
-| `cleanconfmem` | N/A | Reports a no-op. It discards stale entries from portage's config tracker (`/var/lib/portage/config`), and `em` never writes one, so there is nothing to go stale |
+| `cleanconfmem` | Working | Lists entries of the config memory (`/var/lib/portage/config`) whose file no longer exists; `--fix` drops them |
 | `merges` | Unavailable | `em` keeps no failed-merge registry; a failure is reported at the end of the run and in its build log |
 | `binhost` | Working | Regenerates the `Packages` index under `PKGDIR` |
 | `binpkg` | Working | em-only: `verify` / `list` / `prune` / `fingerprint` / `gpg-import` (no real `emaint` equivalent) |

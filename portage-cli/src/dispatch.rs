@@ -451,11 +451,11 @@ async fn run_maint(command: &MaintCommand, globals: &cli::Cli) -> Result<()> {
     match command {
         MaintCommand::Binhost => maint::binhost::run(globals).await,
         MaintCommand::Binpkg { action } => maint::binpkg::run(action, globals).await,
-        MaintCommand::Cleanconfmem => {
-            // Not a stub: portage's config tracker (`/var/lib/portage/config`)
-            // records which protected files a user has already merged, and
-            // `em` never writes one — so there is nothing here to go stale.
-            println!("em keeps no config-memory file; nothing to clean.");
+        MaintCommand::Cleanconfmem { fix } => {
+            let roots = globals.roots();
+            for line in crate::ebuild::clean_config_memory(roots.merge_root(), *fix)? {
+                println!("{line}");
+            }
             Ok(())
         }
         MaintCommand::Cleanresume { fix } => {

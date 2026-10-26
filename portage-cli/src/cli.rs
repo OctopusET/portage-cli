@@ -3459,8 +3459,12 @@ pub enum MaintCommand {
         #[arg(subcommand)]
         action: BinpkgAction,
     },
-    #[arg(help = "No-op: em keeps no config-memory file to go stale")]
-    Cleanconfmem,
+    #[arg(help = "List config-memory entries whose file is no longer installed")]
+    Cleanconfmem {
+        /// Drop them from the config memory (default: just report them).
+        #[arg(short, long)]
+        fix: bool,
+    },
     #[arg(help = "Discard saved resume lists")]
     Cleanresume {
         /// Actually delete the saved resume/resume-backup lists (default:

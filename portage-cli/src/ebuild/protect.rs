@@ -193,10 +193,12 @@ pub(crate) struct ConfigMemory {
     ignore: bool,
     if_modified: bool,
     old: std::collections::HashMap<Utf8PathBuf, portage_vdb::ContentsEntry>,
+    /// Held from [`Self::load`] to [`Self::store`], so a concurrent emerge waits
+    _lock: Option<std::fs::File>,
 }
 
 impl ConfigMemory {
-    /// Read `<eroot>/var/lib/portage/config`; a missing or unreadable file is empty
+    /// Lock and read `<eroot>/var/lib/portage/config`; a missing or unreadable file is empty
     pub(crate) fn load(
         eroot: &Utf8Path,
         old: Vec<portage_vdb::ContentsEntry>,
@@ -204,6 +206,7 @@ impl ConfigMemory {
         ignore: bool,
     ) -> Self {
         let file = eroot.join("var/lib/portage/config");
+        let lock = crate::util::lock_state_file(&file);
         let text = std::fs::read_to_string(file.as_std_path()).unwrap_or_default();
         let mut entries: Vec<(String, String)> = vec![];
         for line in text.lines().filter(|l| !l.starts_with('#')) {
@@ -222,7 +225,31 @@ impl ConfigMemory {
             ignore,
             if_modified,
             old: old.into_iter().map(|e| (e.path.clone(), e)).collect(),
+            _lock: lock,
         }
+    }
+
+    /// Drop what is remembered for `path`, which the package being removed leaves unowned
+    pub(crate) fn forget(&mut self, path: &str) {
+        let before = self.entries.len();
+        self.entries.retain(|(p, _)| p != path);
+        self.changed |= self.entries.len() != before;
+    }
+
+    /// Drop the entries whose file is gone from under `eroot`, returning their paths sorted
+    pub(crate) fn prune_missing(&mut self, eroot: &Utf8Path) -> Vec<String> {
+        let mut gone: Vec<String> = self
+            .entries
+            .iter()
+            .map(|(p, _)| p)
+            .filter(|p| !eroot.join(p.trim_start_matches('/')).exists())
+            .cloned()
+            .collect();
+        for p in &gone {
+            self.forget(p);
+        }
+        gone.sort();
+        gone
     }
 
     fn remembered(&self, path: &str) -> Option<&str> {
@@ -287,8 +314,8 @@ impl ConfigMemory {
         }
     }
 
-    /// Write the memory back if a decision changed it
-    pub(crate) fn store(&self) -> std::io::Result<()> {
+    /// Write the memory back if a decision changed it, and release the lock
+    pub(crate) fn store(self) -> std::io::Result<()> {
         if !self.changed {
             return Ok(());
         }
@@ -312,6 +339,25 @@ impl ConfigMemory {
         }
         std::fs::rename(tmp.as_std_path(), self.file.as_std_path())
     }
+}
+
+/// `em maint cleanconfmem`: the report of emaint's, on the config memory of `eroot` whose
+/// file is gone; `fix` drops those entries
+pub(crate) fn clean_config_memory(eroot: &Utf8Path, fix: bool) -> std::io::Result<Vec<String>> {
+    let mut memory = ConfigMemory::load(eroot, vec![], false, false);
+    let gone = memory.prune_missing(eroot);
+    if fix {
+        memory.store()?;
+    }
+    if gone.is_empty() {
+        return Ok(gone);
+    }
+    let mut report = vec!["Not Installed:".to_owned()];
+    report.extend(gone.iter().map(|p| format!("  {p}")));
+    report.push("------------------------------------".to_owned());
+    let cleaned = if fix { " ...Cleaned" } else { "" };
+    report.push(format!("  Total {} Not installed{cleaned}", gone.len()));
+    Ok(report)
 }
 
 /// The md5 a symlink is remembered by: that of its target string
@@ -398,6 +444,51 @@ mod tests {
             Landing::Replace
         );
         assert_eq!(m.remembered("/etc/foo.conf"), Some("same"));
+    }
+
+    #[test]
+    fn cleanconfmem_drops_only_entries_whose_file_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let file = root.join("var/lib/portage/config");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(root.join("etc/kept"), "").unwrap();
+        let text = "/etc/zgone 1\n/etc/kept 2\n/etc/agone 3\n";
+        std::fs::write(&file, text).unwrap();
+
+        let report = clean_config_memory(root, false).unwrap();
+        assert_eq!(report[1..3], ["  /etc/agone", "  /etc/zgone"]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+
+        let report = clean_config_memory(root, true).unwrap();
+        assert!(
+            report
+                .last()
+                .unwrap()
+                .ends_with("2 Not installed ...Cleaned")
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "/etc/kept 2\n");
+        assert!(clean_config_memory(root, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn memory_is_locked_from_load_to_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().to_owned();
+        let mut m = ConfigMemory::load(&root, vec![], false, false);
+        let other = std::thread::spawn({
+            let root = root.clone();
+            move || {
+                ConfigMemory::load(&root, vec![], false, false)
+                    .remembered("/etc/a")
+                    .map(str::to_owned)
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        m.remember("/etc/a", "111");
+        m.store().unwrap();
+        assert_eq!(other.join().unwrap().as_deref(), Some("111"));
     }
 
     #[test]

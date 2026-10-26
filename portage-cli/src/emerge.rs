@@ -1557,7 +1557,7 @@ async fn execute_unmerge_batch(
 
     // One shared graph + registry for the whole batch, not rebuilt per
     // package — see `preserve_libs::build_link_graph`'s doc.
-    let mut registry = preserve_libs::PreservedLibsRegistry::load(&root);
+    let mut registry = preserve_libs::PreservedLibsRegistry::load_for_update(&root);
     let graph = preserve_libs::build_link_graph(vdb, exclude, &registry, &root);
 
     let mut failures = 0usize;

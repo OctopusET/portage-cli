@@ -145,6 +145,15 @@ impl PreservedLibsRegistry {
         Self::load_path(&root.join("var/lib/portage/preserved_libs_registry"))
     }
 
+    /// [`Self::load`] under the registry's lock, for a merge or unmerge that will update it
+    ///
+    /// The lock creates the file, empty, as portage's does.
+    pub(crate) fn load_for_update(root: &Utf8Path) -> Self {
+        let path = root.join("var/lib/portage/preserved_libs_registry");
+        let _lock = crate::util::lock_state_file(&path);
+        Self::load_path(&path)
+    }
+
     fn load_path(path: &Utf8Path) -> Self {
         let data = Self::read(path).unwrap_or_default();
         Self {
@@ -180,6 +189,7 @@ impl PreservedLibsRegistry {
         if self.data == self.original {
             return;
         }
+        let _lock = crate::util::lock_state_file(&self.path);
         let Some(mut disk) = Self::read(&self.path) else {
             crate::style::warn_line!("not rewriting unparsable {}", self.path);
             return;
@@ -743,7 +753,7 @@ impl MergePreserveState {
         Self {
             root: root.to_path_buf(),
             vdb: vdb.clone(),
-            registry: PreservedLibsRegistry::load(root),
+            registry: PreservedLibsRegistry::load_for_update(root),
             graph: None,
             dirty: false,
         }
@@ -1367,11 +1377,7 @@ mod tests {
             );
         }
         state.package_removed(&cpv);
-        assert!(
-            !root
-                .join("var/lib/portage/preserved_libs_registry")
-                .exists()
-        );
+        assert!(PreservedLibsRegistry::load(&root).is_empty());
         state.finish();
 
         let reloaded = PreservedLibsRegistry::load(&root);

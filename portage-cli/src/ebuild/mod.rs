@@ -26,6 +26,7 @@ mod protect;
 use binpkg::{BinpkgRecord, binpkg_record, build_binpkg_standalone, ed_image_dir};
 use flock::{CleanWhen, acquire_flock, filter_clean_subs, lock_builddir, lock_merge_flock};
 use install_mask::InstallMask;
+pub(crate) use protect::clean_config_memory;
 use protect::{ConfigMemory, Landing, LiveNode, link_md5, scan_cfg};
 // `etc`/`quickpkg` resolve config protection through this path.
 pub(crate) use protect::ConfigProtect;
@@ -3301,7 +3302,15 @@ async fn unmerge_package(u: UnmergePackage<'_>) -> Result<()> {
             .get_var("FEATURES")
             .is_some_and(|f| f.split_whitespace().any(|x| x == "unmerge-orphans")),
     };
-    remove_old_unique_files(&old_contents, new_contents, &preserve_paths, root, &rules);
+    let unowned =
+        remove_old_unique_files(&old_contents, new_contents, &preserve_paths, root, &rules);
+    let mut memory = ConfigMemory::load(root, vec![], false, false);
+    for path in unowned {
+        memory.forget(path.as_str());
+    }
+    if let Err(e) = memory.store() {
+        crate::style::warn_line!("could not update the config memory file: {e}");
+    }
 
     vdb.unregister(old_pkg)
         .context("unregistering old package")?;
@@ -3535,15 +3544,20 @@ struct UnmergeRules {
     orphans: bool,
 }
 
-fn remove_old_unique_files(
-    old_contents: &[ContentsEntry],
+/// Remove what `old_contents` lists and `new_contents` does not, under `rules`
+///
+/// Returns the paths still on disk that the replacing package does not own, whether removed or
+/// kept: portage drops them from the config memory.
+fn remove_old_unique_files<'a>(
+    old_contents: &'a [ContentsEntry],
     new_contents: &[ContentsEntry],
     preserve: &HashSet<Utf8PathBuf>,
     root: &Utf8Path,
     rules: &UnmergeRules,
-) {
+) -> Vec<&'a Utf8Path> {
     let new_paths: HashSet<&Utf8PathBuf> = new_contents.iter().map(|e| &e.path).collect();
     let owned: HashSet<&Utf8Path> = old_contents.iter().map(|e| e.path.as_path()).collect();
+    let mut unowned = vec![];
 
     for entry in old_contents.iter().rev() {
         if new_paths.contains(&entry.path) || preserve.contains(&entry.path) {
@@ -3559,6 +3573,9 @@ fn remove_old_unique_files(
         let Ok(lstat) = std::fs::symlink_metadata(dest.as_std_path()) else {
             continue;
         };
+        if !unmerge_ignored(entry, &lstat, rules) {
+            unowned.push(entry.path.as_path());
+        }
         if let Some(reason) = keep_on_unmerge(entry, &dest, &lstat, &owned, rules) {
             tracing::debug!("--- {reason} {}", entry.path);
             continue;
@@ -3575,6 +3592,18 @@ fn remove_old_unique_files(
             }
         }
     }
+    unowned
+}
+
+/// Whether an unmerge leaves `entry` alone outright: `UNINSTALL_IGNORE`, or a libdir symlink
+fn unmerge_ignored(entry: &ContentsEntry, lstat: &std::fs::Metadata, rules: &UnmergeRules) -> bool {
+    let libdir_link = lstat.file_type().is_symlink()
+        && ["/lib", "/usr/lib", "/usr/local/lib"].contains(&entry.path.as_str());
+    libdir_link
+        || rules
+            .uninstall_ignore
+            .iter()
+            .any(|p| p.matches(entry.path.as_str()))
 }
 
 /// Parse `UNINSTALL_IGNORE` into fnmatch-style patterns (`*` crosses `/`)
@@ -3596,14 +3625,7 @@ fn keep_on_unmerge(
 ) -> Option<&'static str> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let is_link = lstat.file_type().is_symlink();
-    let libdir_link =
-        is_link && ["/lib", "/usr/lib", "/usr/local/lib"].contains(&entry.path.as_str());
-    if libdir_link
-        || rules
-            .uninstall_ignore
-            .iter()
-            .any(|p| p.matches(entry.path.as_str()))
-    {
+    if unmerge_ignored(entry, lstat, rules) {
         return Some("cfgpro");
     }
     let dir_or_dir_link = lstat.is_dir() || (is_link && dest.is_dir());
@@ -6953,6 +6975,41 @@ mod tests {
         assert!(log.contains("by=2"), "{log}");
         assert!(!log.contains("func:leaked"), "{log}");
         assert!(!log.contains("from-the-new"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn a_removal_forgets_the_config_memory_of_what_it_leaves_unowned() {
+        let probe = Probe::new();
+        let ebuild = probe.ebuild("probe", "1", INSTALLS_A_FILE);
+        probe.run(&ebuild, BUILD_AND_MERGE).await.unwrap();
+        let root = probe.path("root");
+        let memory = root.join("var/lib/portage/config");
+        fs::write(&memory, "/usr/share/probe/file 111\n/etc/other 222\n").unwrap();
+
+        let vdb = Vdb::open(root.join("var/db/pkg")).unwrap();
+        let pkg = vdb.packages().into_iter().next().unwrap();
+        let repo = probe.repo();
+        let mut shell = repo.shell().await.unwrap();
+        shell.save_profile_session();
+        let mut registry = preserve_libs::PreservedLibsRegistry::load(&root);
+        let graph = preserve_libs::build_link_graph(&vdb, &HashSet::new(), &registry, &root);
+        let work = probe.path("work");
+        unmerge_standalone(&mut shell, &pkg, &work, &root, &vdb, &graph, &mut registry)
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&memory).unwrap(), "/etc/other 222\n");
+    }
+
+    #[tokio::test]
+    async fn a_merge_creates_the_state_files_portage_locks() {
+        let probe = Probe::new();
+        let ebuild = probe.ebuild("probe", "1", INSTALLS_A_FILE);
+        probe.run(&ebuild, BUILD_AND_MERGE).await.unwrap();
+        for name in ["config", "preserved_libs_registry"] {
+            let file = probe.path("root/var/lib/portage").join(name);
+            assert_eq!(fs::read(&file).unwrap(), b"", "{name}");
+        }
     }
 
     #[tokio::test]
