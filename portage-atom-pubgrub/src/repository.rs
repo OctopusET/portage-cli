@@ -19,7 +19,7 @@ pub struct PackageVersions {
     pub subslot: Option<Interned<DefaultInterner>>,
     /// Repository this version comes from
     pub repo: Option<Interned<DefaultInterner>>,
-    /// IUSE flags for this version (USE flags the package defines)
+    /// IUSE flags for this version; a profile-aware repository gives IUSE_EFFECTIVE
     pub iuse: Vec<Interned<DefaultInterner>>,
     /// IUSE default states — flags prefixed with `+` in IUSE default to enabled
     pub iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault>,

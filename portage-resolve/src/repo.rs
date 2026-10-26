@@ -1862,8 +1862,19 @@ impl PackageRepository for Adapter<'_> {
                         // round trip (each pinning an epoch handle on the
                         // lock-free backend) for a result identical to the key
                         // already in hand.
-                        let iuse: Vec<Interned<DefaultInterner>> =
+                        let mut iuse: Vec<Interned<DefaultInterner>> =
                             meta.iuse.iter().map(Interned::from).collect();
+                        // A USE dep judges its flag against IUSE_EFFECTIVE (amd64's implicit `abi_x86_64`).
+                        let mut implicit: Vec<_> = self
+                            .force_mask
+                            .iuse_injection
+                            .profile_part(meta.eapi)
+                            .iter()
+                            .filter(|f| !iuse.contains(f))
+                            .copied()
+                            .collect();
+                        implicit.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+                        iuse.extend(implicit);
                         let iuse_defaults =
                             crate::effective_use::enabled_iuse_defaults_from_metadata(meta);
                         if deps_invalid(meta) {
@@ -4919,6 +4930,91 @@ mod tests {
             UseFlagState::Disabled,
             "package.use.mask must beat the user's enable of cet"
         );
+    }
+
+    // virtual/mpi: openmpi lacks `abi_x86_64` in IUSE but amd64's IUSE_IMPLICIT has it, so the
+    // first branch's `[abi_x86_64(-)?]` holds and wins over mpich.
+    #[test]
+    fn an_or_branch_use_dep_holds_on_an_implicit_iuse_flag() {
+        let leaf =
+            |iuse: &str| format!("EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE={iuse}\n");
+        let entries = [
+            (
+                "virtual/mpi-1",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE=abi_x86_64\n\
+                 RDEPEND=|| ( a/openmpi[abi_x86_64(-)?] a/mpich[abi_x86_64(-)?] )\n"
+                    .to_string(),
+            ),
+            ("a/openmpi-1", leaf("")),
+            ("a/mpich-1", leaf("abi_x86_64")),
+        ];
+        let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
+        let mut cpns = Vec::new();
+        for (cpv, text) in &entries {
+            let cpv = Cpv::parse(cpv).unwrap();
+            cpns.push(cpv.cpn);
+            versions
+                .entry(cpv.cpn)
+                .or_default()
+                .push((cpv, CacheEntry::parse(text).unwrap()));
+        }
+        let data = RepoData::from_parts(
+            cpns,
+            versions,
+            "test".into(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let arch = Arch::intern("amd64");
+        let stable = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let conf = portage_atom_pubgrub::UseLayer::parse("abi_x86_64");
+        let force_mask = ForceMask {
+            iuse_injection: crate::force_mask::IuseInjection::new(
+                Vec::new(),
+                vec!["abi_x86_64".into()],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                HashMap::new(),
+            ),
+            ..Default::default()
+        };
+        let adapter = Adapter {
+            data: &data,
+            accept_keywords: &stable,
+            package_mask: &PolicyMaskList::EMPTY,
+            package_unmask: &PolicyMaskList::EMPTY,
+            installed_cpvs: &std::collections::HashSet::new(),
+            rebuilding_cpvs: &std::collections::HashSet::new(),
+            accept_licenses: &AcceptOverlay::new(accept_all_licenses(), Vec::new()),
+            accept_properties: &AcceptProperties::new(accept_all_licenses(), Vec::new()),
+            accept_restrict: &AcceptRestrict::new(accept_all_licenses(), Vec::new()),
+            defaults: empty_layer(),
+            conf: &conf,
+            env_use: empty_layer(),
+            package_use: &[],
+            profile_package_use: &[],
+            force_mask: &force_mask,
+            facts: None,
+            autosolve_use: false,
+            autounmask_widen: false,
+        };
+        let pkg = |cpn: &str| {
+            portage_atom_pubgrub::PortagePackage::slotted(
+                Cpn::try_new(cpn).unwrap(),
+                Interned::intern("0"),
+            )
+        };
+        let mut provider = portage_atom_pubgrub::PortageDependencyProvider::new(adapter);
+        let solution = provider
+            .resolve_targets(vec![(
+                pkg("virtual/mpi"),
+                portage_atom_pubgrub::PortageVersionSet::any(),
+            )])
+            .unwrap();
+        assert!(solution.get(&pkg("a/openmpi")).is_some());
+        assert!(solution.get(&pkg("a/mpich")).is_none());
+        assert!(provider.use_flag_requirements().is_empty());
     }
 
     #[test]
