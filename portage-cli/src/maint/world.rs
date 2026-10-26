@@ -444,6 +444,7 @@ fn expand_deselect_arg(
         .collect();
     cpns.sort();
     cpns.dedup();
+    prefer_non_virtual(&mut cpns);
     if cpns.len() > 1 {
         let names: Vec<String> = cpns.iter().map(|c| c.to_string()).collect();
         bail!(
@@ -468,6 +469,17 @@ fn expand_deselect_arg(
             ..bare.clone()
         })
         .collect())
+}
+
+/// Drop the virtual and account packages from the candidates for a bare name when another
+/// one is left: a package sharing the name with them is what the user means.
+pub(crate) fn prefer_non_virtual(cpns: &mut Vec<portage_atom::Cpn>) {
+    let virtual_like = |c: &portage_atom::Cpn| {
+        ["virtual", "acct-user", "acct-group"].contains(&c.category.as_str())
+    };
+    if cpns.iter().any(|c| !virtual_like(c)) {
+        cpns.retain(|c| !virtual_like(c));
+    }
 }
 
 /// Whether deselecting `arg` drops the world atom `line` (portage's `Atom.intersects` plus
@@ -804,6 +816,24 @@ mod tests {
         let world = "dev-lang/python\napp-shells/bash\n";
         assert_eq!(deselected(world, "python", &[]), ["dev-lang/python"]);
         assert!(deselected(world, "nano", &[]).is_empty());
+    }
+
+    #[test]
+    fn deselect_prefers_a_bare_name_over_its_virtual() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        for pkg in ["virtual/foo-1", "app-misc/foo-1"] {
+            let dir = root.join("var/db/pkg").join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SLOT"), "0\n").unwrap();
+        }
+        let installed: Vec<InstalledPackage> = Vdb::open(root.join("var/db/pkg"))
+            .unwrap()
+            .packages()
+            .into_iter()
+            .collect();
+        let world = "virtual/foo\napp-misc/foo\n";
+        assert_eq!(deselected(world, "foo", &installed), ["app-misc/foo"]);
     }
 
     #[test]

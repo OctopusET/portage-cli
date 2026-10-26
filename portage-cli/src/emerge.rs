@@ -1123,13 +1123,7 @@ fn match_installed_atoms(
             let mut cpns: Vec<portage_atom::Cpn> = pkgs.iter().map(|p| *p.cpn()).collect();
             cpns.sort();
             cpns.dedup();
-            // A virtual or account package sharing the name is not what the user means.
-            let virtual_like = |c: &portage_atom::Cpn| {
-                ["virtual", "acct-user", "acct-group"].contains(&c.category.as_str())
-            };
-            if cpns.iter().any(|c| !virtual_like(c)) {
-                cpns.retain(|c| !virtual_like(c));
-            }
+            maint::world::prefer_non_virtual(&mut cpns);
             if cpns.len() > 1 {
                 bail!(
                     "the short package name '{raw}' is ambiguous, specify one of: {}",
