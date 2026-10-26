@@ -280,7 +280,7 @@ pub(super) const DETACHED_YES_NO: [&str; 4] = [
     "--binpkg-changed-deps",
 ];
 
-/// `args` with a detached `y` or `n` after one of [`DETACHED_YES_NO`] attached to it
+/// `args` with a detached `y` or `n` after one of the valued y|n switches attached to it
 ///
 /// Any other next word is left alone, so a bare `--buildpkg` can still precede an atom.
 pub fn attach_yes_no_values(args: Vec<OsString>) -> Vec<OsString> {
