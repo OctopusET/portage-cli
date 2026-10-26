@@ -50,7 +50,7 @@ pub fn env_files_for(
 ///
 /// One entry per line: `atom file1 file2 …`; `#` comments and blank lines are
 /// skipped, as are lines with no env-file names or an unparseable atom (warned). A
-/// directory is read as its regular files, sorted by name (PMS 5.2.4 form).
+/// directory is walked recursively, sorted by name, as Portage reads user config.
 ///
 /// Public (unlike the rest of this module's helpers) because
 /// `portage-resolve`'s `use_env` needs the raw atom-keyed entries directly —
@@ -60,7 +60,7 @@ pub fn env_files_for(
 pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
     use crate::repo::util::{ConfigFilesMode, list_config_files};
 
-    let Ok(files) = list_config_files(path, ConfigFilesMode::Flat) else {
+    let Ok(files) = list_config_files(path, ConfigFilesMode::Recursive) else {
         return Vec::new();
     };
 

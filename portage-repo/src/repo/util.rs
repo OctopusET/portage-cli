@@ -24,10 +24,10 @@ pub(crate) fn read_to_string(path: impl AsRef<Path>) -> Result<String> {
 ///
 /// - **[`ConfigFilesMode::Flat`]** — PMS 5.2.4/profile form: only regular
 ///   files directly in the directory, sorted by filename, nested
-///   subdirectories ignored. Used for profile files, `package.*`, etc.
+///   subdirectories ignored. Used for profile files and `make.conf`.
 /// - **[`ConfigFilesMode::Recursive`]** — nested subdirectories walked (VCS
 ///   dirs skipped), depth-first with lexicographic sibling order. Used for
-///   `make.conf` and other `getconfig(..., recursive=True)` paths.
+///   `/etc/portage` `package.*` files and `repos.conf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfigFilesMode {
     /// Direct children only (PMS 5.2.4 directory-form config files)
@@ -168,6 +168,16 @@ pub fn read_lines(path: impl AsRef<Path>) -> Result<Vec<String>> {
     let path = path.as_ref();
     let mut out = Vec::new();
     for entry in list_config_files(path, ConfigFilesMode::Flat)? {
+        out.extend(read_file_lines(&entry)?);
+    }
+    Ok(out)
+}
+
+/// Read non-blank, non-comment lines from a `/etc/portage` user file, or every file
+/// beneath it when it is a directory ([`ConfigFilesMode::Recursive`])
+pub fn read_user_lines(path: impl AsRef<Path>) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for entry in list_config_files(path, ConfigFilesMode::Recursive)? {
         out.extend(read_file_lines(&entry)?);
     }
     Ok(out)

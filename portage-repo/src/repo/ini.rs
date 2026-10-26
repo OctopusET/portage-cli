@@ -11,23 +11,13 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::repo::util;
 
-/// Resolve `path` to the `.conf` files it contributes, in application order
+/// Resolve `path` to the files it contributes, in application order
 ///
-/// A single file as itself, or (if a directory) every `*.conf` file
-/// within, sorted by name (dotfiles and `~` backups skipped). Missing
-/// paths are silently skipped (empty result) — callers treat an absent
-/// config file/dir as "nothing configured here".
+/// A single file as itself, or (if a directory) every file beneath it whatever its name,
+/// nested directories included, in Portage's recursive order (dotfiles, `~` backups and VCS
+/// directories skipped). A missing path contributes nothing.
 pub fn collect_conf_files(path: &Path) -> Result<Vec<PathBuf>> {
-    let files = util::list_config_files(path, util::ConfigFilesMode::Flat)?;
-    // A lone file (e.g. `repos.conf` without a `.conf` suffix) is kept as-is;
-    // directory fragments must end in `.conf`.
-    if files.len() == 1 && files[0] == path {
-        return Ok(files);
-    }
-    Ok(files
-        .into_iter()
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("conf"))
-        .collect())
+    util::list_config_files(path, util::ConfigFilesMode::Recursive)
 }
 
 /// Parse one file's contents into `sections` (accumulated across files —
@@ -89,5 +79,17 @@ mod tests {
             "# comment\n\n[a]\n; also a comment\nx = 1\n",
         );
         assert_eq!(sections["a"]["x"], "1");
+    }
+
+    #[test]
+    fn collect_conf_files_reads_every_fragment_nested_or_unsuffixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repos.conf");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("gentoo"), "").unwrap();
+        std::fs::write(root.join("sub/overlay.conf"), "").unwrap();
+        std::fs::write(root.join("old~"), "").unwrap();
+        let files = collect_conf_files(&root).unwrap();
+        assert_eq!(files, [root.join("gentoo"), root.join("sub/overlay.conf")]);
     }
 }

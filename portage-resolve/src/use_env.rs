@@ -1170,6 +1170,20 @@ mod tests {
         assert_eq!(out[1].1, vec!["second".to_string()]);
     }
 
+    #[test]
+    fn package_use_dir_reads_nested_subdirectories() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join("package.use");
+        std::fs::create_dir_all(dir.join("20-sub")).unwrap();
+        std::fs::write(dir.join("10-a"), "dev-libs/a x\n").unwrap();
+        std::fs::write(dir.join("20-sub/b"), "dev-libs/b y\n").unwrap();
+        std::fs::write(dir.join("30-c"), "dev-libs/c z\n").unwrap();
+
+        let out = load_package_use(dir.to_str().unwrap());
+        let atoms: Vec<_> = out.iter().map(|(d, _)| d.to_string()).collect();
+        assert_eq!(atoms, vec!["dev-libs/a", "dev-libs/b", "dev-libs/c"]);
+    }
+
     // The same dir-form dotfile/backup skip must hold for the keyword reader,
     // which shares the reader but keeps bare atoms (empty token list)
     #[test]

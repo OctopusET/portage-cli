@@ -88,12 +88,11 @@ pub use repo::ini;
 pub use repo::license_groups::{AcceptSet, LicenseGroupRegistry};
 pub use repo::named_groups::{GROUP_PREFIX, group_ref_name, is_group_ref};
 pub use repo::sets::{SetResolver, is_set_ref, is_world_candidate, set_name};
-/// Directory-aware config line reader
+/// Directory-aware line reader for `/etc/portage` `package.*` files
 ///
-/// PMS 5.2.4 dir-form: files concatenated in filename order, dotfiles and
-/// `~` backups skipped. Shared with `/etc/portage` `package.*` consumers
-/// so they match the profile stack exactly.
-pub use repo::util::read_lines as read_config_lines;
+/// A directory is walked recursively in filename order, dotfiles, `~` backups and VCS
+/// directories skipped, as Portage reads user config.
+pub use repo::util::read_user_lines as read_config_lines;
 /// Expand a Portage config path that may be a file or a directory of fragments
 pub use repo::util::{
     ConfigFilesMode, config_basename_included, iter_config_files, list_config_files,

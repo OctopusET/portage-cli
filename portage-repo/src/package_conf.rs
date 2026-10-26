@@ -11,7 +11,7 @@
 //! token (USE flag, keyword, licence, env-file name, etc.).  The path may be
 //! either a single file or a directory; in the directory case every regular
 //! file is loaded in alphabetical order (dotfiles and `~` backups skipped —
-//! [`crate::list_config_files`] / [`crate::ConfigFilesMode::Flat`]).
+//! [`crate::list_config_files`] / [`crate::ConfigFilesMode::Recursive`]).
 //!
 //! Inline comments after values are preserved verbatim.  Round-trip
 //! serialisation is byte-identical to the input when no edits are made.
@@ -91,7 +91,7 @@ impl PackageConf {
     pub fn load_dir(path: &Utf8Path) -> Result<Vec<(Utf8PathBuf, PackageConf)>> {
         use crate::repo::util::{ConfigFilesMode, list_config_files};
 
-        list_config_files(path.as_std_path(), ConfigFilesMode::Flat)?
+        list_config_files(path.as_std_path(), ConfigFilesMode::Recursive)?
             .into_iter()
             .map(|f| {
                 let f = Utf8PathBuf::try_from(f).map_err(|e| Error::Io {
@@ -110,12 +110,12 @@ impl PackageConf {
     /// Load from a file path or a directory of files
     ///
     /// Directory entries are read in alphabetical order and concatenated
-    /// ([`ConfigFilesMode::Flat`](crate::ConfigFilesMode)).
+    /// ([`ConfigFilesMode::Recursive`](crate::ConfigFilesMode)).
     /// Use `load_dir` when you need per-file identity for editing.
     pub fn load(path: &Utf8Path) -> Result<Self> {
         use crate::repo::util::{ConfigFilesMode, list_config_files};
 
-        let files = list_config_files(path.as_std_path(), ConfigFilesMode::Flat)?;
+        let files = list_config_files(path.as_std_path(), ConfigFilesMode::Recursive)?;
         if files.is_empty() && !path.exists() {
             return Self::load_file(path); // preserve previous missing-file error
         }
