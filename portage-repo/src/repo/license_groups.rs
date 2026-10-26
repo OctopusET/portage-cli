@@ -206,7 +206,10 @@ impl AcceptSet {
     pub fn accepts_expr(&self, expr: &LicenseExpr, enabled: &dyn Fn(&str) -> bool) -> bool {
         match expr {
             LicenseExpr::License(name) => self.accepts(name),
-            LicenseExpr::AnyOf(children) => children.iter().any(|c| self.accepts_expr(c, enabled)),
+            LicenseExpr::AnyOf(children) => {
+                let mut live = children.iter().filter(|c| !is_void(c, enabled)).peekable();
+                live.peek().is_none() || live.any(|c| self.accepts_expr(c, enabled))
+            }
             LicenseExpr::All(children) => children.iter().all(|c| self.accepts_expr(c, enabled)),
             LicenseExpr::UseConditional {
                 flag,
@@ -241,11 +244,12 @@ impl AcceptSet {
                 }
             }
             LicenseExpr::AnyOf(children) => {
-                if children.iter().any(|c| self.accepts_expr(c, enabled)) {
+                if self.accepts_expr(expr, enabled) {
                     Vec::new()
                 } else {
                     children
-                        .first()
+                        .iter()
+                        .find(|c| !is_void(c, enabled))
                         .map(|c| self.licenses_needed(c, enabled))
                         .unwrap_or_default()
                 }
@@ -335,6 +339,22 @@ impl AcceptSet {
                 }
             }
         }
+    }
+}
+
+/// Whether `expr` names no license once its inactive USE conditionals drop out, so a
+/// `||` group does not count it as an alternative
+fn is_void(expr: &LicenseExpr, enabled: &dyn Fn(&str) -> bool) -> bool {
+    match expr {
+        LicenseExpr::License(_) => false,
+        LicenseExpr::AnyOf(children) | LicenseExpr::All(children) => {
+            children.iter().all(|c| is_void(c, enabled))
+        }
+        LicenseExpr::UseConditional {
+            flag,
+            negated,
+            entries,
+        } => enabled(flag) == *negated || entries.iter().all(|c| is_void(c, enabled)),
     }
 }
 
@@ -472,5 +492,20 @@ OSI Apache-2.0
         let off = |_: &str| false;
         assert!(acc.accepts_expr(&expr, &off));
         assert!(acc.licenses_needed(&expr, &off).is_empty());
+    }
+
+    #[test]
+    fn inactive_conditional_is_no_any_of_alternative() {
+        let reg = LicenseGroupRegistry::default();
+        let acc = AcceptSet::from_tokens(&["-*".into(), "MIT".into()], &reg);
+        let expr = LicenseExpr::parse("|| ( foo? ( MIT ) EULA )").unwrap();
+        let off = |_: &str| false;
+        assert!(!acc.accepts_expr(&expr, &off));
+        assert_eq!(acc.licenses_needed(&expr, &off), ["EULA"]);
+        let on = |f: &str| f == "foo";
+        assert!(acc.accepts_expr(&expr, &on));
+
+        let empty = LicenseExpr::parse("EULA? ( EULA ) || ( foo? ( EULA ) )").unwrap();
+        assert!(acc.accepts_expr(&empty, &off));
     }
 }
