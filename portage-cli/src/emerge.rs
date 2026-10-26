@@ -1746,17 +1746,17 @@ fn plan_header_verb(merge_flags: &cli::MergeFlags) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn plan_header_verb_follows_the_merge_mode() {
-        let mut flags = crate::cli::MergeFlags::default();
-        assert_eq!(super::plan_header_verb(&flags), "merged");
+        let mut flags = cli::MergeFlags::default();
+        assert_eq!(plan_header_verb(&flags), "merged");
         flags.buildpkgonly = true;
-        assert_eq!(super::plan_header_verb(&flags), "built");
+        assert_eq!(plan_header_verb(&flags), "built");
         flags.fetch_all_uri = true;
-        assert_eq!(super::plan_header_verb(&flags), "fetched");
+        assert_eq!(plan_header_verb(&flags), "fetched");
     }
-
-    use super::*;
 
     #[test]
     fn a_resume_judges_binpkgs_by_its_saved_newuse() {
