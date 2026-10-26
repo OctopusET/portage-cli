@@ -504,10 +504,10 @@ for every bundled locale) keeps every flag on — which is exactly what real
 `L10N=de` on top of both → `de` alone.
 
 In `package.use` (profile or site), `GROUP: -*` is the `-group_*` wildcard, and
-`group_*`/`-group_*` tokens are prefix wildcards: `-group_*` disables every
-flag with that prefix set so far, the ebuild's `+` IUSE defaults included.
-Divergence: an enabling `group_*` reaches only the ebuild's `+`/`-` IUSE
-defaults, not its plain IUSE flags, which the fold does not see.
+`group_*`/`-group_*` tokens are prefix wildcards, as they are in make.conf and
+env `USE` (where a `*/*` `package.use` line also lands): `-group_*` disables
+every flag with that prefix set so far, the ebuild's `+` IUSE defaults
+included, and `group_*` enables every IUSE flag with that prefix.
 
 Layers 2 (`profile package.use`) and 4 (`/etc/portage/package.use`) are applied
 **per package** at solve/display time. Layer 6 force/mask is applied as a true

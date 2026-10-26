@@ -78,6 +78,7 @@ pub fn build_entries(
         let cpv = Cpv::new(cpn, ver.clone());
         let eff = resolve_effective_use(
             &HashMap::new(),
+            &[],
             defaults,
             &cpv,
             req.package.slot(),

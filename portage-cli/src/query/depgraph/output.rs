@@ -1612,8 +1612,12 @@ fn format_plan_parts(
     let defaults = cache
         .map(super::effective_use::iuse_defaults)
         .unwrap_or_default();
+    let iuse_flags = cache
+        .map(|c| super::effective_use::iuse_flags(&c.metadata))
+        .unwrap_or_default();
     let mut effective_use = resolve_effective_use(
         &defaults,
+        &iuse_flags,
         defaults_layer,
         &cpv,
         pkg.slot(),

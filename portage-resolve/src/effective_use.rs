@@ -54,6 +54,11 @@ pub(crate) fn iuse_defaults_from_metadata(
         .collect()
 }
 
+/// The ebuild's own IUSE flag names, the `iuse` that `resolve_effective_use` needs
+pub fn iuse_flags(meta: &EbuildMetadata) -> Vec<Interned<DefaultInterner>> {
+    meta.iuse.iter().map(Interned::from).collect()
+}
+
 /// Enabled-only IUSE defaults for solver fact ingestion.
 ///
 /// Disabled defaults are implicit in `UseConfig` lookups and must not be
@@ -110,11 +115,13 @@ fn fold_effective_use(
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
     iuse_defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
+    iuse_flags: &[Interned<DefaultInterner>],
     iuse: &HashSet<Interned<DefaultInterner>>,
     stable: bool,
 ) -> UseConfig {
     let mut cfg = portage_atom_pubgrub::resolve_effective_use(
         iuse_defaults,
+        iuse_flags,
         policy.defaults,
         cpv,
         slot,
@@ -155,12 +162,29 @@ pub(crate) fn effective_use_metadata(
                 .is_stable(&meta.keywords, cpv, slot, Some(repo)),
         )
     };
-    fold_effective_use(policy, cpv, slot, &iuse_defaults, &iuse, stable)
+    let iuse_flags = iuse_flags(meta);
+    fold_effective_use(
+        policy,
+        cpv,
+        slot,
+        &iuse_defaults,
+        &iuse_flags,
+        &iuse,
+        stable,
+    )
 }
 
 /// Effective USE for a CPV whose repository metadata is unavailable.
 pub(crate) fn effective_use_without_metadata(policy: &ResolvePolicy, cpv: &Cpv) -> UseConfig {
-    fold_effective_use(policy, cpv, None, &HashMap::new(), &HashSet::new(), false)
+    fold_effective_use(
+        policy,
+        cpv,
+        None,
+        &HashMap::new(),
+        &[],
+        &HashSet::new(),
+        false,
+    )
 }
 
 /// Package-use pins only, for the cede gate's "user pinned this" check.
@@ -172,6 +196,7 @@ pub(crate) fn pinned_package_use(
     let empty = portage_atom_pubgrub::UseLayer::default();
     portage_atom_pubgrub::resolve_effective_use(
         &HashMap::new(),
+        &[],
         &empty,
         cpv,
         slot,
@@ -222,8 +247,17 @@ pub(crate) fn effective_use_base(
 ) -> UseConfig {
     let cpv = Cpv::new(*pkg.cpn(), ver.clone());
     let iuse_map = iuse_defaults(cache);
+    let iuse_flags = iuse_flags(&cache.metadata);
     let iuse = iuse_set(cache, &policy.force_mask.iuse_injection);
-    fold_effective_use(policy, &cpv, pkg.slot(), &iuse_map, &iuse, stable)
+    fold_effective_use(
+        policy,
+        &cpv,
+        pkg.slot(),
+        &iuse_map,
+        &iuse_flags,
+        &iuse,
+        stable,
+    )
 }
 
 /// A `(pkg, ver)`'s cache entry plus its effective USE
@@ -379,6 +413,7 @@ mod tests {
         let cpv = Cpv::new(Cpn::new("app-alternatives", "lex"), "0-r1".parse().unwrap());
         let mut cfg = resolve_effective_use(
             &HashMap::new(),
+            &[],
             &UseLayer::default(),
             &cpv,
             None,
@@ -423,6 +458,7 @@ mod tests {
         let cpv = Cpv::new(Cpn::new("app-alternatives", "lex"), "0-r1".parse().unwrap());
         let mut cfg = resolve_effective_use(
             &HashMap::new(),
+            &[],
             &UseLayer::default(),
             &cpv,
             None,
@@ -454,6 +490,7 @@ mod tests {
         let cpv = Cpv::new(Cpn::new("sys-devel", "gcc"), "14.2.0".parse().unwrap());
         let mut cfg = resolve_effective_use(
             &HashMap::new(),
+            &[],
             &UseLayer::default(),
             &cpv,
             None,

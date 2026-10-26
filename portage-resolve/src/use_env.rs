@@ -1113,6 +1113,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_match_all_group_clear_reaches_make_conf_and_iuse() {
+        let env = env_with(
+            &[("make.defaults", "USE_EXPAND=\"L10N\"\n")],
+            &[
+                ("make.conf", "L10N=\"en\"\n"),
+                ("package.use", "*/* L10N: -* de\n"),
+            ],
+        )
+        .await;
+        let flag = portage_atom::interner::Interned::intern;
+        let iuse_defaults = [(flag("l10n_fr"), portage_atom_pubgrub::IUseDefault::Enabled)];
+        let cfg = portage_atom_pubgrub::resolve_effective_use(
+            &iuse_defaults.into_iter().collect(),
+            &[flag("l10n_en"), flag("l10n_de"), flag("l10n_fr")],
+            &env.defaults,
+            &Cpv::parse("dev-libs/foo-1").unwrap(),
+            None,
+            &env.package_use,
+            &env.env_use,
+            &env.profile_package_use,
+            &env.conf,
+        );
+        let state = |f| cfg.get(flag(f));
+        use portage_atom_pubgrub::UseFlagState::{Disabled, Enabled};
+        assert_eq!(state("l10n_en"), Disabled);
+        assert_eq!(state("l10n_fr"), Disabled);
+        assert_eq!(state("l10n_de"), Enabled);
+    }
+
+    #[tokio::test]
     async fn bare_keyword_atoms_and_profile_package_keywords() {
         let env = env_with(
             &[
@@ -1176,6 +1206,7 @@ mod tests {
         let empty = portage_atom_pubgrub::UseLayer::default();
         let cfg = portage_atom_pubgrub::resolve_effective_use(
             &Default::default(),
+            &[],
             &empty,
             &Cpv::parse("dev-libs/foo-1").unwrap(),
             None,
@@ -1221,6 +1252,7 @@ mod tests {
         let empty = portage_atom_pubgrub::UseLayer::default();
         let cfg = portage_atom_pubgrub::resolve_effective_use(
             &Default::default(),
+            &[],
             &empty,
             &Cpv::parse("dev-libs/foo-1").unwrap(),
             None,

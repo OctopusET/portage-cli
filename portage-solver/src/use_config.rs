@@ -208,16 +208,13 @@ impl UseOverride {
     }
 }
 
-/// One token inside a [`UseLayer`]: clear-all or a signed flag
+/// One token inside a [`UseLayer`]: clear-all or a signed flag or prefix wildcard
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerTok {
     /// `-*` — discard everything accumulated from lower layers so far
     ClearAll,
-    /// `flag` / `+flag` / `-flag` with the name already interned
-    Flag {
-        flag: Interned<DefaultInterner>,
-        enable: bool,
-    },
+    /// `flag` / `+flag` / `-flag` / `x_*` / `-x_*`, as in `package.use`
+    Flag(UseOverride),
 }
 
 /// A pre-tokenized USE layer (profile `pre_env` or process `env_use`)
@@ -232,6 +229,8 @@ pub struct UseLayer {
     tokens: Vec<LayerTok>,
     /// Whether this layer contains any `-*` (clears lower layers when applied)
     has_clear_all: bool,
+    /// Whether any token is a prefix wildcard, which [`Self::frozen`] cannot hold
+    has_prefix: bool,
     /// This layer folded alone from empty — shared via [`Arc`]
     frozen: Arc<HashMap<Interned<DefaultInterner>, bool>>,
     /// Lowercased flag prefixes (`l10n_`, `video_cards_`, …) of the
@@ -251,6 +250,7 @@ impl Default for UseLayer {
         Self {
             tokens: Vec::new(),
             has_clear_all: false,
+            has_prefix: false,
             frozen: Arc::new(HashMap::new()),
             group_clears: Arc::from([]),
         }
@@ -274,30 +274,23 @@ impl UseLayer {
     /// Split and intern a whitespace-separated USE string once
     ///
     /// Accepts the same tokens as a profile/`make.conf`/`USE=` fold:
-    /// `flag`, `+flag`, `-flag`, and `-*`.
+    /// `flag`, `+flag`, `-flag`, `-*`, and the `x_*` / `-x_*` prefix wildcards.
     pub fn parse(s: &str) -> Self {
-        let mut tokens = Vec::new();
-        for tok in s.split_whitespace() {
-            if tok == "-*" {
-                tokens.push(LayerTok::ClearAll);
-                continue;
-            }
-            let name = tok.strip_prefix('+').unwrap_or(tok);
-            match name.strip_prefix('-') {
-                Some(rest) => tokens.push(LayerTok::Flag {
-                    flag: Interned::intern(rest),
-                    enable: false,
-                }),
-                None => tokens.push(LayerTok::Flag {
-                    flag: Interned::intern(name),
-                    enable: true,
-                }),
-            }
-        }
+        let tokens: Vec<LayerTok> = s
+            .split_whitespace()
+            .map(|tok| match tok {
+                "-*" => LayerTok::ClearAll,
+                _ => LayerTok::Flag(UseOverride::parse(tok)),
+            })
+            .collect();
         let (frozen, has_clear_all) = freeze_tokens(&tokens);
+        let has_prefix = tokens
+            .iter()
+            .any(|t| matches!(t, LayerTok::Flag(ov) if ov.prefix));
         Self {
             tokens,
             has_clear_all,
+            has_prefix,
             frozen: Arc::new(frozen),
             group_clears: Arc::from([]),
         }
@@ -377,8 +370,15 @@ fn freeze_tokens(tokens: &[LayerTok]) -> (HashMap<Interned<DefaultInterner>, boo
                 state.clear();
                 has_clear = true;
             }
-            LayerTok::Flag { flag, enable } => {
-                state.insert(flag, enable);
+            LayerTok::Flag(ov) if ov.prefix => {
+                if !ov.enable {
+                    let prefix = ov.flag.as_str();
+                    state
+                        .retain(|f: &Interned<DefaultInterner>, _| !f.as_str().starts_with(prefix));
+                }
+            }
+            LayerTok::Flag(ov) => {
+                state.insert(ov.flag, ov.enable);
             }
         }
     }
@@ -404,9 +404,12 @@ fn freeze_tokens(tokens: &[LayerTok]) -> (HashMap<Interned<DefaultInterner>, boo
 /// 4. `conf` — `make.conf` only, above profile `package.use`.
 /// 5. `package_use` — `/etc/portage/package.use` (`pkg`).
 /// 6. `env_use` — process-environment USE ([`UseLayer`]), unmerged.
+///
+/// `iuse` is the package's whole IUSE, what an enabling `x_*` wildcard expands to.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_effective_use(
     iuse_defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
+    iuse: &[Interned<DefaultInterner>],
     defaults: &UseLayer,
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
@@ -415,9 +418,23 @@ pub fn resolve_effective_use(
     profile_package_use: &[ProfileUseNode],
     conf: &UseLayer,
 ) -> UseConfig {
-    // Env-level `-*` wipes everything below — frozen env is the answer.
+    let mut overlay: HashMap<Interned<DefaultInterner>, UseFlagState> = HashMap::new();
+    let scope = GlobScope {
+        iuse,
+        iuse_defaults,
+        bases: [defaults, conf],
+    };
+
+    // Env-level `-*` wipes everything below.
     if env_use.has_clear_all {
-        return UseConfig::from_base_map(Arc::clone(&env_use.frozen));
+        if !env_use.has_prefix {
+            return UseConfig::from_base_map(Arc::clone(&env_use.frozen));
+        }
+        apply_layer(&mut overlay, env_use, &scope);
+        return UseConfig {
+            base: None,
+            overlay,
+        };
     }
 
     let conf_wipes_below = conf.has_clear_all;
@@ -425,12 +442,6 @@ pub fn resolve_effective_use(
         && profile_package_use
             .iter()
             .any(|n| n.puse_clear_all && node_matches(n, cpv, slot));
-
-    let mut overlay: HashMap<Interned<DefaultInterner>, UseFlagState> = HashMap::new();
-    let scope = GlobScope {
-        iuse: iuse_defaults,
-        bases: [defaults, conf],
-    };
 
     if replay {
         apply_iuse(&mut overlay, iuse_defaults, defaults);
@@ -452,7 +463,9 @@ pub fn resolve_effective_use(
 
     if !conf_wipes_below {
         apply_group_clears(&mut overlay, conf, defaults);
-        apply_layer_tokens(&mut overlay, conf);
+        apply_layer(&mut overlay, conf, &scope);
+    } else if conf.has_prefix {
+        apply_layer(&mut overlay, conf, &scope);
     }
 
     apply_overrides(&mut overlay, package_use, cpv, slot, &scope, |_| false);
@@ -462,10 +475,10 @@ pub fn resolve_effective_use(
         env_use,
         if conf_wipes_below { conf } else { defaults },
     );
-    apply_layer_tokens(&mut overlay, env_use);
+    apply_layer(&mut overlay, env_use, &scope);
 
     let base = if conf_wipes_below {
-        if conf.frozen.is_empty() {
+        if conf.has_prefix || conf.frozen.is_empty() {
             None
         } else {
             Some(Arc::clone(&conf.frozen))
@@ -541,8 +554,10 @@ fn apply_profile_package_use(
 
 /// The flags a prefix [`UseOverride`] can reach besides the overlay's own
 struct GlobScope<'a> {
-    /// The package's `+`/`-` IUSE defaults, what an enabling wildcard expands to
-    iuse: &'a HashMap<Interned<DefaultInterner>, IUseDefault>,
+    /// The package's IUSE, what an enabling wildcard expands to
+    iuse: &'a [Interned<DefaultInterner>],
+    /// The package's `+`/`-` IUSE defaults
+    iuse_defaults: &'a HashMap<Interned<DefaultInterner>, IUseDefault>,
     /// The folded layers under the overlay that may have set a flag
     bases: [&'a UseLayer; 2],
 }
@@ -555,7 +570,11 @@ impl GlobScope<'_> {
         overlay: &HashMap<Interned<DefaultInterner>, UseFlagState>,
     ) -> Vec<Interned<DefaultInterner>> {
         let prefix = ov.flag.as_str();
-        let iuse = self.iuse.keys().copied();
+        let iuse = self
+            .iuse
+            .iter()
+            .copied()
+            .chain(self.iuse_defaults.keys().copied());
         let mut flags: Vec<_> = if ov.enable {
             iuse.collect()
         } else {
@@ -580,22 +599,49 @@ fn apply_overrides(
             continue;
         }
         for ov in overrides {
-            let state = if ov.enable {
-                UseFlagState::Enabled
-            } else {
-                UseFlagState::Disabled
-            };
-            if !ov.prefix {
-                if !skip(ov.flag) {
-                    overlay.insert(ov.flag, state);
-                }
-                continue;
-            }
-            for flag in scope.expand(ov, overlay) {
-                if !skip(flag) {
-                    overlay.insert(flag, state);
-                }
-            }
+            apply_override(overlay, ov, scope, &skip);
+        }
+    }
+}
+
+fn apply_override(
+    overlay: &mut HashMap<Interned<DefaultInterner>, UseFlagState>,
+    ov: &UseOverride,
+    scope: &GlobScope<'_>,
+    skip: impl Fn(Interned<DefaultInterner>) -> bool,
+) {
+    let state = if ov.enable {
+        UseFlagState::Enabled
+    } else {
+        UseFlagState::Disabled
+    };
+    if !ov.prefix {
+        if !skip(ov.flag) {
+            overlay.insert(ov.flag, state);
+        }
+        return;
+    }
+    for flag in scope.expand(ov, overlay) {
+        if !skip(flag) {
+            overlay.insert(flag, state);
+        }
+    }
+}
+
+/// Apply `layer` over the overlay, in token order when a prefix wildcard needs the package
+fn apply_layer(
+    overlay: &mut HashMap<Interned<DefaultInterner>, UseFlagState>,
+    layer: &UseLayer,
+    scope: &GlobScope<'_>,
+) {
+    if !layer.has_prefix {
+        apply_layer_tokens(overlay, layer);
+        return;
+    }
+    let last_clear = layer.tokens.iter().rposition(|t| *t == LayerTok::ClearAll);
+    for tok in &layer.tokens[last_clear.map_or(0, |i| i + 1)..] {
+        if let LayerTok::Flag(ov) = tok {
+            apply_override(overlay, ov, scope, |_| false);
         }
     }
 }
@@ -770,6 +816,7 @@ mod tests {
                 ("l10n_af", IUseDefault::Enabled),
                 ("l10n_en-GB", IUseDefault::Enabled),
             ]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -794,6 +841,7 @@ mod tests {
                 ("l10n_en-GB", IUseDefault::Enabled),
                 ("seccomp", IUseDefault::Enabled),
             ]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -812,6 +860,7 @@ mod tests {
         let run = |atom: &str| {
             resolve_effective_use(
                 &iuse_defaults(&[]),
+                &[],
                 &layer(""),
                 &cpv(),
                 None,
@@ -836,6 +885,7 @@ mod tests {
     fn conf_group_clear_spares_user_package_use() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("l10n_af", IUseDefault::Enabled)]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -866,6 +916,7 @@ mod tests {
     fn env_use_expand_assignment_wipes_group_from_all_lower_layers() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("l10n_af", IUseDefault::Enabled)]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -887,6 +938,7 @@ mod tests {
     fn empty_use_expand_assignment_still_clears_the_group() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("l10n_af", IUseDefault::Enabled)]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -904,6 +956,7 @@ mod tests {
         // baseline behaviour (m4 nls with no override).
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -922,6 +975,7 @@ mod tests {
         // `package.use: sys-devel/m4 nls` apply.
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -941,6 +995,7 @@ mod tests {
         // invocation left `package.use: sys-devel/m4 nls` with zero effect.
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -959,6 +1014,7 @@ mod tests {
         // confirmed against real emerge.
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -978,6 +1034,7 @@ mod tests {
         // app-alternatives/awk `+gawk` default.
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("quic", IUseDefault::Enabled)]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -993,6 +1050,7 @@ mod tests {
     fn resolve_effective_use_iuse_default_suppressed_by_env_level_wildcard() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("quic", IUseDefault::Enabled)]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -1008,6 +1066,7 @@ mod tests {
     fn resolve_effective_use_iuse_default_kept_without_any_wildcard() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("quic", IUseDefault::Enabled)]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -1025,6 +1084,7 @@ mod tests {
         // the ebuild's own IUSE default is `+` — pkginternal is folded first.
         let cfg = resolve_effective_use(
             &iuse_defaults(&[("ssl", IUseDefault::Enabled)]),
+            &[],
             &layer("-ssl"),
             &cpv(),
             None,
@@ -1046,6 +1106,7 @@ mod tests {
         let resolve = |base: &str, flags: &[&str]| {
             resolve_effective_use(
                 &iuse,
+                &[],
                 &layer(base),
                 &cpv(),
                 None,
@@ -1065,9 +1126,60 @@ mod tests {
     }
 
     #[test]
+    fn enabling_prefix_wildcard_reaches_plain_iuse() {
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            &[flag("l10n_fr"), flag("ssl")],
+            &none(),
+            &cpv(),
+            None,
+            &pkg_use("dev-libs/openssl", &["l10n_*"]),
+            &none(),
+            &[],
+            &none(),
+        );
+        assert_eq!(cfg.get(flag("l10n_fr")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn conf_and_env_layers_honour_prefix_wildcards() {
+        let iuse = [flag("l10n_en"), flag("l10n_de"), flag("l10n_fr")];
+        let defaults = iuse_defaults(&[("l10n_fr", IUseDefault::Enabled)]);
+        let resolve = |conf: &str, env: &str| {
+            resolve_effective_use(
+                &defaults,
+                &iuse,
+                &layer("l10n_ja"),
+                &cpv(),
+                None,
+                &[],
+                &layer(env),
+                &[],
+                &layer(conf),
+            )
+        };
+        let cfg = resolve("l10n_en -l10n_* l10n_de", "");
+        assert_eq!(cfg.get(flag("l10n_en")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("l10n_fr")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("l10n_ja")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("l10n_de")), UseFlagState::Enabled);
+
+        let cfg = resolve("-* l10n_* -l10n_de", "");
+        assert_eq!(cfg.get(flag("l10n_en")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(flag("l10n_de")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("l10n_ja")), UseFlagState::Disabled);
+
+        let cfg = resolve("l10n_de", "-* l10n_*");
+        assert_eq!(cfg.get(flag("l10n_en")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(flag("l10n_ja")), UseFlagState::Disabled);
+    }
+
+    #[test]
     fn resolve_effective_use_package_use_only_applies_to_matching_atom() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -1083,6 +1195,7 @@ mod tests {
     fn resolve_effective_use_package_use_disable_overrides_pre_env_enable() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer("ssl"),
             &cpv(),
             None,
@@ -1100,6 +1213,7 @@ mod tests {
     fn resolve_effective_use_profile_package_use_does_not_override_make_conf() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -1121,6 +1235,7 @@ mod tests {
     fn resolve_effective_use_profile_package_use_overrides_make_defaults() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer("ssl"),
             &cpv(),
             None,
@@ -1142,6 +1257,7 @@ mod tests {
     fn resolve_effective_use_profile_package_use_applies_when_make_conf_silent() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer(""),
             &cpv(),
             None,
@@ -1175,6 +1291,7 @@ mod tests {
         ];
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer("ssl"),
             &cpv(),
             None,
@@ -1194,6 +1311,7 @@ mod tests {
     fn conf_wildcard_wipes_profile_package_use_not_user() {
         let cfg = resolve_effective_use(
             &iuse_defaults(&[]),
+            &[],
             &layer("foo"),
             &cpv(),
             None,

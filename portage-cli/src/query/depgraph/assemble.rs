@@ -506,6 +506,7 @@ pub(super) fn assemble(
             } else {
                 let mut effective = portage_atom_pubgrub::resolve_effective_use(
                     &HashMap::new(),
+                    &[],
                     &defaults,
                     &cpv,
                     pkg.slot(),
