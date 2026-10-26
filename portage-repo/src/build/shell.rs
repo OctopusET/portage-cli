@@ -2319,6 +2319,15 @@ impl EbuildShell {
             self.call_phase_function(&pre).await?;
         }
         self.call_phase_function(func_name).await?;
+        if func_name == "src_prepare"
+            && eapi >= Eapi::Six
+            && !t.join(".portage_user_patches_applied").exists()
+        {
+            return Err(Error::Shell(
+                "src_prepare: die: eapply_user (or default) must be called in src_prepare()!"
+                    .into(),
+            ));
+        }
         let post = format!("post_{func_name}");
         if self.shell.funcs().get(&post).is_some() {
             self.call_phase_function(&post).await?;

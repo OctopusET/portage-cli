@@ -2971,3 +2971,36 @@ async fn unsupported_eapi_yields_a_stub_without_sourcing() {
         .unwrap();
     assert_eq!(sourced.metadata.unsupported_eapi(), Some("10"));
 }
+
+#[tokio::test]
+async fn src_prepare_must_call_eapply_user_from_eapi_6() {
+    for (eapi, body, ok) in [
+        ("8", "src_prepare() { :; }", false),
+        ("8", "src_prepare() { default; }", true),
+        ("8", "src_prepare() { eapply_user; }", true),
+        ("5", "src_prepare() { :; }", true),
+    ] {
+        let dir = tempdir().unwrap();
+        let (repo, ebuild) = phase_repo(dir.path(), "");
+        std::fs::write(
+            ebuild.path(),
+            format!(
+                "EAPI={eapi}\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\n\
+                 S=\"${{WORKDIR}}\"\n{body}\n"
+            ),
+        )
+        .unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let work = dir.path().join("work");
+        let res = shell
+            .run_phase(&ebuild, "prepare", &work, std::path::Path::new("/"))
+            .await;
+        match res {
+            Ok(()) => assert!(ok, "EAPI {eapi} `{body}` must die"),
+            Err(e) => {
+                assert!(!ok, "EAPI {eapi} `{body}`: {e}");
+                assert!(e.to_string().contains("eapply_user"), "{e}");
+            }
+        }
+    }
+}
