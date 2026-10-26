@@ -365,9 +365,6 @@ Intended target semantics (all match emerge):
   Read-only `em query *` commands (`depends`/`keywords`/`meta`/`uses`/`which`/
   `depgraph`) stay on `Error` (still hint-augmented) — no `-u`/`-a` concept
   applies to them.
-- **Multi-target with one unresolvable atom** — em drops the bad atom with a
-  warning and proceeds with the rest, erroring only when *all* fail. **emerge
-  aborts the whole command.**
 
 Slot/version-qualified targets (`em -p python:3.13`, `=python-3.13*`) honour the
 qualifier: `target_package` (`repo.rs`) resolves the target slot from the newest

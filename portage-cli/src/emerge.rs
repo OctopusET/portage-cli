@@ -26,6 +26,30 @@ pub(crate) fn parse_atoms_strict(raw: &[String]) -> Result<Vec<portage_atom::Dep
         .collect()
 }
 
+/// The targets that resolved, after warning about each one that did not
+///
+/// A failed atom named on the command line fails the whole run, as in emerge; a failed set
+/// member is only dropped. Fails with [`error::NoValidAtoms`], since the warnings said why.
+fn resolved_targets<'a>(
+    results: impl IntoIterator<Item = (&'a TargetOrigin, Result<TargetAtom>)>,
+) -> Result<Vec<TargetAtom>> {
+    let mut atoms = Vec::new();
+    let mut explicit_failed = false;
+    for (origin, result) in results {
+        match result {
+            Ok(atom) => atoms.push(atom),
+            Err(e) => {
+                crate::style::warn_line!("{e}");
+                explicit_failed |= *origin == TargetOrigin::Explicit;
+            }
+        }
+    }
+    if explicit_failed || atoms.is_empty() {
+        return Err(error::NoValidAtoms.into());
+    }
+    Ok(atoms)
+}
+
 /// Expand `@set` references in `raw` to concrete atoms, leaving plain atoms untouched
 ///
 /// Sets are a portage-config concept (not PMS); resolution lives in
@@ -510,41 +534,22 @@ async fn emerge_atoms_inner(
     // the solver — one build, one repo world for the whole invocation.
     set.prepend_aliases(extra_aliases);
     // Resolved one at a time (not via `resolve_atoms`) so each atom keeps the
-    // provenance `expand_sets` gave it; unresolvable ones are warned about and
-    // dropped, exactly as `resolve_atoms` does.
-    let atoms: Vec<TargetAtom> = expanded
-        .iter()
-        .filter_map(
-            |t| match query::resolve_atom_noted(&set, vdb.as_ref(), mode, &t.atom) {
-                Ok(resolved) => {
-                    if let Some(note) = &resolved.note
-                        && !cli.quiet()
-                    {
-                        crate::style::einfo_stderr_line!(
-                            "{}",
-                            note.render(query::Outcome::UsedInstalled)
-                        );
-                    }
-                    Some(TargetAtom {
-                        atom: resolved.dep.to_string(),
-                        origin: t.origin.clone(),
-                    })
-                }
-                Err(e) => {
-                    crate::style::warn_line!("{e}");
-                    None
-                }
-            },
-        )
-        .collect();
-    if atoms.is_empty() {
-        // No extra "!!! no valid atoms" line: each atom that failed already
-        // printed its own warning above (unresolvable, ambiguous + "-u"
-        // hint, ...) — a generic follow-up line adds nothing and reads as a
-        // second, unrelated failure. `NoValidAtoms` just drives the exit
-        // code; main.rs recognises it and stays quiet.
-        return Err(error::NoValidAtoms.into());
-    }
+    // provenance `expand_sets` gave it.
+    let atoms = resolved_targets(expanded.iter().map(|t| {
+        let resolved = query::resolve_atom_noted(&set, vdb.as_ref(), mode, &t.atom);
+        let resolved = resolved.map(|resolved| {
+            if let Some(note) = &resolved.note
+                && !cli.quiet()
+            {
+                crate::style::einfo_stderr_line!("{}", note.render(query::Outcome::UsedInstalled));
+            }
+            TargetAtom {
+                atom: resolved.dep.to_string(),
+                origin: t.origin.clone(),
+            }
+        });
+        (&t.origin, resolved)
+    }))?;
 
     // World selection (real emerge's `_world_atom`): only the genuine
     // top-level invocation (`update_world`), and only explicitly-named
@@ -1747,6 +1752,20 @@ fn plan_header_verb(merge_flags: &cli::MergeFlags) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_explicit_target_fails_the_run_but_a_failed_set_member_does_not() {
+        let explicit = TargetOrigin::Explicit;
+        let set = TargetOrigin::Set("myset".into());
+        let ok = || Ok(TargetAtom::explicit("app-misc/foo".to_string()));
+        let failed = || Err(anyhow::anyhow!("no such package"));
+        let run = |results: Vec<(&TargetOrigin, Result<TargetAtom>)>| resolved_targets(results);
+        let err = run(vec![(&explicit, failed()), (&explicit, ok())]).unwrap_err();
+        assert!(err.downcast_ref::<error::NoValidAtoms>().is_some());
+        let kept = run(vec![(&set, failed()), (&explicit, ok())]).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert!(run(vec![(&set, failed())]).is_err());
+    }
 
     #[test]
     fn plan_header_verb_follows_the_merge_mode() {

@@ -12,7 +12,7 @@ pub use anyhow::Result;
 #[error("USE/mask changes are required to proceed (see above)")]
 pub struct ConfigChangesNeeded;
 
-/// No atom on the command line resolved to anything mergeable/queryable
+/// An atom on the command line, or every target, resolved to nothing mergeable/queryable
 ///
 /// Each failure already printed its own `!!!` warning (unresolvable atom,
 /// ambiguous name with its "pass -u" hint, etc.), so — same pattern as
