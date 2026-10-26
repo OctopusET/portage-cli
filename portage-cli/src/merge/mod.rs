@@ -524,42 +524,53 @@ pub(crate) fn set_ask_enter_invalid(on: bool) {
     ASK_ENTER_INVALID.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The answer `line` gives a Yes/No prompt: any case-insensitive prefix of either word, and an
-/// empty line is Yes unless `enter_invalid`
-fn parse_answer(line: &str, enter_invalid: bool) -> Option<bool> {
+/// The one of `responses` that `line` answers: the first it is a case-insensitive prefix of, and
+/// an empty line is the first response unless `enter_invalid`
+fn parse_answer<'a>(line: &str, responses: &[&'a str], enter_invalid: bool) -> Option<&'a str> {
     let line = line.trim_end_matches(['\n', '\r']);
     if line.is_empty() && enter_invalid {
         return None;
     }
-    let prefix_of = |word: &str| {
+    responses.iter().copied().find(|word| {
         word.get(..line.len())
             .is_some_and(|p| p.eq_ignore_ascii_case(line))
-    };
-    if prefix_of("Yes") {
-        Some(true)
-    } else if prefix_of("No") {
-        Some(false)
-    } else {
-        None
-    }
+    })
 }
 
 /// Ask `question` on the terminal until it gets a Yes or a No, as emerge's `--ask` does
 ///
 /// End of input prints `Interrupted.` and fails with [`crate::error::Declined`].
 pub(crate) fn ask_yes_no(question: &str) -> Result<bool> {
+    Ok(ask_choice(question, &["Yes", "No"])? == "Yes")
+}
+
+/// Ask `question` until the answer picks one of `responses`, the first being the default
+///
+/// End of input prints `Interrupted.` and fails with [`crate::error::Declined`].
+pub(crate) fn ask_choice<'a>(question: &str, responses: &[&'a str]) -> Result<&'a str> {
     use std::io::Write;
 
     use crate::style::{C_CHOICE_DEFAULT, C_CHOICE_OTHER};
 
     require_ask_tty()?;
     let enter_invalid = ASK_ENTER_INVALID.load(std::sync::atomic::Ordering::Relaxed);
+    let choices = responses
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let style = if i == 0 {
+                C_CHOICE_DEFAULT
+            } else {
+                C_CHOICE_OTHER
+            };
+            format!("{style}{r}{style:#}")
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     // Through anstream so the colors strip themselves when stdout is not a terminal.
     let mut out = anstream::stdout();
-    let _ = write!(
-        out,
-        "{question} [{C_CHOICE_DEFAULT}Yes{C_CHOICE_DEFAULT:#}/{C_CHOICE_OTHER}No{C_CHOICE_OTHER:#}] "
-    );
+    let _ = write!(out, "{question} [{choices}] ");
+
     loop {
         let _ = out.flush();
         let mut line = String::new();
@@ -567,12 +578,12 @@ pub(crate) fn ask_yes_no(question: &str) -> Result<bool> {
             println!("Interrupted.");
             return Err(crate::error::Declined.into());
         }
-        if let Some(answer) = parse_answer(&line, enter_invalid) {
+        if let Some(answer) = parse_answer(&line, responses, enter_invalid) {
             return Ok(answer);
         }
         let _ = write!(
             out,
-            "Sorry, response '{}' not understood. [{C_CHOICE_DEFAULT}Yes{C_CHOICE_DEFAULT:#}/{C_CHOICE_OTHER}No{C_CHOICE_OTHER:#}] ",
+            "Sorry, response '{}' not understood. [{choices}] ",
             line.trim_end_matches(['\n', '\r'])
         );
     }
@@ -1839,14 +1850,19 @@ mod ask_tests {
 
     #[test]
     fn answers_are_prefixes_and_enter_is_yes_unless_invalid() {
-        assert_eq!(parse_answer("\n", false), Some(true));
-        assert_eq!(parse_answer("\n", true), None);
-        assert_eq!(parse_answer("y\n", false), Some(true));
-        assert_eq!(parse_answer("YE\n", true), Some(true));
-        assert_eq!(parse_answer("n\n", false), Some(false));
-        assert_eq!(parse_answer("no", false), Some(false));
-        assert_eq!(parse_answer("x\n", false), None);
-        assert_eq!(parse_answer("yess\n", false), None);
+        let yn = |line: &str, enter_invalid: bool| {
+            parse_answer(line, &["Yes", "No"], enter_invalid).map(|a| a == "Yes")
+        };
+        assert_eq!(yn("\n", false), Some(true));
+        assert_eq!(yn("\n", true), None);
+        assert_eq!(yn("y\n", false), Some(true));
+        assert_eq!(yn("YE\n", true), Some(true));
+        assert_eq!(yn("n\n", false), Some(false));
+        assert_eq!(yn("no", false), Some(false));
+        assert_eq!(yn("x\n", false), None);
+        assert_eq!(yn("yess\n", false), None);
+        assert_eq!(parse_answer("x", &["1", "2", "X"], false), Some("X"));
+        assert_eq!(parse_answer("\n", &["1", "2", "X"], false), Some("1"));
     }
 }
 

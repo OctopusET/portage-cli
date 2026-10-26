@@ -117,6 +117,7 @@ pub(crate) fn will_build(cli: &Cli) -> bool {
             // engine entirely; search/info never touch it.
             mode.unmerge
                 || mode.depclean
+                || mode.config
                 || (!cli.atoms().is_empty() && !mode.search && !mode.searchdesc && !mode.info)
         }
         Some(
@@ -168,7 +169,7 @@ pub fn maybe_supervise(cli: &Cli) -> Option<i32> {
 fn needs_whole_process_wrap(cli: &Cli) -> bool {
     let mode = cli.mode();
     let (unmerge, depclean) = match &cli.applet {
-        None | Some(Applet::Emerge(_)) => (mode.unmerge, mode.depclean),
+        None | Some(Applet::Emerge(_)) => (mode.unmerge || mode.config, mode.depclean),
         Some(Applet::Depclean(_)) => (false, true),
         _ => (false, false),
     };

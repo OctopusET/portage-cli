@@ -3644,8 +3644,59 @@ pub async fn unmerge_standalone(
     Ok(())
 }
 
+/// `emerge --config`: run installed `pkg`'s `pkg_config` in its saved environment, on the terminal
+pub(crate) async fn config_installed(
+    shell: &mut portage_repo::EbuildShell,
+    pkg: &InstalledPackage,
+    work_base: &Utf8Path,
+    root: &Utf8Path,
+) -> Result<()> {
+    let work_root = package_work_dir(
+        work_base,
+        root,
+        pkg.category(),
+        &format!("{}.config", pkg.pf()),
+    );
+    let Some(env_file) = stage_env_bz2(pkg, &work_root) else {
+        bail!("{} has no saved environment.bz2", pkg.cpv());
+    };
+    let source = format!(". '{}'", env_file.as_str().replace('\'', "'\\''"));
+    let result = async {
+        shell
+            .init_build_env()
+            .await
+            .context("setting up the phase environment")?;
+        shell
+            .run_string(&source)
+            .await
+            .context("sourcing the saved environment")?;
+        shell.assign_root_vars(root.as_std_path());
+        shell.preset_var("EBUILD_PHASE", "config");
+        shell
+            .run_string(
+                "__em_config_rc=0; if declare -F pkg_config >/dev/null 2>&1; then \
+                 export ROOT EROOT EBUILD_PHASE; EBUILD_PHASE_FUNC=pkg_config pkg_config; \
+                 __em_config_rc=$?; \
+                 else eerror 'This ebuild does not have a config function.'; fi",
+            )
+            .await?;
+        match shell.get_var("__em_config_rc").as_deref() {
+            Some("0") => Ok(()),
+            rc => bail!(
+                "pkg_config of {} failed (status {})",
+                pkg.cpv(),
+                rc.unwrap_or("?")
+            ),
+        }
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(work_root.as_std_path());
+    result
+}
+
 /// Decompress `environment.bz2` from the VDB into `work_root/temp/` so
 /// prerm/postrm can both use it after the VDB directory is removed.
+
 fn stage_env_bz2(pkg: &InstalledPackage, work_root: &Utf8Path) -> Option<Utf8PathBuf> {
     let env_bz2 = pkg.path().join("environment.bz2");
     if !env_bz2.exists() {

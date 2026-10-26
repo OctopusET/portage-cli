@@ -1005,6 +1005,9 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         let merge_flags = cli.merge_flags();
         return crate::depclean::run_with_targets(cli, &atoms, &merge_flags).await;
     }
+    if mode.config {
+        return config_atoms(cli, &atoms).await;
+    }
     // emerge -P/--prune: like -C, but only the non-highest-version matches.
     if mode.prune {
         return prune_atoms(cli, &atoms).await;
@@ -1630,28 +1633,81 @@ pub(crate) async fn run_unmerge_batch(
     execute_unmerge_batch(cli, vdb, packages, exclude, verb, gerund, clean_world).await
 }
 
-/// Disk-mutating half of [`run_unmerge_batch`]: profile-env'd shell, one
-/// preserve-libs graph for the batch, per-package removal, `env-update`.
-///
-/// No `--pretend`/`--ask` — callers that already confirmed (blocker unmerge
-/// during a real merge) use this directly. `clean_world` drops the world entries a
-/// removal leaves matching nothing; a blocker unmerge keeps them for the replacement.
-async fn execute_unmerge_batch(
-    cli: &cli::Cli,
-    vdb: &portage_vdb::Vdb,
-    packages: &[portage_vdb::InstalledPackage],
-    exclude: &std::collections::HashSet<portage_atom::Cpv>,
-    verb: &str,
-    gerund: &str,
-    clean_world: bool,
-) -> Result<()> {
+/// `--config`: run the `pkg_config` of the one installed package `atoms` names
+async fn config_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
+    let vdb = open_cli_vdb(cli)?;
+    let pkgs = config_candidates(&vdb, atoms)?;
+    let ask = cli.merge_flags().ask;
+    println!();
+    let pkg = match pkgs.as_slice() {
+        [] => {
+            println!("No packages found.\n");
+            return Ok(());
+        }
+        [one] => one,
+        many if ask => {
+            println!("Please select a package to configure:");
+            let numbers: Vec<String> = (1..=many.len()).map(|i| i.to_string()).collect();
+            for (n, pkg) in numbers.iter().zip(many) {
+                println!("{n}) {}", pkg.cpv());
+            }
+            println!("X) Cancel");
+            let mut responses: Vec<&str> = numbers.iter().map(String::as_str).collect();
+            responses.push("X");
+            let picked = crate::merge::ask_choice("Selection?", &responses)?;
+            match numbers.iter().position(|n| n == picked) {
+                Some(i) => &many[i],
+                None => return Err(error::Declined.into()),
+            }
+        }
+        many => {
+            println!("The following packages available:");
+            for pkg in many {
+                println!("* {}", pkg.cpv());
+            }
+            println!("\nPlease use a specific atom or the --ask option.");
+            return Err(error::NoValidAtoms.into());
+        }
+    };
+    println!();
+    if ask {
+        if !crate::merge::ask_yes_no(&format!("Ready to configure {}?", pkg.cpv()))? {
+            return Err(error::Declined.into());
+        }
+    } else {
+        println!("Configuring pkg...");
+    }
+    println!();
     let roots = cli.roots();
-    let root = roots.merge_root().to_owned();
-    let broot = cli.host_roots();
-    // Scratch trees for pkg_prerm/postrm land where builds would
-    // (`emerge_atoms_inner`'s relocation rule).
     let work_base = ebuild::work_base(cli, roots.relocate_root()).await?;
+    let mut shell = installed_package_shell(cli, "configuring").await?;
+    ebuild::config_installed(&mut shell, pkg, &work_base, roots.merge_root()).await?;
+    crate::elog::finalize_echo();
+    println!();
+    Ok(())
+}
 
+/// The installed packages `--config`'s single atom matches, in version order
+fn config_candidates(
+    vdb: &portage_vdb::Vdb,
+    atoms: &[String],
+) -> Result<Vec<portage_vdb::InstalledPackage>> {
+    let [atom] = atoms else {
+        bail!("config can only take a single package atom at this time");
+    };
+    let mut pkgs = crate::vdb::find_packages(vdb, atom);
+    pkgs.sort_by(|a, b| a.cpv().cmp(b.cpv()));
+    Ok(pkgs)
+}
+
+/// A shell set up to run an installed package's phases on `cli`'s merge root: build roots,
+/// profile environment and seeded settings; `gerund` names the action in the no-profile warning
+async fn installed_package_shell(
+    cli: &cli::Cli,
+    gerund: &str,
+) -> Result<portage_repo::EbuildShell> {
+    let roots = cli.roots();
+    let broot = cli.host_roots();
     let repo = crate::crossdev::main_repo(cli)?;
     let mut shell = repo.shell().await.context("creating shell")?;
     let ld_library_path =
@@ -1674,6 +1730,31 @@ async fn execute_unmerge_batch(
     let settings = crate::settings::load(cli).await?;
     crate::settings::seed_build_shell(&mut shell, settings.as_deref()).await?;
     crate::settings::export_provided_features(&mut shell).await?;
+    Ok(shell)
+}
+
+/// Disk-mutating half of [`run_unmerge_batch`]: profile-env'd shell, one
+/// preserve-libs graph for the batch, per-package removal, `env-update`.
+///
+/// No `--pretend`/`--ask` — callers that already confirmed (blocker unmerge
+/// during a real merge) use this directly. `clean_world` drops the world entries a
+/// removal leaves matching nothing; a blocker unmerge keeps them for the replacement.
+async fn execute_unmerge_batch(
+    cli: &cli::Cli,
+    vdb: &portage_vdb::Vdb,
+    packages: &[portage_vdb::InstalledPackage],
+    exclude: &std::collections::HashSet<portage_atom::Cpv>,
+    verb: &str,
+    gerund: &str,
+    clean_world: bool,
+) -> Result<()> {
+    let roots = cli.roots();
+    let root = roots.merge_root().to_owned();
+    // Scratch trees for pkg_prerm/postrm land where builds would
+    // (`emerge_atoms_inner`'s relocation rule).
+    let work_base = ebuild::work_base(cli, roots.relocate_root()).await?;
+
+    let mut shell = installed_package_shell(cli, gerund).await?;
     // Each removal restores this, so one package's functions do not run for the next.
     shell.save_profile_session();
 
@@ -2254,6 +2335,60 @@ mod tests {
         assert_eq!(warned, [portage_atom::Cpn::parse("sys-apps/sed").unwrap()]);
         let both = pick(&["dev-lang/python-3.12.1", "dev-lang/python-3.13.1"]);
         assert_eq!(system_warning_cps(&both, &vdb, &system).len(), 1);
+    }
+
+    #[test]
+    fn config_takes_one_atom_and_lists_every_installed_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_pkg(&vdb_root, "dev-lang", "python-3.13.1");
+        write_pkg(&vdb_root, "dev-lang", "python-3.12.1");
+        write_pkg(&vdb_root, "app-misc", "foo-1.0");
+        let vdb = open_vdb(tmp.path());
+        let cpvs = |atom: &str| -> Vec<String> {
+            config_candidates(&vdb, &[atom.to_string()])
+                .unwrap()
+                .iter()
+                .map(|p| p.cpv().to_string())
+                .collect()
+        };
+        assert_eq!(
+            cpvs("dev-lang/python"),
+            ["dev-lang/python-3.12.1", "dev-lang/python-3.13.1"]
+        );
+        assert_eq!(cpvs("foo"), ["app-misc/foo-1.0"]);
+        assert!(cpvs("app-misc/bar").is_empty());
+        assert!(config_candidates(&vdb, &["foo".to_string(), "bar".to_string()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn config_runs_pkg_config_from_the_saved_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        write_pkg(root.join("var/db/pkg").as_std_path(), "app-misc", "foo-1.0");
+        let vdb = open_vdb(tmp.path());
+        let pkg = vdb.packages().into_iter().next().unwrap();
+        let mark = root.join("configured");
+        let env = format!("pkg_config() {{ echo \"$EBUILD_PHASE\" > '{mark}'; }}\n");
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        std::io::Write::write_all(&mut bz, env.as_bytes()).unwrap();
+        std::fs::write(pkg.path().join("environment.bz2"), bz.finish().unwrap()).unwrap();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo_dir.path().join("profiles")).unwrap();
+        std::fs::write(repo_dir.path().join("profiles/repo_name"), "test\n").unwrap();
+        std::fs::create_dir_all(repo_dir.path().join("metadata")).unwrap();
+        std::fs::write(repo_dir.path().join("metadata/layout.conf"), "").unwrap();
+        let repo = portage_repo::Repository::builder()
+            .in_memory_cache()
+            .open(repo_dir.path())
+            .unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let work = root.join("work");
+        ebuild::config_installed(&mut shell, &pkg, &work, &root)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&mark).unwrap(), "config\n");
     }
 
     #[test]

@@ -82,6 +82,13 @@ pub struct EmergeModeArgs {
     #[arg(short = 'r', long)]
     pub resume: bool,
 
+    /// Run the `pkg_config` of the installed package the one atom names, in its saved build
+    /// environment
+    ///
+    /// Several installed versions match: `--ask` offers a choice, otherwise nothing runs.
+    #[arg(long)]
+    pub config: bool,
+
     /// Print system/build info (`emerge --info` workalike), and how each installed atom was built
     #[arg(
         long,
