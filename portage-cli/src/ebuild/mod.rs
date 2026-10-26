@@ -3696,7 +3696,6 @@ pub(crate) async fn config_installed(
 
 /// Decompress `environment.bz2` from the VDB into `work_root/temp/` so
 /// prerm/postrm can both use it after the VDB directory is removed.
-
 fn stage_env_bz2(pkg: &InstalledPackage, work_root: &Utf8Path) -> Option<Utf8PathBuf> {
     let env_bz2 = pkg.path().join("environment.bz2");
     if !env_bz2.exists() {

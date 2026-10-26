@@ -1361,7 +1361,6 @@ impl<'a> ResolvePolicy<'a> {
     }
 
     /// Rebind `package_use` and its policy-fact generation together.
-
     pub fn with_package_use(
         self,
         cache: &'a PolicyFactsCache,

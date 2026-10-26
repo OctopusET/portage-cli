@@ -452,7 +452,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
     let arch = var("ARCH");
     let packages = installed
         .iter()
-        .map(|pkg| package_settings(pkg, &var, &expand, &hidden, arch.as_deref()))
+        .map(|pkg| package_settings(pkg, var, &expand, &hidden, arch.as_deref()))
         .collect::<Result<Vec<_>>>()?;
 
     let build_env_omits = match loaded.as_deref() {
