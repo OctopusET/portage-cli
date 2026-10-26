@@ -743,6 +743,25 @@ _md5_=4539d849d3cea8ac84debad9b3154143
     }
 
     #[test]
+    fn has_parse_failure_reports_atom_syntax_the_eapi_lacks() {
+        let entry = |rdepend: &str| {
+            CacheEntry::parse(&format!(
+                "EAPI=8\nDESCRIPTION=t\nSLOT=0\nRDEPEND={rdepend}\n"
+            ))
+            .unwrap()
+        };
+        let repo_dep = entry("cat/pkg::gentoo");
+        assert!(repo_dep.metadata.has_parse_failure());
+        assert!(
+            repo_dep
+                .metadata
+                .parse_failure_summary()
+                .contains("RDEPEND: repository deps")
+        );
+        assert!(!entry("cat/pkg:=").metadata.has_parse_failure());
+    }
+
+    #[test]
     fn has_parse_failure_is_false_for_a_well_formed_entry() {
         let entry = CacheEntry::parse(EXAMPLE_CACHE).unwrap();
         assert!(!entry.metadata.has_parse_failure());

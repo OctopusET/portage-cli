@@ -132,7 +132,7 @@ impl<I: Interner + Clone> EbuildMetadata<I> {
 
     /// Whether any DEPEND-class field or `SRC_URI` fell back to empty
     /// because its raw text failed to parse, rather than genuinely having
-    /// no content
+    /// no content, or a DEPEND-class atom breaks the EAPI ([`Self::eapi_violation`])
     ///
     /// Forces the parse of every lazy field to answer — only meant for
     /// callers already paying that cost (writing a cache entry back out,
@@ -151,13 +151,45 @@ impl<I: Interner + Clone> EbuildMetadata<I> {
             || self.pdepend.parse_failed()
             || self.idepend.parse_failed()
             || self.src_uri.parse_failed()
+            || self.eapi_violation().is_some()
+    }
+
+    /// The first DEPEND-class atom that uses syntax this ebuild's EAPI lacks, as `"NAME: reason"`
+    ///
+    /// Portage masks such an ebuild as invalid metadata, so [`Self::has_parse_failure`] counts it.
+    pub fn eapi_violation(&self) -> Option<String> {
+        let fields = [
+            ("DEPEND", &self.depend),
+            ("RDEPEND", &self.rdepend),
+            ("BDEPEND", &self.bdepend),
+            ("PDEPEND", &self.pdepend),
+            ("IDEPEND", &self.idepend),
+        ];
+        for (name, field) in fields {
+            let mut found = None;
+            DepEntry::walk_atoms(field.list(), &mut |dep| {
+                if found.is_none()
+                    && let Some(reason) = self.eapi.atom_violation(dep)
+                {
+                    found = Some(format!(
+                        "{name}: {reason} are not allowed in EAPI {}: '{dep}'",
+                        self.eapi
+                    ));
+                }
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
     }
 
     /// Which lazy fields failed to parse and why, `"NAME: message"` per
     /// field joined with `"; "` — for a caller that already knows
     /// [`Self::has_parse_failure`] is `true` and wants a real diagnostic
     /// instead of a generic message. Forces the same six fields
-    /// `has_parse_failure` does (already memoized if that ran first).
+    /// `has_parse_failure` does (already memoized if that ran first), and
+    /// includes [`Self::eapi_violation`].
     pub fn parse_failure_summary(&self) -> String {
         let mut parts = Vec::new();
         macro_rules! check {
@@ -178,6 +210,7 @@ impl<I: Interner + Clone> EbuildMetadata<I> {
         check!("PDEPEND", self.pdepend);
         check!("IDEPEND", self.idepend);
         check!("SRC_URI", self.src_uri);
+        parts.extend(self.eapi_violation());
         parts.join("; ")
     }
 

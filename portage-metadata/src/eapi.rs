@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use portage_atom::{Blocker, Dep, SlotDep};
+
 use crate::error::{Error, Result};
 
 /// EAPI (Ebuild API) version
@@ -146,6 +148,43 @@ impl Eapi {
     }
 }
 
+impl Eapi {
+    /// The atom syntax `dep` uses that this EAPI lacks, or `None` when it is allowed (PMS 8.3)
+    ///
+    /// `::repo` is in no EAPI yet, so it is always reported.
+    pub fn atom_violation(self, dep: &Dep) -> Option<&'static str> {
+        if dep.repo.is_some() {
+            return Some("repository deps");
+        }
+        if dep.blocker == Some(Blocker::Strong) && self < Eapi::Two {
+            return Some("strong blocks");
+        }
+        match &dep.slot_dep {
+            Some(_) if self < Eapi::One => return Some("slot deps"),
+            Some(SlotDep::Operator(_) | SlotDep::Slot { op: Some(_), .. })
+                if !self.has_slot_operators() =>
+            {
+                return Some("slot operators");
+            }
+            Some(SlotDep::Slot { slot: Some(s), .. })
+                if s.subslot.is_some() && !self.has_slot_operators() =>
+            {
+                return Some("sub-slot deps");
+            }
+            _ => {}
+        }
+        if let Some(use_deps) = &dep.use_deps {
+            if self < Eapi::Two {
+                return Some("use deps");
+            }
+            if self < Eapi::Four && use_deps.iter().any(|u| u.default.is_some()) {
+                return Some("use dep defaults");
+            }
+        }
+        None
+    }
+}
+
 impl fmt::Display for Eapi {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let n = match self {
@@ -187,6 +226,21 @@ impl FromStr for Eapi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atom_violation_gates_syntax_by_eapi() {
+        let v = |eapi: Eapi, atom: &str| eapi.atom_violation(&Dep::parse(atom).unwrap());
+        assert_eq!(v(Eapi::Eight, "cat/pkg::gentoo"), Some("repository deps"));
+        assert_eq!(v(Eapi::Eight, "cat/pkg:="), None);
+        assert_eq!(v(Eapi::Four, "cat/pkg:="), Some("slot operators"));
+        assert_eq!(v(Eapi::Four, "cat/pkg:0/1"), Some("sub-slot deps"));
+        assert_eq!(v(Eapi::Zero, "cat/pkg:0"), Some("slot deps"));
+        assert_eq!(v(Eapi::One, "cat/pkg:0"), None);
+        assert_eq!(v(Eapi::One, "!!cat/pkg"), Some("strong blocks"));
+        assert_eq!(v(Eapi::One, "cat/pkg[foo]"), Some("use deps"));
+        assert_eq!(v(Eapi::Three, "cat/pkg[foo(+)]"), Some("use dep defaults"));
+        assert_eq!(v(Eapi::Four, "cat/pkg[foo(+)]"), None);
+    }
 
     #[test]
     fn parse_all_eapis() {
