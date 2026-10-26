@@ -1382,29 +1382,38 @@ fn or_group_conditional_use_dep_follows_parent_use() {
     let f = Interned::intern("f");
     let picked = |parent_f: bool| {
         let mut repo = InMemoryRepository::new();
-        for cpv in ["a/x-1", "a/y-1"] {
-            repo.add_version(
+        for (cpv, iuse) in [("a/x-1", vec![f]), ("a/y-1", vec![])] {
+            repo.add_version_with_iuse(
                 portage_atom::Cpv::parse(cpv).unwrap(),
                 Some(Interned::intern("0")),
                 None,
+                iuse,
                 empty_deps(),
             );
         }
-        repo.add_version_with_iuse(
+        let iuse_defaults = if parent_f {
+            HashMap::from([(f, IUseDefault::Enabled)])
+        } else {
+            HashMap::new()
+        };
+        repo.add_package_versions(
             portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
-            Some(Interned::intern("0")),
-            None,
-            vec![f],
-            PackageDeps {
-                rdepend: (DepEntry::parse("|| ( a/x[f?] a/y )").unwrap()).into(),
-                ..empty_deps()
+            PackageVersions {
+                slot: Some(Interned::intern("0")),
+                subslot: None,
+                repo: None,
+                iuse: vec![f],
+                iuse_defaults,
+                deps: PackageDeps {
+                    rdepend: (DepEntry::parse("|| ( a/x[f?] a/y )").unwrap()).into(),
+                    ..empty_deps()
+                },
+                required_use: None,
+                empty_any_of_matches: true,
+                needs_unmask: false,
+                live: false,
             },
         );
-        let mut config = UseConfig::new();
-        if parent_f {
-            config.enable(f);
-        }
-        repo.set_use_config(config);
         let mut provider = PortageDependencyProvider::new(repo);
         let solution = provider
             .resolve_targets(vec![(pkg("app-misc/consumer"), PortageVersionSet::any())])
@@ -1416,7 +1425,7 @@ fn or_group_conditional_use_dep_follows_parent_use() {
             other => panic!("unexpected selection {other:?}"),
         }
     };
-    assert_eq!(picked(true), "y", "USE=f needs x[f], x has no f");
+    assert_eq!(picked(true), "y", "USE=f needs x[f], x defaults to -f");
     assert_eq!(picked(false), "x", "USE=-f puts no demand on x");
 }
 
@@ -3948,10 +3957,11 @@ fn many_conditional_use_deps_on_one_atom_still_pull_it_in() {
             ..empty_deps()
         },
     );
-    repo.add_version(
+    repo.add_version_with_iuse(
         portage_atom::Cpv::parse("sys-apps/acl-2.4.0-r2").unwrap(),
         Some(Interned::intern("0")),
         None,
+        vec![Interned::intern("static-libs")],
         empty_deps(),
     );
 
@@ -4427,6 +4437,7 @@ fn kept_installed_package_is_expanded_with_its_build_use_and_vdb_deps() {
             false,
             &slot_map,
             kept,
+            &HashMap::new(),
         );
         provider.set_expand_kept(true);
         for (package, version) in [(foo, "1"), (old, "0")] {
@@ -4575,6 +4586,55 @@ fn use_dep_on_a_flag_outside_iuse_skips_that_version() {
     assert_eq!(foo_picked_for(foo, "a/foo[bar]"), "1");
     assert_eq!(foo_picked_for(foo, "a/foo[-bar]"), "1");
     assert_eq!(foo_picked_for(foo, "a/foo[bar(-)]"), "2");
+    assert_eq!(foo_picked_for(foo, "a/foo[bar?]"), "1");
+}
+
+// The installed instance is judged by its VDB IUSE, even when the tree no longer has it.
+#[test]
+fn use_dep_skips_an_installed_only_version_without_the_flag() {
+    let bar = Interned::intern("bar");
+    let slot = Interned::intern("0");
+    let mut repo = InMemoryRepository::new();
+    repo.add_version_with_iuse(
+        portage_atom::Cpv::parse("a/foo-1").unwrap(),
+        Some(slot),
+        None,
+        vec![bar],
+        empty_deps(),
+    );
+    repo.add_version(
+        portage_atom::Cpv::parse("app-misc/consumer-1").unwrap(),
+        Some(slot),
+        None,
+        PackageDeps {
+            rdepend: (DepEntry::parse("a/foo[-bar]").unwrap()).into(),
+            ..empty_deps()
+        },
+    );
+    let foo = PortagePackage::slotted(Cpn::parse("a/foo").unwrap(), slot);
+    let consumer = PortagePackage::slotted(Cpn::parse("app-misc/consumer").unwrap(), slot);
+    let old = Version::parse("0").unwrap();
+    let installed_iuse = HashMap::from([(*foo.cpn(), vec![(old.clone(), Vec::new())])]);
+    let slot_map = build_slot_map(&repo);
+    let mut provider = PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map(
+        repo,
+        vec![*consumer.cpn(), *foo.cpn()],
+        false,
+        &slot_map,
+        Vec::new(),
+        &installed_iuse,
+    );
+    provider.add_installed(InstalledPackage {
+        package: foo.clone(),
+        version: old,
+        policy: InstalledPolicy::Favor,
+        active_use: vec![],
+        iuse: vec![],
+    });
+    let solution = provider
+        .resolve_targets(vec![(consumer, PortageVersionSet::any())])
+        .unwrap();
+    assert_eq!(solution.get(&foo).unwrap().to_string(), "1");
 }
 
 // The `=V*` range is approximate; candidates are judged by `Version::glob_matches`.

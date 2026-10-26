@@ -190,6 +190,9 @@ pub struct InstalledDeps {
     pub active_use: Vec<Interned<DefaultInterner>>,
 }
 
+/// Each installed CPN's versions with their VDB `IUSE`
+pub type InstalledIuse = HashMap<Cpn, Vec<(Version, Vec<Interned<DefaultInterner>>)>>;
+
 /// A dependency that was dropped because no versions were available
 ///
 /// Dropped deps are always alternatives inside an `||` dep group — a
@@ -488,7 +491,7 @@ impl PortageDependencyProvider {
     pub fn new<R: PackageRepository>(repo: R) -> Self {
         let seeds = repo.all_packages();
         let slot_map = build_slot_map(&repo);
-        Self::new_with_seeds(repo, seeds, false, &slot_map, Vec::new())
+        Self::new_with_seeds(repo, seeds, false, &slot_map, Vec::new(), &HashMap::new())
     }
 
     /// Like [`new`](Self::new), but converts only the packages *reachable*
@@ -499,7 +502,7 @@ impl PortageDependencyProvider {
     /// stays sound. Converts a few hundred packages instead of the whole tree.
     pub fn new_for_targets<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
         let slot_map = build_slot_map(&repo);
-        Self::new_with_seeds(repo, seeds, false, &slot_map, Vec::new())
+        Self::new_with_seeds(repo, seeds, false, &slot_map, Vec::new(), &HashMap::new())
     }
 
     /// Like [`new_for_targets`](Self::new_for_targets), but with explicit
@@ -510,7 +513,14 @@ impl PortageDependencyProvider {
         with_bdeps: bool,
     ) -> Self {
         let slot_map = build_slot_map(&repo);
-        Self::new_with_seeds(repo, seeds, with_bdeps, &slot_map, Vec::new())
+        Self::new_with_seeds(
+            repo,
+            seeds,
+            with_bdeps,
+            &slot_map,
+            Vec::new(),
+            &HashMap::new(),
+        )
     }
 
     /// Like [`new_for_targets_with_bdeps`](Self::new_for_targets_with_bdeps),
@@ -525,14 +535,16 @@ impl PortageDependencyProvider {
     /// slot map once and reusing it here removes that cost after the first.
     ///
     /// `installed` is converted alongside the seeds' closure; a seed must cover each one's CPN.
+    /// `installed_iuse` lets an atom's USE deps judge each installed version by its VDB IUSE.
     pub fn new_for_targets_with_bdeps_and_slot_map<R: PackageRepository>(
         repo: R,
         seeds: Vec<Cpn>,
         with_bdeps: bool,
         slot_map: &convert::SlotMap,
         installed: Vec<InstalledDeps>,
+        installed_iuse: &InstalledIuse,
     ) -> Self {
-        Self::new_with_seeds(repo, seeds, with_bdeps, slot_map, installed)
+        Self::new_with_seeds(repo, seeds, with_bdeps, slot_map, installed, installed_iuse)
     }
 
     fn new_with_seeds<R: PackageRepository>(
@@ -541,6 +553,7 @@ impl PortageDependencyProvider {
         with_bdeps: bool,
         slot_map: &convert::SlotMap,
         installed: Vec<InstalledDeps>,
+        installed_iuse: &InstalledIuse,
     ) -> Self {
         let mut installed_by_cpn: HashMap<Cpn, Vec<InstalledDeps>> = HashMap::new();
         for inst in installed {
@@ -558,7 +571,17 @@ impl PortageDependencyProvider {
         // Second pass: register versions and convert deps for the closure of
         // `seeds` — every package referenced by a converted dependency (or a
         // virtual choice branch) is queued in turn.
-        let candidates = convert::Candidates::new(|cpn| repo.version_iuse(cpn));
+        // A version both in the tree and installed matches if either instance has the flag.
+        let candidates = convert::Candidates::new(|cpn| {
+            let mut all = repo.version_iuse(cpn);
+            for (ver, iuse) in installed_iuse.get(cpn).into_iter().flatten() {
+                match all.iter_mut().find(|(v, _)| v == ver) {
+                    Some((_, known)) => known.extend(iuse.iter().copied()),
+                    None => all.push((ver.clone(), iuse.clone())),
+                }
+            }
+            all
+        });
         let mut queue: std::collections::VecDeque<Cpn> = seeds.into_iter().collect();
         let mut seen: HashSet<Cpn> = queue.iter().copied().collect();
         while let Some(cpn) = queue.pop_front() {

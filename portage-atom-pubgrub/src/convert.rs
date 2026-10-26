@@ -397,14 +397,14 @@ impl ConvertCtx<'_> {
     }
 
     /// Drop the candidates `dep` can never match: a `=V*` glob is exact over them (the range
-    /// alone is approximate), and a USE dep that applies needs its flag in IUSE unless defaulted.
+    /// alone is approximate), and every USE dep without a default needs its flag in IUSE.
     fn narrow(&self, dep: &Dep, vs: PortageVersionSet) -> PortageVersionSet {
         let pattern = dep.version.as_ref().filter(|_| dep.glob);
         let needed: Vec<Flag> = dep
             .use_deps
             .iter()
             .flatten()
-            .filter(|ud| ud.default.is_none() && self.use_dep_applies(ud))
+            .filter(|ud| ud.default.is_none())
             .map(|ud| ud.flag)
             .collect();
         if pattern.is_none() && needed.is_empty() {
@@ -422,17 +422,6 @@ impl ConvertCtx<'_> {
             }
         }
         PortageVersionSet::from_ranges(ranges)
-    }
-
-    /// Whether `ud` constrains the target at all under the parent's USE (PMS 8.3.4)
-    fn use_dep_applies(&self, ud: &UseDep) -> bool {
-        match ud.kind {
-            UseDepKind::Conditional => self.use_config.get(ud.flag) == UseFlagState::Enabled,
-            UseDepKind::ConditionalInverse => {
-                self.use_config.get(ud.flag) == UseFlagState::Disabled
-            }
-            _ => true,
-        }
     }
 
     fn collect_post_solve(

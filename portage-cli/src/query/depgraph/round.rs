@@ -7,9 +7,10 @@ use std::time::Instant;
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
-    CededFlag, DepClass, DepEdge, InstalledDeps, InstalledPackage as SolverInstalledPackage,
-    InstalledPolicy, MergeRoot, PortageDependencyProvider, PortagePackage, PortageVersionSet,
-    SlotMap, UseFlagRequirement, UseOverride,
+    CededFlag, DepClass, DepEdge, InstalledDeps, InstalledIuse,
+    InstalledPackage as SolverInstalledPackage, InstalledPolicy, MergeRoot,
+    PortageDependencyProvider, PortagePackage, PortageVersionSet, SlotMap, UseFlagRequirement,
+    UseOverride,
 };
 use portage_resolve::{
     bdepend_trim, conflicts, depend_trim, effective_use, installed, repo, root_aware, root_closure,
@@ -267,6 +268,13 @@ pub(super) fn solve_round(
         } else {
             Vec::new()
         };
+        let mut installed_iuse = InstalledIuse::new();
+        for e in target_installed {
+            installed_iuse
+                .entry(e.cpn)
+                .or_default()
+                .push((e.version.clone(), e.iuse.clone()));
+        }
         let provider_start = Instant::now();
         let mut provider = PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map(
             adapter,
@@ -274,6 +282,7 @@ pub(super) fn solve_round(
             solve_with_bdeps,
             slot_map_ref,
             kept_deps,
+            &installed_iuse,
         );
         tracing::debug!(
             elapsed_ms = provider_start.elapsed().as_secs_f64() * 1000.0,

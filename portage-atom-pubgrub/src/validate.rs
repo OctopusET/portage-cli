@@ -1571,10 +1571,11 @@ mod tests {
             idepend: (vec![]).into(),
         };
 
-        repo.add_version(
+        repo.add_version_with_iuse(
             portage_atom::Cpv::parse("dev-libs/openssl-3.0.0").unwrap(),
             None,
             None,
+            vec![Interned::intern("ssl")],
             empty(),
         );
         repo.add_version(
