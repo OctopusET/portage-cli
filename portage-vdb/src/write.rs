@@ -346,12 +346,59 @@ fn publish_staged_entry(staging: &Utf8Path, pkg_dir: &Utf8Path) -> Result<()> {
     if displaced.is_dir() {
         std::fs::remove_dir_all(&displaced).map_err(|e| io(&displaced, e))?;
     }
+    // Plain rename: a copy fallback here could empty `pkg_dir` and then fail
+    // to remove it, leaving neither entry in place.
     if pkg_dir.is_dir() {
         std::fs::rename(pkg_dir, &displaced).map_err(|e| io(pkg_dir, e))?;
     }
-    std::fs::rename(staging, pkg_dir).map_err(|e| io(staging, e))?;
+    move_dir(staging, pkg_dir).map_err(|e| io(staging, e))?;
     if displaced.is_dir() {
         std::fs::remove_dir_all(&displaced).map_err(|e| io(&displaced, e))?;
+    }
+    Ok(())
+}
+
+/// `rename`, falling back to copy and remove on `EXDEV` as portage's
+/// `movefile` does.
+///
+/// An overlayfs without redirect and opaque xattrs (a rootless mount) refuses
+/// with `EXDEV` to rename a directory from the lower layer, or a new one
+/// inside a directory that is in both layers. The copy is not atomic.
+fn move_dir(from: &Utf8Path, to: &Utf8Path) -> std::io::Result<()> {
+    move_dir_with(from, to, |a, b| std::fs::rename(a, b))
+}
+
+fn move_dir_with(
+    from: &Utf8Path,
+    to: &Utf8Path,
+    rename: impl Fn(&Utf8Path, &Utf8Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match rename(from, to) {
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            std::fs::create_dir(to)?;
+            if let Err(e) = copy_dir(from.as_std_path(), to.as_std_path()) {
+                let _ = std::fs::remove_dir_all(to);
+                return Err(e);
+            }
+            std::fs::remove_dir_all(from)
+        }
+        r => r,
+    }
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let (src, dest) = (entry.path(), to.join(entry.file_name()));
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            std::fs::create_dir(&dest)?;
+            copy_dir(&src, &dest)?;
+        } else if ty.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dest)?;
+        } else {
+            std::fs::copy(&src, &dest)?;
+        }
     }
     Ok(())
 }
@@ -488,6 +535,44 @@ mod tests {
             leftovers.is_empty(),
             "scratch dirs left behind: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn a_cross_device_rename_falls_back_to_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let from = root.join("-MERGING-testsh-1.0");
+        let to = root.join("testsh-1.0");
+        std::fs::create_dir_all(from.join("sub")).unwrap();
+        std::fs::write(from.join("SLOT"), "0\n").unwrap();
+        std::fs::write(from.join("sub/f"), "x").unwrap();
+
+        super::move_dir_with(&from, &to, |_, _| {
+            Err(std::io::ErrorKind::CrossesDevices.into())
+        })
+        .unwrap();
+
+        assert!(!from.exists());
+        assert_eq!(std::fs::read_to_string(to.join("SLOT")).unwrap(), "0\n");
+        assert_eq!(std::fs::read_to_string(to.join("sub/f")).unwrap(), "x");
+    }
+
+    #[test]
+    fn a_failed_fallback_keeps_an_existing_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let from = root.join("-MERGING-testsh-1.0");
+        let to = root.join("testsh-1.0");
+        std::fs::create_dir(&from).unwrap();
+        std::fs::create_dir(&to).unwrap();
+        std::fs::write(to.join("SLOT"), "0\n").unwrap();
+
+        super::move_dir_with(&from, &to, |_, _| {
+            Err(std::io::ErrorKind::CrossesDevices.into())
+        })
+        .unwrap_err();
+
+        assert_eq!(std::fs::read_to_string(to.join("SLOT")).unwrap(), "0\n");
     }
 
     #[test]
