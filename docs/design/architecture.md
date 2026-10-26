@@ -785,10 +785,8 @@ does not query binhosts.
 expressions, but has no fuzzy matching (`--fuzzy-search`, on by default in emerge).
 
 `em --info <atom>` prints each installed match's build settings but never runs
-
-its `pkg_info()` phase, marks no forced USE flags, and fails on an atom with no
-installed version where emerge would fall back to an ebuild's `pkg_info()`.
-
+its `pkg_info()` phase and marks no forced USE flags. For an available but uninstalled
+atom it prints no package block, where emerge shows an ebuild's `pkg_info()` output.
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC

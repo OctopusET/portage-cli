@@ -221,18 +221,22 @@ fn features_omitted(stacked: &str, build: &str) -> Vec<String> {
         .collect()
 }
 
-/// The installed packages `atoms` name, failing after a warning for each atom naming none
+/// The installed packages `atoms` name, failing after a warning for each atom whose package is
+/// neither installed nor in a repository (`in_repos` of its `cat/pkg` or bare name)
 fn installed_matches(
     vdb: &portage_vdb::Vdb,
     atoms: &[String],
+    in_repos: impl Fn(&str) -> bool,
 ) -> Result<Vec<portage_vdb::InstalledPackage>> {
     let mut seen = std::collections::HashSet::new();
     let mut found = Vec::new();
     let mut missing = false;
     for atom in atoms {
         let pkgs = crate::vdb::find_packages(vdb, atom);
-        if pkgs.is_empty() {
-            crate::style::warn_line!("there are no installed packages to satisfy \"{atom}\"");
+        let cp =
+            portage_atom::Dep::parse(atom).map_or_else(|_| atom.clone(), |d| d.cpn.to_string());
+        if pkgs.is_empty() && crate::vdb::find_packages(vdb, &cp).is_empty() && !in_repos(&cp) {
+            crate::style::warn_line!("there are no ebuilds to satisfy \"{atom}\".");
             missing = true;
         }
         found.extend(pkgs.into_iter().filter(|p| seen.insert(p.cpv().clone())));
@@ -325,7 +329,13 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
     let installed = if atoms.is_empty() {
         Vec::new()
     } else {
-        installed_matches(&crate::vdb::open_cli_vdb(cli)?, &atoms)?
+        let repos: Vec<portage_repo::Repository> = cli
+            .search_repos()
+            .iter()
+            .filter_map(|p| crate::repo_open::open(p).ok())
+            .collect();
+        let in_repos = |cp: &str| repos.iter().any(|r| !r.find_cpns(cp).is_empty());
+        installed_matches(&crate::vdb::open_cli_vdb(cli)?, &atoms, in_repos)?
     };
     let repo = crate::crossdev::main_repo(cli)?;
     let loaded = crate::settings::load(cli).await?;
@@ -951,8 +961,13 @@ mod tests {
             std::fs::write(dir.join(file), text).unwrap();
         }
         let vdb = portage_vdb::Vdb::open(root.join("var/db/pkg")).unwrap();
-        let pkgs = installed_matches(&vdb, &["foo".to_string()]).unwrap();
-        assert!(installed_matches(&vdb, &["foo".to_string(), "bar".to_string()]).is_err());
+        let atoms = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let in_repos = |cp: &str| cp == "app-misc/bar";
+        let pkgs = installed_matches(&vdb, &atoms(&["foo"]), in_repos).unwrap();
+        let available = installed_matches(&vdb, &atoms(&["foo", "app-misc/bar"]), in_repos);
+        assert_eq!(available.unwrap().len(), 1);
+        assert!(installed_matches(&vdb, &atoms(&["=app-misc/foo-2.0"]), in_repos).is_ok());
+        assert!(installed_matches(&vdb, &atoms(&["foo", "app-misc/baz"]), in_repos).is_err());
         let current = |name: &str| match name {
             "CFLAGS" => Some("-O2 -pipe".to_string()),
             "CXXFLAGS" => Some("-O2 -pipe".to_string()),
