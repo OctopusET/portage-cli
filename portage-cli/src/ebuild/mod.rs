@@ -711,7 +711,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             phase_log: Some((log.clone(), quiet)),
             roots,
             merge_gate: None,
-            buildpkg: false,
+            buildpkg,
             binpkg: None,
             force_verify_signature: false,
             activity: activity.clone(),
@@ -1271,6 +1271,7 @@ impl PackageSetup {
             distdir,
             ref phase_log,
             roots,
+            buildpkg,
             ..
         } = *opts;
         let RootContext {
@@ -1392,6 +1393,10 @@ impl PackageSetup {
             shell
                 .export_sourced_env()
                 .context("exporting package.env environment")?;
+        }
+        // `-b` is recorded as FEATURES=buildpkg, as when it is configured.
+        if buildpkg {
+            add_feature(&mut shell, "buildpkg").await?;
         }
 
         // Root model (docs/user/root-model.md): PORTAGE_CONFIGROOT = config_root, and
@@ -1700,6 +1705,21 @@ impl PackageSetup {
 
         Ok(())
     }
+}
+
+/// Add `feature` to the shell's `FEATURES`, keeping the list sorted
+async fn add_feature(shell: &mut portage_repo::EbuildShell, feature: &str) -> Result<()> {
+    let current = shell.get_var("FEATURES").unwrap_or_default();
+    let mut features: Vec<&str> = current.split_whitespace().collect();
+    if features.contains(&feature) {
+        return Ok(());
+    }
+    features.push(feature);
+    features.sort_unstable();
+    shell
+        .run_string(&format!("FEATURES='{}'", features.join(" ")))
+        .await
+        .with_context(|| format!("adding {feature} to FEATURES"))
 }
 
 /// Extract a binary package's image into `image_dir` and return its saved
