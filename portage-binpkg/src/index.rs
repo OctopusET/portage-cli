@@ -60,6 +60,8 @@ pub struct BinpkgEntry {
     pub md5: String,
     /// Recorded container `SHA1` (empty if absent)
     pub sha1: String,
+    /// The recorded `EAPI` (4+) and `DEFINED_PHASES` say the package's `pkg_pretend` runs
+    pub pretend: bool,
 }
 
 impl BinpkgEntry {
@@ -148,6 +150,10 @@ impl BinpkgIndex {
             let build_env_key = facts.build_env_key();
             let build_id = facts.build_id_or_zero();
 
+            let pretend = defines_pretend(
+                meta.get("EAPI").map(String::as_str),
+                meta.get("DEFINED_PHASES").map(String::as_str),
+            );
             let entry = BinpkgEntry {
                 path: rel.clone(),
                 use_set: split_use(meta.get("USE").map(String::as_str).unwrap_or("")),
@@ -162,6 +168,7 @@ impl BinpkgIndex {
                 size: None,
                 md5: String::new(),
                 sha1: String::new(),
+                pretend,
             };
             entries.entry(facts.cpv).or_default().push(entry);
         }
@@ -207,6 +214,18 @@ impl BinpkgIndex {
         desired_chost: &str,
         desired_build_env_key: &str,
     ) -> Option<PathBuf> {
+        self.find_reusable_entry(cpv, desired_use, desired_chost, desired_build_env_key)
+            .map(|(path, _)| path)
+    }
+
+    /// [`Self::find_reusable`], with the index entry the container came from
+    pub fn find_reusable_entry(
+        &self,
+        cpv: &str,
+        desired_use: &[String],
+        desired_chost: &str,
+        desired_build_env_key: &str,
+    ) -> Option<(PathBuf, &BinpkgEntry)> {
         let best = best_reusable_entry(
             &self.entries,
             cpv,
@@ -215,7 +234,7 @@ impl BinpkgIndex {
             desired_chost,
             desired_build_env_key,
         )?;
-        Some(self.pkgdir.join(&best.path))
+        Some((self.pkgdir.join(&best.path), best))
     }
 
     /// Look up the raw index entries for `cpv` (including CFLAGS/CXXFLAGS/
@@ -385,10 +404,20 @@ pub fn parse_packages_entries(text: &str) -> BTreeMap<String, Vec<BinpkgEntry>> 
             size: fields.get("SIZE").and_then(|s| s.parse().ok()),
             md5: fields.get("MD5").copied().unwrap_or("").to_string(),
             sha1: fields.get("SHA1").copied().unwrap_or("").to_string(),
+            pretend: defines_pretend(
+                fields.get("EAPI").copied(),
+                fields.get("DEFINED_PHASES").copied(),
+            ),
         };
         entries.entry(cpv.to_string()).or_default().push(entry);
     }
     entries
+}
+
+/// EAPI 0-3 have no `pkg_pretend`; an index omits `EAPI` when it is the default `0`
+fn defines_pretend(eapi: Option<&str>, defined_phases: Option<&str>) -> bool {
+    !matches!(eapi.unwrap_or("0"), "0" | "1" | "2" | "3")
+        && defined_phases.is_some_and(|p| p.split_whitespace().any(|p| p == "pretend"))
 }
 
 /// Header fields of a `Packages` index (see `split_header_body` for where
@@ -1346,6 +1375,29 @@ USE: nls
             e[0].chost, "",
             "the header's CHOST must not leak into the entry"
         );
+    }
+
+    #[test]
+    fn entry_pretend_follows_the_binpkg_eapi_and_defined_phases() {
+        let text = "\
+CPV: app-test/a-1
+DEFINED_PHASES: compile pretend
+EAPI: 8
+
+CPV: app-test/b-1
+DEFINED_PHASES: compile pretend
+EAPI: 3
+
+CPV: app-test/c-1
+DEFINED_PHASES: compile pretend
+
+CPV: app-test/d-1
+DEFINED_PHASES: compile
+EAPI: 8
+";
+        let entries = parse_packages_entries(text);
+        let pretend: Vec<bool> = entries.values().map(|e| e[0].pretend).collect();
+        assert_eq!(pretend, [true, false, false, false]);
     }
 
     #[test]

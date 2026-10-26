@@ -70,6 +70,8 @@ pub(crate) struct ActivityTrack {
 #[derive(Debug)]
 struct BinpkgReuse {
     local: Option<std::path::PathBuf>,
+    /// The local binpkg's index entry defines `pkg_pretend`
+    local_pretend: bool,
     remote: Option<RemoteBinpkg>,
 }
 
@@ -84,6 +86,15 @@ struct RemoteBinpkg {
 }
 
 impl BinpkgReuse {
+    /// As portage, a reused binpkg's own EAPI and DEFINED_PHASES decide, not the repo ebuild's
+    fn needs_pretend(&self, planned: &query::depgraph::PlannedMerge) -> bool {
+        match (&self.local, &self.remote) {
+            (Some(_), _) => self.local_pretend,
+            (None, Some(remote)) => remote.entry.pretend,
+            (None, None) => planned.pretend,
+        }
+    }
+
     fn kind(&self, flags: &ActionFlags) -> crate::activity::PkgKind {
         if flags.fetchonly || flags.fetch_all_uri {
             crate::activity::PkgKind::FetchOnly
@@ -135,7 +146,7 @@ fn find_binpkg_reuse(
         .map(|f| f.as_str().to_string())
         .collect();
     let local = binpkg_index.and_then(|idx| {
-        idx.find_reusable(
+        idx.find_reusable_entry(
             &planned.cpv.to_string(),
             planned.build_id,
             &desired_use,
@@ -143,6 +154,8 @@ fn find_binpkg_reuse(
             desired_build_env_key,
         )
     });
+    let local_pretend = local.as_ref().is_some_and(|(_, entry)| entry.pretend);
+    let local = local.map(|(path, _)| path);
     let remote = if local.is_none() {
         remote_indices.iter().find_map(|idx| {
             idx.find_reusable(
@@ -161,7 +174,11 @@ fn find_binpkg_reuse(
     } else {
         None
     };
-    BinpkgReuse { local, remote }
+    BinpkgReuse {
+        local,
+        local_pretend,
+        remote,
+    }
 }
 
 fn emit_pkg_start(
@@ -330,6 +347,7 @@ impl MergeRun<'_> {
         if !self.has_binpkg_candidates() {
             return BinpkgReuse {
                 local: None,
+                local_pretend: false,
                 remote: None,
             };
         }
@@ -368,14 +386,15 @@ fn root_context<'a>(
     }
 }
 
-/// emerge's `_run_pkg_pretend`: every entry's `pkg_pretend` before the first build, the first
-/// failure stopping the run
+/// emerge's `_run_pkg_pretend`: every entry's `pkg_pretend` before the first build; all of them
+/// run, so one pass reports every failed check
 async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
     let flags = run.action_flags();
     if flags.fetchonly || flags.fetch_all_uri {
         return Ok(());
     }
-    for planned in run.plan.iter().filter(|p| p.pretend) {
+    let mut failed = 0;
+    for planned in run.plan {
         if crate::interrupt::requested() {
             return Ok(());
         }
@@ -385,6 +404,9 @@ async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
             continue;
         }
         let reuse = run.binpkg_reuse(planned).await;
+        if !reuse.needs_pretend(planned) {
+            continue;
+        }
         let (binpkg, force_verify_signature) = if let Some(local) = reuse.local {
             (camino::Utf8PathBuf::from_path_buf(local).ok(), false)
         } else if let Some(remote) = &reuse.remote {
@@ -399,7 +421,7 @@ async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
         } else {
             (None, false)
         };
-        ebuild::pkg_pretend(ebuild::PkgPretend {
+        let result = ebuild::pkg_pretend(ebuild::PkgPretend {
             ebuild_path: &planned.ebuild_path,
             cpv: &planned.cpv,
             use_flags: &planned.use_flags,
@@ -411,8 +433,14 @@ async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
             buildpkgonly: flags.buildpkgonly,
         })
         .instrument(tracing::info_span!("pkg", cpv = %planned.cpv))
-        .await
-        .with_context(|| format!("pkg_pretend of {} failed", planned.cpv))?;
+        .await;
+        if let Err(e) = result {
+            crate::style::error_line!("pkg_pretend of {} failed: {e:#}", planned.cpv);
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} pre-merge check(s) failed");
     }
     Ok(())
 }
@@ -902,6 +930,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
     let BinpkgReuse {
         local: reused,
         remote: remote_match,
+        ..
     } = reuse;
     let enforce_no_source = !source_build_allowed(enforce_no_source, planned);
 
@@ -1944,6 +1973,27 @@ mod entry_roots_tests {
     }
 
     #[test]
+    fn a_reused_binpkg_decides_pretend_from_its_own_metadata() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Packages"),
+            "CPV: dev-python/jinja2-3.1.6\nDEFINED_PHASES: pretend\nEAPI: 8\nIUSE:\n\
+             PATH: dev-python/jinja2-3.1.6-1.gpkg.tar\nUSE:\n",
+        )?;
+        let local = portage_binpkg::BinpkgIndex::open(dir.path()).unwrap();
+        let p = planned(MergeRoot::Target)?;
+        assert!(find_binpkg_reuse(&p, Some(&local), &[], "", "").needs_pretend(&p));
+
+        let source = PlannedMerge { pretend: true, ..p };
+        assert!(find_binpkg_reuse(&source, None, &[], "", "").needs_pretend(&source));
+        let empty = tempfile::tempdir().unwrap();
+        seed_index(empty.path());
+        let local = portage_binpkg::BinpkgIndex::open(empty.path()).unwrap();
+        assert!(!find_binpkg_reuse(&source, Some(&local), &[], "", "").needs_pretend(&source));
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "explicit performance benchmark"]
     fn benchmark_binpkg_key_and_reuse_lookup() -> Result<()> {
         use std::hint::black_box;
@@ -2191,5 +2241,97 @@ mod unmerge_scheduling_tests {
         let mut deps = extended[2].clone();
         deps.sort_unstable();
         assert_eq!(deps, vec![0, 1]);
+    }
+}
+
+#[cfg(test)]
+mod pretend_tests {
+    use super::*;
+    use camino::Utf8Path;
+    use query::depgraph::{MergeRoot, PlannedMerge};
+
+    /// `app-misc/<pn>-1`, whose `pkg_pretend` and `pkg_setup` log their names, then run `pretend`
+    fn entry(dir: &Utf8Path, pn: &str, pretend: &str, defines_pretend: bool) -> PlannedMerge {
+        let ebuild_dir = dir.join("repo/app-misc").join(pn);
+        std::fs::create_dir_all(&ebuild_dir).unwrap();
+        let ebuild_path = ebuild_dir.join(format!("{pn}-1.ebuild"));
+        let log = dir.join("log");
+        std::fs::write(
+            &ebuild_path,
+            format!(
+                "EAPI=8\nDESCRIPTION=probe\nSLOT=0\nS=\"${{WORKDIR}}\"\n\
+                 pkg_pretend() {{ echo pretend-{pn} >> '{log}'; {pretend}; }}\n\
+                 pkg_setup() {{ echo setup-{pn} >> '{log}'; }}\n"
+            ),
+        )
+        .unwrap();
+        PlannedMerge {
+            merge_root: MergeRoot::Target,
+            cpv: portage_atom::Cpv::parse(&format!("app-misc/{pn}-1")).unwrap(),
+            ebuild_path,
+            use_flags: Vec::new(),
+            depend: Vec::new(),
+            bdepend: Vec::new(),
+            reinstall: false,
+            interactive: false,
+            pretend: defines_pretend,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_pretend_runs_and_any_failure_fails_the_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo.join("profiles")).unwrap();
+        std::fs::write(repo.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo.join("profiles/repo_name"), "probe\n").unwrap();
+        let root = dir.join("root");
+        std::fs::create_dir_all(root.join("var/db/pkg/app-misc/e-1")).unwrap();
+        let plan = [
+            entry(dir, "a", "true", true),
+            entry(dir, "b", "die nope", true),
+            entry(dir, "c", "true", true),
+            entry(dir, "d", "true", false),
+            entry(dir, "e", "true", true),
+        ];
+
+        let roots = portage_resolve::Roots::for_test(root.as_str());
+        let globals = crate::cli::parse_cli(&["em", "emerge", "--root", root.as_str()]);
+        let merge_flags = cli::MergeFlags::default();
+        let env = binpkg::DesiredBuildEnv::default();
+        let run = MergeRun {
+            plan: &plan,
+            unmerges: &[],
+            globals: &globals,
+            roots: &roots,
+            host_roots: &roots,
+            base_roots: &roots,
+            work_base: &dir.join("work"),
+            distdir: None,
+            quiet: true,
+            merge_flags: &merge_flags,
+            ignore_blockers: false,
+            extra_path: &[],
+            binpkg_index: None,
+            host_binpkg_index: None,
+            remote_indices: &[],
+            enforce_no_source: false,
+            target_env: &env,
+            target_dirs: &[],
+            host_env: &env,
+            host_dirs: &[],
+            resume_job: None,
+            activity: None,
+        };
+
+        let err = run_pretend_checks(&run).await.unwrap_err();
+        assert_eq!(err.to_string(), "1 pre-merge check(s) failed");
+        let log = std::fs::read_to_string(dir.join("log")).unwrap();
+        assert_eq!(
+            log.split_whitespace().collect::<Vec<_>>(),
+            ["pretend-a", "pretend-b", "pretend-c"]
+        );
     }
 }

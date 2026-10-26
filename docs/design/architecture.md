@@ -698,6 +698,9 @@ metadata parse error, so em drops the ebuild. Portage keeps it visible and fails
 PMS 8.3.2: hard blocker conflicts (`PlannedCoexistence`, strong `StillNeeded`)
 fail with exit 1 after classify. `WouldUnmerge` victims are unmerged on a real
 merge — strong `!!` before the merge loop, weak `!` after. `-p` still exits 0.
+Every `pkg_pretend` in the plan runs before the first build, and any failure stops the run. A
+strong victim whose owner is missing from the plan is unmerged before that pass, so a failed
+check can follow it; emerge runs the checks first.
 A weak victim still installed when its blocker merges may own the same files: as in
 portage, the collision check skips it and the paths the new package installs leave its
 CONTENTS, so its later unmerge keeps them. Under `--nodeps` blockers are ignored, so neither
