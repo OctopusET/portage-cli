@@ -401,7 +401,8 @@ fn is_use_conditional(input: &str) -> bool {
         match bytes[i] {
             b'?' => {
                 return bytes.get(i + 1) == Some(&b'(')
-                    || (bytes[i + 1].is_ascii_whitespace() && bytes.get(i + 2) == Some(&b'('));
+                    || (bytes.get(i + 1).is_some_and(u8::is_ascii_whitespace)
+                        && bytes.get(i + 2) == Some(&b'('));
             }
             b'/' | b':' | b'[' => return false,
             _ => i += 1,
@@ -753,6 +754,12 @@ mod tests {
             }
             _ => panic!("expected Atom"),
         }
+    }
+
+    #[test]
+    fn trailing_question_mark_is_an_error() {
+        assert!(DepEntry::parse("foo?").is_err());
+        assert!(DepEntry::parse("a/b foo?").is_err());
     }
 
     #[test]

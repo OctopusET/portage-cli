@@ -430,7 +430,9 @@ mod tests {
     #[test]
     fn repo_comes_between_slot_and_use_deps() {
         let dep = Dep::parse("cat/pkg:1::gentoo[foo]").unwrap();
-        assert!(matches!(&dep.slot_dep, Some(SlotDep::Slot { slot: Some(s), .. }) if s.slot == "1"));
+        assert!(
+            matches!(&dep.slot_dep, Some(SlotDep::Slot { slot: Some(s), .. }) if s.slot == "1")
+        );
         assert_eq!(dep.repo, Some(Interned::intern("gentoo")));
         assert_eq!(dep.use_deps.as_ref().unwrap().len(), 1);
         assert_eq!(dep.to_string(), "cat/pkg:1::gentoo[foo]");
