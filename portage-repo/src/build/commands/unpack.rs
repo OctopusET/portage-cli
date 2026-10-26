@@ -211,7 +211,7 @@ fn unpack_archive(src: &std::path::Path, cwd: &std::path::Path, eapi: u32) -> Re
         unpack_cmd("tar", &["xf", &src_s, "--no-same-owner"], cwd)
     } else if ext(&[".zip", ".ZIP", ".jar"]) {
         unpack_cmd("unzip", &["-qo", &src_s], cwd)
-    } else if ext(&[".gz", ".Z", ".z"]) {
+    } else if ext(&[".gz", ".Z"]) {
         piped("gzip", &["-d", "-c", &src_s])
     } else if ext(&[".bz2", ".bz"]) {
         piped("bzip2", &["-d", "-c", &src_s])
@@ -334,6 +334,13 @@ mod tests {
             unpack_archive(&zip, tmp.path(), 5),
             Ok(0),
             ".ZIP is listed for EAPI 5"
+        );
+        let z = tmp.path().join("missing.z");
+        assert_eq!(unpack_archive(&z, tmp.path(), 5), Ok(0), "EAPI 5 skips .z");
+        assert_ne!(
+            unpack_archive(&z, tmp.path(), 6),
+            Ok(0),
+            "EAPI 6 unpacks .z"
         );
     }
 
