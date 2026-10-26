@@ -241,6 +241,8 @@ pub struct Repository {
     /// every consumer) so `ebuilds`/`find_cpns`/`is_fresh_cached` can't be
     /// called with a mismatched or stale masters list.
     masters: Vec<Repository>,
+    /// Indices into `masters` of the directly declared masters, in declared order
+    direct_masters: Vec<usize>,
 }
 
 impl std::fmt::Debug for Repository {
@@ -338,7 +340,7 @@ impl RepositoryBuilder {
         let mut masters: Vec<Repository> = Vec::new();
         let mut seen = HashSet::new();
         seen.insert(repo.name().to_string());
-        Repository::resolve_masters_with_spec(
+        let direct = Repository::resolve_masters_with_spec(
             &repo,
             repos_dir.as_ref(),
             &mut masters,
@@ -347,6 +349,10 @@ impl RepositoryBuilder {
             masters_override,
             default_master,
         )?;
+        repo.direct_masters = direct
+            .iter()
+            .filter_map(|p| masters.iter().position(|m| m.path.as_std_path() == p))
+            .collect();
         repo.masters = masters;
         Ok(repo)
     }
@@ -397,6 +403,7 @@ impl Repository {
             secondary,
             secondary_dir,
             masters: Vec::new(),
+            direct_masters: Vec::new(),
         })
     }
 
@@ -408,7 +415,7 @@ impl Repository {
         spec: &SecondarySpec,
         masters_override: Option<&[String]>,
         default_master: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Vec<PathBuf>> {
         // repos.conf wins whenever it declares `masters =` at all (even
         // empty, to explicitly opt out); layout.conf is only a fallback
         // for repos with no repos.conf entry to override it — see
@@ -430,11 +437,13 @@ impl Repository {
                 }
             }
         };
+        let mut direct = Vec::new();
         for master_name in master_names {
+            let master_path = repos_dir.join(master_name);
+            direct.push(master_path.clone());
             if !seen.insert(master_name.clone()) {
                 continue;
             }
-            let master_path = repos_dir.join(master_name);
             let master_spec = match spec {
                 SecondarySpec::UserRoot(root) => SecondarySpec::UserRoot(root.clone()),
                 SecondarySpec::Memory | SecondarySpec::Custom(_) => SecondarySpec::Memory,
@@ -443,7 +452,7 @@ impl Repository {
             Self::resolve_masters_with_spec(&master, repos_dir, out, seen, spec, None, None)?;
             out.push(master);
         }
-        Ok(())
+        Ok(direct)
     }
 
     /// Absolute path to the repository root
@@ -836,7 +845,7 @@ impl Repository {
         }
     }
 
-    /// The repository-level `profiles/package.mask`, stacked on each master's and limited to
+    /// The repository-level `profiles/package.mask`, stacked on each direct master's and limited to
     /// this repository's packages
     ///
     /// A `-atom` line cancels a master's mask for this repository only. Atoms without a
@@ -846,10 +855,10 @@ impl Repository {
     pub fn repo_package_mask(&self) -> Result<Vec<Dep>> {
         let own = profile::read_atom_lines(self.profiles_file("package.mask").as_std_path())?;
         let mut acc = Vec::new();
-        if self.masters.is_empty() {
+        if self.direct_masters.is_empty() {
             profile::stack_atom_lines(&mut acc, own.iter().cloned());
         }
-        for master in &self.masters {
+        for master in self.direct_masters.iter().map(|&i| &self.masters[i]) {
             let mut stacked = Vec::new();
             let master_file = master.profiles_file("package.mask");
             profile::stack_atom_lines(
@@ -1282,6 +1291,39 @@ mod tests {
         assert_eq!(masks, ["dev-libs/b::ovl", "dev-libs/c::other"]);
         // Without a portage-1 style profile-formats there is no repo-level package.unmask.
         assert!(repo.repo_package_unmask().unwrap().is_empty());
+    }
+
+    #[test]
+    fn repo_package_mask_ignores_a_master_of_a_master() {
+        let repos_dir = tempfile::tempdir().unwrap();
+        for (name, layout, mask) in [
+            ("gentoo", "", "dev-libs/a\n"),
+            ("guru", "masters = gentoo\n", "dev-libs/b\n"),
+        ] {
+            let dir = repos_dir.path().join(name);
+            std::fs::create_dir_all(dir.join("metadata")).unwrap();
+            std::fs::write(dir.join("metadata/layout.conf"), layout).unwrap();
+            std::fs::create_dir_all(dir.join("profiles")).unwrap();
+            std::fs::write(dir.join("profiles/repo_name"), format!("{name}\n")).unwrap();
+            std::fs::write(dir.join("profiles/package.mask"), mask).unwrap();
+        }
+        let overlay_dir = tempfile::tempdir().unwrap();
+        make_test_repo(&overlay_dir);
+        std::fs::write(overlay_dir.path().join("profiles/repo_name"), "ovl\n").unwrap();
+
+        let masters = vec!["guru".to_string()];
+        let repo = Repository::builder()
+            .in_memory_cache()
+            .open_with_masters(overlay_dir.path(), repos_dir.path(), Some(&masters), None)
+            .unwrap();
+        assert_eq!(repo.masters().len(), 2);
+        let masks: Vec<_> = repo
+            .repo_package_mask()
+            .unwrap()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        assert_eq!(masks, ["dev-libs/b::ovl"]);
     }
 
     #[test]
