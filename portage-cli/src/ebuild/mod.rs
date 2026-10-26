@@ -24,6 +24,7 @@ mod install_mask;
 mod protect;
 
 use binpkg::{BinpkgRecord, binpkg_record, build_binpkg_standalone, ed_image_dir};
+pub(crate) use flock::lock_vdb;
 use flock::{CleanWhen, acquire_flock, filter_clean_subs, lock_builddir, lock_merge_flock};
 use install_mask::InstallMask;
 pub(crate) use protect::clean_config_memory;
@@ -620,8 +621,11 @@ impl MergeGate {
         Fut: Future<Output = Result<()>>,
     {
         let mut state = self.state.lock().await;
-        let _merge_lock = lock_merge_lock(work_base).await?;
-        state.finish_preserve_all();
+        {
+            let _merge_lock = lock_merge_lock(work_base).await?;
+            state.finish_preserve_all();
+        }
+        // `f` unmerges, which takes the merge lock itself.
         let output = f().await;
         state.ownership.clear();
         state.preserve.clear();
@@ -636,7 +640,7 @@ impl MergeGate {
 /// Failing to take it aborts the flush rather than proceeding unlocked —
 /// `prune_unneeded` unlinks files and `store` rewrites a shared registry, so
 /// running either without the lock is worse than skipping the flush.
-async fn lock_merge_lock(work_base: &Utf8Path) -> Result<std::fs::File> {
+pub(crate) async fn lock_merge_lock(work_base: &Utf8Path) -> Result<std::fs::File> {
     acquire_flock(
         work_base.join(".merge.lock").into_std_path_buf(),
         "merge lock",
@@ -1750,6 +1754,10 @@ impl PackageSetup {
                             .await
                             .ok_or_else(|| anyhow!("could not acquire merge lock"))?,
                     ),
+                    _ => None,
+                };
+                let _vdb_lock = match *phase {
+                    RunPhase::Qmerge => Some(lock_vdb(&vdb_root_for(root)).await?),
                     _ => None,
                 };
                 let phase_name = phase.to_string();

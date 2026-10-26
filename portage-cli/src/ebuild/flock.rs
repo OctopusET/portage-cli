@@ -73,20 +73,73 @@ const LOCK_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(10
 /// Released on drop, or by the kernel if the process dies — note that a
 /// *suspended* process keeps it, which is the case the notice exists to name.
 pub(crate) async fn acquire_flock(path: std::path::PathBuf, label: &str) -> Option<std::fs::File> {
-    let notice_path = path.clone();
-    let acquire = tokio::task::spawn_blocking(move || {
-        // append: never truncate at open — that would race the holder, since
+    acquire_noting(path, label, |path| {
+        // append: never truncate at open, that would race the holder, since
         // the lock is not ours until `flock` returns.
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
-            .open(&path)
+            .open(path)
             .ok()?;
         rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive).ok()?;
-        stamp_holder(&path);
+        stamp_holder(path);
         Some(f)
-    });
+    })
+    .await
+}
+
+/// Portage's VDB lock, held while a merge or unmerge writes the VDB
+///
+/// A POSIX record lock never conflicts within one process, so it only excludes
+/// other processes (`emerge`, another `em`); take it under the merge lock.
+pub(crate) struct VdbLock {
+    _file: std::fs::File,
+}
+
+/// The lock `vardbapi.lock` takes: an exclusive `fcntl` lock on
+/// `.<name>.portage_lockfile` beside the VDB directory.
+pub(crate) async fn lock_vdb(vdb_root: &Utf8Path) -> anyhow::Result<VdbLock> {
+    let path = vdb_lockfile(vdb_root);
+    std::fs::create_dir_all(vdb_root.as_std_path())?;
+    acquire_noting(path.clone().into_std_path_buf(), "VDB lock", |path| {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        loop {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o660)
+                .open(path)
+                .ok()?;
+            rustix::fs::fcntl_lock(&file, rustix::fs::FlockOperation::LockExclusive).ok()?;
+            // Portage unlinks the file as it unlocks; a lock on the orphaned inode guards nothing.
+            let held = file.metadata().ok()?;
+            if let Ok(now) = std::fs::metadata(path)
+                && (now.dev(), now.ino()) == (held.dev(), held.ino())
+            {
+                return Some(VdbLock { _file: file });
+            }
+        }
+    })
+    .await
+    .ok_or_else(|| anyhow::anyhow!("could not acquire the VDB lock at {path}"))
+}
+
+fn vdb_lockfile(vdb_root: &Utf8Path) -> camino::Utf8PathBuf {
+    let name = vdb_root.file_name().unwrap_or("pkg");
+    vdb_root.with_file_name(format!(".{name}.portage_lockfile"))
+}
+
+/// Run the blocking `take` off the executor, warning if it waits past [`LOCK_NOTICE_AFTER`]
+async fn acquire_noting<T, F>(path: std::path::PathBuf, label: &str, take: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&std::path::Path) -> Option<T> + Send + 'static,
+{
+    let notice_path = path.clone();
+    let acquire = tokio::task::spawn_blocking(move || take(&path));
     tokio::pin!(acquire);
     match tokio::time::timeout(LOCK_NOTICE_AFTER, &mut acquire).await {
         Ok(joined) => joined.ok().flatten(),
@@ -184,6 +237,45 @@ mod tests {
             vec!["image", "homedir"],
             "noclean keeps source (work) and temp"
         );
+    }
+
+    /// Re-run as a child: succeeds only if the lockfile is locked by another process.
+    #[test]
+    fn vdb_lock_probe() {
+        let Some(path) = std::env::var_os("EM_VDB_LOCK_PROBE") else {
+            return;
+        };
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let free = rustix::fs::fcntl_lock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .is_ok();
+        assert!(!free, "the VDB lockfile was not locked");
+    }
+
+    #[tokio::test]
+    async fn vdb_lock_excludes_another_process_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let vdb = camino::Utf8Path::from_path(dir.path())
+            .unwrap()
+            .join("var/db/pkg");
+        let lockfile = dir.path().join("var/db/.pkg.portage_lockfile");
+        let probe = || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ebuild::flock::tests::vdb_lock_probe", "--quiet"])
+                .env("EM_VDB_LOCK_PROBE", &lockfile)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+
+        let held = lock_vdb(&vdb).await.unwrap();
+        assert!(probe(), "another process must see the lock held");
+        drop(held);
+        assert!(!probe(), "dropping the guard must release the lock");
     }
 
     // The stamp is what a waiter reports, so pin that it is written only by

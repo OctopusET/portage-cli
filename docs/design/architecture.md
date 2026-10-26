@@ -244,7 +244,9 @@ Installed package database reader/writer for `/var/db/pkg`.
   snapshots. Cross-process normal register/unregister changes are detected by the
   ownership stamp after `.merge.lock`; in-place `CONTENTS` edits require a new batch.
   Plans below the indexed threshold, and privilege-worker children, use the one-shot
-  paths.
+  paths. Every qmerge and unmerge batch also holds portage's VDB lock (an `fcntl`
+  lock on `var/db/.pkg.portage_lockfile`), so `em` and a concurrent `emerge` exclude
+  each other; `.merge.lock` is `em`-only.
 - Directory iterators: `AllPackages`, `Category`, `Categories`, `Packages`
 
 ### `portage-binpkg` (v0.2.1)

@@ -1556,6 +1556,9 @@ async fn execute_unmerge_batch(
     // Each removal restores this, so one package's functions do not run for the next.
     shell.save_profile_session();
 
+    let merge_lock = ebuild::lock_merge_lock(&work_base).await?;
+    let vdb_lock = ebuild::lock_vdb(vdb.root()).await?;
+
     // One shared graph + registry for the whole batch, not rebuilt per
     // package — see `preserve_libs::build_link_graph`'s doc.
     let mut registry = preserve_libs::PreservedLibsRegistry::load_for_update(&root);
@@ -1595,6 +1598,8 @@ async fn execute_unmerge_batch(
     }
     registry.reclaim(vdb, &root);
     registry.store();
+    drop(vdb_lock);
+    drop(merge_lock);
 
     // `pkg_prerm`/`pkg_postrm` queue their messages in this process (there is
     // no worker seam on a removal), so this is what prints them.
