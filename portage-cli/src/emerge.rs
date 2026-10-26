@@ -1868,6 +1868,22 @@ mod tests {
     }
 
     #[test]
+    fn world_atom_takes_the_slot_from_the_vdb_when_no_ebuild_matches() {
+        let arg = "=sys-devel/gcc-13*";
+        let vdb = [
+            ("sys-devel/gcc-13.3.0", "13"),
+            ("sys-devel/gcc-14.2.0", "14"),
+        ];
+        let entry = world_atom(
+            &portage_atom::Dep::parse(arg).unwrap(),
+            &SlotFacts::default(),
+            &facts(arg, &vdb),
+            &[],
+        );
+        assert_eq!(entry.unwrap().to_string(), "sys-devel/gcc:13");
+    }
+
+    #[test]
     fn world_atom_skips_unslotted_system_packages_but_not_virtuals_or_repo_atoms() {
         let repo = [("sys-apps/sed-4.9", "0")];
         assert_eq!(world_entry("sys-apps/sed", &repo, &["sys-apps/sed"]), None);
