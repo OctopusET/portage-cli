@@ -268,12 +268,18 @@ pub(super) fn solve_round(
         } else {
             Vec::new()
         };
+        // A VDB `IUSE` never lists the profile's implicit flags; USE deps judge IUSE_EFFECTIVE.
+        let injection = &iteration_policy.force_mask.iuse_injection;
+        let vdb_iuse: Vec<_> = target_installed
+            .iter()
+            .map(|e| injection.with_implicit(e.eapi, e.iuse.clone()))
+            .collect();
         let mut installed_iuse = InstalledIuse::new();
-        for e in target_installed {
+        for (e, iuse) in target_installed.iter().zip(&vdb_iuse) {
             installed_iuse
                 .entry(e.cpn)
                 .or_default()
-                .push((e.version.clone(), e.iuse.clone()));
+                .push((e.version.clone(), iuse.clone()));
         }
         let provider_start = Instant::now();
         let mut provider = PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map(
@@ -322,7 +328,11 @@ pub(super) fn solve_round(
         for (pkg, version) in sysroot_installed {
             provider.add_sysroot_installed(pkg.clone(), version.clone());
         }
-        for (e, blockers) in target_installed.iter().zip(installed_blockers) {
+        for ((e, blockers), iuse) in target_installed
+            .iter()
+            .zip(installed_blockers)
+            .zip(vdb_iuse)
+        {
             let pkg = installed_package(e.cpn, e.slot);
             provider.add_installed_blockers(&pkg, blockers);
             let changed = changed_rebuild_cpvs.contains(&Cpv::new(e.cpn, e.version.clone()));
@@ -344,7 +354,7 @@ pub(super) fn solve_round(
                 version: e.version.clone(),
                 policy,
                 active_use: e.active_use.clone(),
-                iuse: e.iuse.clone(),
+                iuse,
             });
         }
         // `package.provided`: CPVs the system supplies externally. Registered as
@@ -414,7 +424,7 @@ pub(super) fn solve_round(
                 e.package.clone(),
                 e.version.clone(),
                 e.active_use.clone(),
-                e.iuse.clone(),
+                injection.with_implicit(e.eapi, e.iuse.clone()),
             );
         }
         let resolve_start = Instant::now();

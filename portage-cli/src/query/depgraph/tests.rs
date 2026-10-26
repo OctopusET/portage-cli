@@ -983,6 +983,58 @@ fn deep_descends_into_a_kept_package_with_the_use_it_was_built_with() {
     assert_eq!(names(&solve(&fix, deep)), ["app-misc/app-1"]);
 }
 
+/// amd64-style profile: `abi_x86_64` is implicit IUSE and on
+fn implicit_abi_profile(fix: &Fix) {
+    std::fs::write(
+        fix.root.join("etc/portage/make.profile/make.defaults"),
+        "ARCH=\"amd64\"\nACCEPT_KEYWORDS=\"amd64\"\nIUSE_IMPLICIT=\"abi_x86_64\"\nUSE=\"abi_x86_64\"\n",
+    )
+    .unwrap();
+}
+
+// virtual/mpi over an installed openmpi-5 gone from the tree: its VDB IUSE lacks the implicit
+// `abi_x86_64`, which its VDB USE has on.
+#[test]
+fn an_installed_only_package_meets_a_use_dep_on_an_implicit_flag() {
+    let mut mpi = pkg(
+        "virtual/mpi-1",
+        "0",
+        "|| ( a/openmpi[abi_x86_64(-)?] a/mpich[abi_x86_64(-)?] )",
+    );
+    mpi.iuse = "abi_x86_64";
+    let mut mpich = pkg("a/mpich-1", "0", "");
+    mpich.iuse = "abi_x86_64";
+    let fix = fixture(&[mpi, mpich, pkg("a/openmpi-6", "0", "")], &[]);
+    implicit_abi_profile(&fix);
+    plant_installed(&fix.root, "a/openmpi-5", "0", "abi_x86_64", "");
+    let atoms = [TargetAtom::explicit("virtual/mpi")];
+    let outcome = solve(&fix, Solve::new(&atoms));
+    assert_eq!(names(&outcome), ["virtual/mpi-1"]);
+    assert_eq!(outcome.exit_code, 0);
+}
+
+#[test]
+fn a_host_package_meets_a_build_use_dep_on_an_implicit_flag() {
+    let mut tool = pkg("app-misc/tool-1", "0", "");
+    tool.iuse = "abi_x86_64";
+    // `cache_text` has no BDEPEND field; this appends the line.
+    tool.depend = "\nBDEPEND=a/gen[abi_x86_64(-)]";
+    let mut fix = fixture(&[tool, pkg("a/gen-1", "0", "")], &[]);
+    implicit_abi_profile(&fix);
+    let broot = Utf8PathBuf::try_from(fix._dir.path().join("broot")).unwrap();
+    plant_installed(&broot, "a/gen-1", "0", "abi_x86_64", "");
+    fix.roots = fix.roots.clone().with_broot(Some(broot));
+    let atoms = [TargetAtom::explicit("app-misc/tool")];
+    let outcome = solve(&fix, Solve::new(&atoms));
+    let target: Vec<String> = outcome
+        .plan
+        .iter()
+        .filter(|p| p.merge_root == MergeRoot::Target)
+        .map(|p| p.cpv.to_string())
+        .collect();
+    assert_eq!(target, ["app-misc/tool-1"]);
+}
+
 fn pkg(cpv: &'static str, slot: &'static str, rdepend: &'static str) -> Pkg {
     Pkg {
         cpv,

@@ -239,6 +239,8 @@ pub struct HostInstalledEntry {
     pub active_use: Vec<Interned<DefaultInterner>>,
     /// The package's declared `IUSE`, prefix-stripped
     pub iuse: Vec<Interned<DefaultInterner>>,
+    /// The EAPI this package was built with, for implicit-IUSE injection
+    pub eapi: Eapi,
 }
 
 /// Packages present on the **build host** (BROOT), for `host_installed`
@@ -302,6 +304,7 @@ fn host_installed_entry(pkg: &InstalledPackage) -> HostInstalledEntry {
         version: pkg.cpv().version.clone(),
         active_use,
         iuse,
+        eapi: pkg.eapi().unwrap_or(Eapi::Zero),
     }
 }
 
