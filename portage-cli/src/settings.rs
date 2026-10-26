@@ -376,11 +376,11 @@ mod tests {
         };
         assert_eq!(
             features("").await,
-            "binpkg-multi-instance preserve-libs protect-owned"
+            "binpkg-multi-instance buildpkg-live preserve-libs protect-owned"
         );
         assert_eq!(
             features("FEATURES=\"-preserve-libs\"\n").await,
-            "binpkg-multi-instance protect-owned"
+            "binpkg-multi-instance buildpkg-live protect-owned"
         );
     }
 
