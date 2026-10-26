@@ -39,6 +39,8 @@ pub(crate) struct MergePlanRequest<'a> {
     pub merge_flags: &'a cli::MergeFlags,
     /// `--nodeps`: see `ebuild::BuildAndMerge::ignore_blockers`
     pub ignore_blockers: bool,
+    /// The policy the `-p` preview judged binpkgs by, so the merge takes the same ones
+    pub reuse_policy: binpkg::ReusePolicy,
     pub globals: &'a cli::Cli,
     /// Directories to put ahead of the sanitised build `PATH`, resolved by the caller
     ///
@@ -610,6 +612,7 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         distdir,
         merge_flags,
         ignore_blockers,
+        reuse_policy,
         globals,
         extra_path,
         resume_job,
@@ -830,10 +833,7 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         binpkg_index: binpkg_index.as_ref(),
         host_binpkg_index,
         remote_indices: &remote_indices,
-        reuse_policy: {
-            let f = globals.depgraph_flags();
-            binpkg::ReusePolicy::new(merge_flags, f.newuse, f.changed_use)
-        },
+        reuse_policy,
         enforce_no_source,
         target_env: &target_env,
         target_dirs: &target_dirs,

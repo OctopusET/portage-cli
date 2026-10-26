@@ -380,6 +380,12 @@ fn confirm_merge(
     ))
 }
 
+/// The depgraph flags a run resolves, previews and merges with: the saved ones of a resumed or
+/// staged run, else the command line's
+fn run_depgraph_flags(cli: &cli::Cli, saved: Option<cli::DepgraphFlags>) -> cli::DepgraphFlags {
+    saved.unwrap_or_else(|| cli.depgraph_flags())
+}
+
 /// Resolve and (unless `--pretend`) merge `raw_atoms` with the global
 /// config in `cli`, plus the per-call [`EmergeOpts`]. Factored out of
 /// [`run_emerge`] so the crossdev staged-build driver can run each
@@ -596,14 +602,12 @@ async fn emerge_atoms_inner(
     } else {
         cli::DepgraphFormat::Pretty
     };
-    let depgraph_flags = depgraph_flags_override
-        .as_ref()
-        .map(|f| (f.deep, f.newuse, f.changed_use))
-        .unwrap_or_else(|| {
-            let f = cli.depgraph_flags();
-            (f.deep, f.newuse, f.changed_use)
-        });
-    let reuse_policy = binpkg::ReusePolicy::new(merge_flags, depgraph_flags.1, depgraph_flags.2);
+    let depgraph_flags = run_depgraph_flags(cli, depgraph_flags_override);
+    let reuse_policy = binpkg::ReusePolicy::new(
+        merge_flags,
+        depgraph_flags.newuse,
+        depgraph_flags.changed_use,
+    );
     let binpkg_preview = binpkg::BinpkgPreview::open(cli, merge_flags, reuse_policy).await;
     // Cross-alias targets (`cross-<tuple>/pkg`) only exist under crossdev
     // management, so they opt this resolve into widened candidate supply —
@@ -640,10 +644,10 @@ async fn emerge_atoms_inner(
         onlydeps: merge_flags.onlydeps,
         with_bdeps: merge_flags.install_bdeps(),
         root_deps_rdeps: merge_flags.root_deps,
-        deep: depgraph_flags.0,
+        deep: depgraph_flags.deep,
         update: merge_flags.update,
-        newuse: depgraph_flags.1,
-        changed_use: depgraph_flags.2,
+        newuse: depgraph_flags.newuse,
+        changed_use: depgraph_flags.changed_use,
         noreplace: merge_flags.noreplace,
         changed_deps: merge_flags.changed_deps == Some(cli::YesNo::Y),
         changed_slot: merge_flags.changed_slot == Some(cli::YesNo::Y),
@@ -793,11 +797,7 @@ async fn emerge_atoms_inner(
             maint::resume::ResumeState::new(
                 raw_atoms.to_vec(),
                 merge_flags.clone(),
-                cli::DepgraphFlags {
-                    deep: depgraph_flags.0,
-                    newuse: depgraph_flags.1,
-                    changed_use: depgraph_flags.2,
-                },
+                depgraph_flags.clone(),
                 nodeps,
             ),
             is_resume,
@@ -870,7 +870,7 @@ async fn emerge_atoms_inner(
             jobs: merge_flags.jobs,
             emptytree: merge_flags.emptytree,
             update: merge_flags.update,
-            deep: depgraph_flags.0,
+            deep: depgraph_flags.deep,
             keep_going: merge_flags.keep_going,
             fetchonly: merge_flags.fetchonly || merge_flags.fetch_all_uri,
             buildpkgonly: merge_flags.buildpkgonly,
@@ -913,6 +913,7 @@ async fn emerge_atoms_inner(
             distdir: distdir.as_deref(),
             merge_flags,
             ignore_blockers: nodeps,
+            reuse_policy,
             globals: cli,
             extra_path,
             resume_job: resume_job_id.as_deref().map(|id| crate::merge::ResumeJob {
@@ -1731,6 +1732,20 @@ fn packages_for_unmerge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resume_judges_binpkgs_by_its_saved_newuse() {
+        let cli = cli::parse_cli(&["em", "-K", "app-misc/foo"]);
+        let saved = cli::DepgraphFlags {
+            newuse: true,
+            ..Default::default()
+        };
+        let flags = run_depgraph_flags(&cli, Some(saved));
+        let merge_flags = cli.merge_flags();
+        let policy = binpkg::ReusePolicy::new(&merge_flags, flags.newuse, flags.changed_use);
+        assert_eq!(policy, binpkg::ReusePolicy::new(&merge_flags, true, false));
+        assert_ne!(policy, binpkg::ReusePolicy::new(&merge_flags, false, false));
+    }
 
     #[test]
     fn a_plan_failure_is_classified_through_a_step_context() {
