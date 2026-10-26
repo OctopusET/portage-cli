@@ -390,8 +390,7 @@ pub(super) fn assemble(
             output::report_masked_installed(&masked);
         }
 
-        let mut ru_violations =
-            required_use::find_violations(&data, &order, &final_policy, &ceded);
+        let mut ru_violations = required_use::find_violations(&data, &order, &final_policy, &ceded);
         // emerge aborts on the first package whose REQUIRED_USE fails.
         ru_violations.truncate(1);
         if !ru_violations.is_empty() {
@@ -471,8 +470,7 @@ pub(super) fn assemble(
         // `--ask` and no `--autounmask-write`, offer to write these now
         // instead of making the user re-run with `--autounmask-write` by
         // hand. Skipped when `--autounmask-write` already wrote them above.
-        if ask && !autounmask_write && !required_use_unsatisfied && !use_change_entries.is_empty()
-        {
+        if ask && !autounmask_write && !required_use_unsatisfied && !use_change_entries.is_empty() {
             let write_confirmed =
                 crate::config_plan::confirm_config_write(use_change_entries.len())?;
             if write_confirmed {

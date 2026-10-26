@@ -144,7 +144,11 @@ pub fn fetch_restricted(
 
 /// The active distfiles of `entry` that `RESTRICT=fetch` covers: a `fetch+` or
 /// `mirror+` URI is exempt (PMS 7.3.2).
-fn restricted_filenames(entry: &SrcUriEntry, enabled: &dyn Fn(&str) -> bool, out: &mut Vec<String>) {
+fn restricted_filenames(
+    entry: &SrcUriEntry,
+    enabled: &dyn Fn(&str) -> bool,
+    out: &mut Vec<String>,
+) {
     match entry {
         SrcUriEntry::Uri {
             filename: name,
@@ -224,7 +228,10 @@ mod tests {
         );
         let data = RepoData::from_parts(
             vec![cpv.cpn],
-            HashMap::from([(cpv.cpn, vec![(cpv.clone(), CacheEntry::parse(&text).unwrap())])]),
+            HashMap::from([(
+                cpv.cpn,
+                vec![(cpv.clone(), CacheEntry::parse(&text).unwrap())],
+            )]),
             "gentoo".into(),
             HashMap::from([(cpv.clone(), repo.into())]),
             HashMap::new(),

@@ -11,8 +11,8 @@ use portage_atom_pubgrub::{
 use portage_metadata::CacheEntry;
 
 pub(super) use crate::style::{
-    C_BOLD, C_ERROR, C_WARN, C_OLDVERSION, C_PKG, C_PKG_BINARY, C_PKG_BINARY_SELECTED, C_PKG_NOMERGE,
-    C_PKG_NOMERGE_SELECTED, C_PKG_REQUESTED, C_PKG_REQUESTED_SELECTED, C_PKG_SELECTED,
+    C_BOLD, C_ERROR, C_OLDVERSION, C_PKG, C_PKG_BINARY, C_PKG_BINARY_SELECTED, C_PKG_NOMERGE,
+    C_PKG_NOMERGE_SELECTED, C_PKG_REQUESTED, C_PKG_REQUESTED_SELECTED, C_PKG_SELECTED, C_WARN,
 };
 
 // emerge color scheme: bold green for keywords/atoms/tags, bold red/blue for flags
@@ -1369,7 +1369,10 @@ pub(super) fn total_line(
     }
     let binary = rows.iter().filter(|r| r.binary).count();
     let interactive = rows.iter().filter(|r| r.attrs.interactive).count();
-    let fetch_restrict = rows.iter().filter(|r| r.attrs.fetch_restrict.is_some()).count();
+    let fetch_restrict = rows
+        .iter()
+        .filter(|r| r.attrs.fetch_restrict.is_some())
+        .count();
     let fetch_unsatisfied = rows
         .iter()
         .filter(|r| r.attrs.fetch_restrict == Some(false))
@@ -1432,7 +1435,9 @@ pub(super) fn total_line(
         let s = if fetch_restrict == 1 { "" } else { "s" };
         line.push_str(&format!("\nFetch Restriction: {fetch_restrict} package{s}"));
         if fetch_unsatisfied > 0 {
-            line.push_str(&format!(" {C_ERROR}({fetch_unsatisfied} unsatisfied){C_ERROR:#}"));
+            line.push_str(&format!(
+                " {C_ERROR}({fetch_unsatisfied} unsatisfied){C_ERROR:#}"
+            ));
         }
     }
     line
@@ -1652,7 +1657,9 @@ fn row_use(
         let iuse = super::effective_use::iuse_set(c, &ctx.force_mask.iuse_injection);
         let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
         if !ctx.force_mask.is_empty() {
-            let (forced, masked) = ctx.force_mask.effective(cpv, slot_key.as_ref(), stable, &iuse);
+            let (forced, masked) = ctx
+                .force_mask
+                .effective(cpv, slot_key.as_ref(), stable, &iuse);
             for &f in &forced {
                 effective_use.enable(f);
             }
@@ -1673,7 +1680,9 @@ fn row_use(
                 .accept_keywords
                 .is_stable(&c.metadata.keywords, cpv, pkg.slot(), repo);
             let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
-            let forced = ctx.force_mask.forced_or_masked(cpv, slot_key.as_ref(), stable);
+            let forced = ctx
+                .force_mask
+                .forced_or_masked(cpv, slot_key.as_ref(), stable);
             crate::binpkg::EbuildFacts::new(c, &forced)
         });
         let host = merge_root == portage_atom_pubgrub::MergeRoot::Host;
@@ -1715,9 +1724,11 @@ fn row_attrs(
             ..RowAttrs::default()
         };
     };
-    let enabled = |flag: &str| matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled);
-    let interactive = portage_metadata::RestrictExpr::active_tokens(&c.metadata.properties, &enabled)
-        .contains(&"interactive");
+    let enabled =
+        |flag: &str| matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled);
+    let interactive =
+        portage_metadata::RestrictExpr::active_tokens(&c.metadata.properties, &enabled)
+            .contains(&"interactive");
     // Portage judges the mask column on the raw config: package.unmask and
     // package.accept_keywords do not clear it.
     let repo = super::repo::repo_name_of(ctx.data, cpv);
@@ -1731,7 +1742,10 @@ fn row_attrs(
     let mask = if hard_masked {
         b'#'
     } else {
-        match ctx.accept_keywords.global_keyword_mask(&c.metadata.keywords) {
+        match ctx
+            .accept_keywords
+            .global_keyword_mask(&c.metadata.keywords)
+        {
             None => b' ',
             Some(portage_resolve::repo::KeywordMask::Testing) => b'~',
             Some(portage_resolve::repo::KeywordMask::Missing) => b'*',
@@ -2567,10 +2581,22 @@ mod tests {
             fetch_restrict,
             mask,
         };
-        assert_eq!(status_field("N", false, attrs(true, None, Some(b' '))), "IN     ");
-        assert_eq!(status_field("N", false, attrs(false, Some(false), Some(b'~'))), " N F  ~");
-        assert_eq!(status_field("R", false, attrs(false, Some(true), Some(b'#'))), "  Rf  #");
-        assert_eq!(status_field("U", false, attrs(false, None, Some(b'*'))), "    U *");
+        assert_eq!(
+            status_field("N", false, attrs(true, None, Some(b' '))),
+            "IN     "
+        );
+        assert_eq!(
+            status_field("N", false, attrs(false, Some(false), Some(b'~'))),
+            " N F  ~"
+        );
+        assert_eq!(
+            status_field("R", false, attrs(false, Some(true), Some(b'#'))),
+            "  Rf  #"
+        );
+        assert_eq!(
+            status_field("U", false, attrs(false, None, Some(b'*'))),
+            "    U *"
+        );
         // `--quiet` drops the mask column.
         assert_eq!(status_field("N", false, attrs(false, None, None)), " N    ");
     }
@@ -2590,10 +2616,7 @@ mod tests {
 
     #[test]
     fn total_line_counts_binaries_interactive_and_fetch_restriction() {
-        let order = [
-            (pkg("app-misc/a"), ver("1")),
-            (pkg("app-misc/b"), ver("1")),
-        ];
+        let order = [(pkg("app-misc/a"), ver("1")), (pkg("app-misc/b"), ver("1"))];
         let rows = [
             RowStatus {
                 binary: true,
