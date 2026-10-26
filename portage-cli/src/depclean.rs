@@ -127,6 +127,20 @@ fn unresolved_deps(
     out
 }
 
+/// [`unresolved_deps`] that block the clean: none for a targeted clean, which portage lets
+/// proceed over missing dependencies (`allow_missing_deps`).
+fn blocking_unresolved(
+    targeted: bool,
+    installed: &[InstalledPackage],
+    cleanlist: &[InstalledPackage],
+    with_idepend: bool,
+) -> Vec<(String, Cpv)> {
+    if targeted {
+        return Vec::new();
+    }
+    unresolved_deps(installed, cleanlist, with_idepend)
+}
+
 /// Flatten a (already USE-evaluated) `DepEntry` tree into concrete atoms, dropping blockers
 ///
 /// A `||` group walks every branch (see module doc: an accepted over-keep simplification,
@@ -339,7 +353,12 @@ pub async fn run_with_targets(
         &target_atoms,
         with_bdeps,
     );
-    let unresolved = unresolved_deps(&installed, &cleanlist, root == "/");
+    let unresolved = blocking_unresolved(
+        !target_atoms.is_empty(),
+        &installed,
+        &cleanlist,
+        root == "/",
+    );
     if !unresolved.is_empty() {
         crate::style::error_line!(
             "Dependencies could not be completely resolved due to the following required \
@@ -464,6 +483,26 @@ mod tests {
             .map(|(d, p)| format!("{d} {p}"))
             .collect();
         assert_eq!(got, ["dev-libs/missing app-misc/topapp-1.0"]);
+    }
+
+    #[test]
+    fn targeted_clean_is_not_blocked_by_unrelated_missing_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "app-misc", "other-1.0", "dev-libs/missing", "");
+        write_fake_package(&vdb_root, "dev-libs", "orphan-1.0", "", "");
+
+        let vdb = open_vdb(tmp.path());
+        let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
+        let target = vec![Dep::parse("dev-libs/orphan").unwrap()];
+        let cleanlist = compute_cleanlist(&installed, &[], &[], &target, false);
+        assert_eq!(cleanlist.len(), 1);
+        assert!(blocking_unresolved(true, &installed, &cleanlist, false).is_empty());
+        let got: Vec<String> = blocking_unresolved(false, &installed, &cleanlist, false)
+            .into_iter()
+            .map(|(d, p)| format!("{d} {p}"))
+            .collect();
+        assert_eq!(got, ["dev-libs/missing app-misc/other-1.0"]);
     }
 
     #[test]
