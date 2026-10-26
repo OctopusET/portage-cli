@@ -93,6 +93,33 @@ impl BinpkgReuse {
     }
 }
 
+/// The `--jobs` and phase-log quiet to merge `plan` with
+///
+/// As portage does, a `PROPERTIES=interactive` package gets the console: one job, output not
+/// sent to the log alone.
+fn interactive_jobs(
+    plan: &[query::depgraph::PlannedMerge],
+    jobs: usize,
+    quiet: bool,
+) -> (usize, bool) {
+    let interactive: Vec<String> = plan
+        .iter()
+        .filter(|p| p.interactive)
+        .map(|p| p.cpv.to_string())
+        .collect();
+    if interactive.is_empty() || !quiet {
+        return (jobs, quiet);
+    }
+    crate::style::warn_line!(
+        "sending package output to stdio due to interactive package(s): {}",
+        interactive.join(" ")
+    );
+    if jobs > 1 {
+        crate::style::warn_line!("setting --jobs=1 due to the above interactive package(s)");
+    }
+    (1, false)
+}
+
 fn find_binpkg_reuse(
     planned: &query::depgraph::PlannedMerge,
     binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
@@ -444,13 +471,18 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
     // now rendered from the activity bus by `HumanStdoutSink`). `-q` silences
     // the sink too. So this `quiet` (phase-log only) is `-q || -j>1`.
     let quiet = globals.quiet() || jobs > 1;
+    let fetchonly = merge_flags.fetchonly || merge_flags.fetch_all_uri;
+    let (jobs, quiet) = if fetchonly {
+        (jobs, quiet)
+    } else {
+        interactive_jobs(plan, jobs, quiet)
+    };
     let buildpkg = merge_flags.buildpkg;
     let buildpkgonly = merge_flags.buildpkgonly;
     // `-F`/`--fetch-all-uri` is fetch-only too (just a different SRC_URI
     // resolution mode inside the fetch phase — see `merge_flags.fetch_all_uri`'s
     // own doc comment); every top-level "did anything actually get merged"
     // gate below treats the two identically.
-    let fetchonly = merge_flags.fetchonly || merge_flags.fetch_all_uri;
     let usepkg = merge_flags.usepkg;
     let getbinpkg = merge_flags.getbinpkg;
     let getbinpkgonly = merge_flags.getbinpkgonly;
@@ -1659,6 +1691,7 @@ mod entry_roots_tests {
             depend: Vec::new(),
             bdepend: Vec::new(),
             reinstall: false,
+            interactive: false,
         })
     }
 
@@ -1950,7 +1983,17 @@ mod unmerge_scheduling_tests {
             depend: Vec::new(),
             bdepend: Vec::new(),
             reinstall: false,
+            interactive: false,
         }
+    }
+
+    #[test]
+    fn an_interactive_package_gets_one_job_and_the_console() {
+        let mut plan = vec![planned("app-misc/a-1"), planned("app-misc/b-1")];
+        assert_eq!(interactive_jobs(&plan, 4, true), (4, true));
+        plan[1].interactive = true;
+        assert_eq!(interactive_jobs(&plan, 4, true), (1, false));
+        assert_eq!(interactive_jobs(&plan, 1, false), (1, false));
     }
 
     fn unmerge(victim: &str, order: UnmergeOrder, owners: &[&str]) -> PlannedUnmerge {

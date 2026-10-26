@@ -67,6 +67,8 @@ pub struct PlannedMerge {
     /// same-version USE rebuild. The merge loop must build it rather than treat
     /// the VDB entry as a resume-skip.
     pub reinstall: bool,
+    /// `PROPERTIES` names `interactive` (USE conditionals not evaluated): the build needs the terminal
+    pub interactive: bool,
 }
 
 #[derive(Default)]

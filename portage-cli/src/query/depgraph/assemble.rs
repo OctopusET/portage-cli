@@ -463,9 +463,12 @@ pub(super) fn assemble(
             let ver = &entry.version;
             let cpn = pkg.cpn();
             let cpv = Cpv::new(*cpn, ver.clone());
-            let (depend, bdepend, mut flags) = if let Some(cache) =
-                repo::find_cache(&data, pkg, ver)
-            {
+            let cache = repo::find_cache(&data, pkg, ver);
+            let interactive = cache.is_some_and(|c| {
+                portage_metadata::RestrictExpr::flat_tokens(&c.metadata.properties)
+                    .contains(&"interactive")
+            });
+            let (depend, bdepend, mut flags) = if let Some(cache) = cache {
                 let stable = accept_keywords.is_stable(&cache.metadata.keywords, &cpv, pkg.slot());
                 let effective =
                     effective_use::effective_use(&final_policy, pkg, ver, cache, stable, &ceded);
@@ -532,6 +535,7 @@ pub(super) fn assemble(
                     MergeRoot::Base => base_installed_cpvs.contains(&cpv),
                     MergeRoot::Target => target_installed_cpvs.contains(&cpv),
                 },
+                interactive,
             }
         })
         .collect();
