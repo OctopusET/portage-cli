@@ -228,6 +228,18 @@ pub(super) fn assemble(
     } else {
         HashMap::new()
     };
+    let fetch_restrict = if quiet || matches!(format, DepgraphFormat::Json) {
+        HashMap::new()
+    } else {
+        download_size::fetch_restricted(
+            &repo_path_of,
+            &distdir,
+            &data,
+            &order,
+            &final_policy,
+            &ceded,
+        )
+    };
     // Real emerge's `resolver/output.py::check_system_world`, both halves: a
     // row is bold when the package is already tracked in `@selected`, *or*
     // when this run's own targets would add it (`world_additions`, empty
@@ -260,6 +272,8 @@ pub(super) fn assemble(
         resolve_secs,
         selected: &selected,
         requested: &root_cpns,
+        package_mask: &package_mask,
+        fetch_restrict: &fetch_restrict,
     };
 
     if !quiet {
@@ -487,7 +501,12 @@ pub(super) fn assemble(
     if matches!(format, DepgraphFormat::Pretty) && verbose >= 1 {
         use std::io::Write as _;
         let mut out = anstream::stdout();
-        writeln!(out, "{}", output::total_line(&order, &installed, &sizes)).ok();
+        let rows: Vec<_> = order
+            .iter()
+            .map(|(pkg, ver)| output::row_status(&pretty_ctx, pkg, ver))
+            .collect();
+        let total = output::total_line(&order, &installed, &sizes, &rows);
+        writeln!(out, "{total}").ok();
     }
 
     // The merge plan for the build loop: ebuild paths come from the package's

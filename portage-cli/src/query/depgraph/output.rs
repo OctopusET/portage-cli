@@ -11,7 +11,7 @@ use portage_atom_pubgrub::{
 use portage_metadata::CacheEntry;
 
 pub(super) use crate::style::{
-    C_BOLD, C_ERROR, C_OLDVERSION, C_PKG, C_PKG_BINARY, C_PKG_BINARY_SELECTED, C_PKG_NOMERGE,
+    C_BOLD, C_ERROR, C_WARN, C_OLDVERSION, C_PKG, C_PKG_BINARY, C_PKG_BINARY_SELECTED, C_PKG_NOMERGE,
     C_PKG_NOMERGE_SELECTED, C_PKG_REQUESTED, C_PKG_REQUESTED_SELECTED, C_PKG_SELECTED,
 };
 
@@ -1347,10 +1347,14 @@ fn slot_repo_suffix(cache: &CacheEntry, repo_name: Interned<DefaultInterner>) ->
 /// to sit next to `--eta`'s "Expected time of completion" line, which is
 /// itself only printed once the whole plan (including those advisories) is
 /// known. See `depgraph()`'s own call site for why.
+///
+/// `rows` holds each `order` entry's [`row_status`], for the binary,
+/// interactive and fetch-restriction counts.
 pub(super) fn total_line(
     order: &[(PortagePackage, Version)],
     installed: &HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     sizes: &HashMap<Cpv, u64>,
+    rows: &[RowStatus],
 ) -> String {
     let (mut new, mut new_slot, mut up, mut down, mut re) = (0, 0, 0, 0, 0);
     for (pkg, ver) in order {
@@ -1363,10 +1367,17 @@ pub(super) fn total_line(
             _ => {}
         }
     }
+    let binary = rows.iter().filter(|r| r.binary).count();
+    let interactive = rows.iter().filter(|r| r.attrs.interactive).count();
+    let fetch_restrict = rows.iter().filter(|r| r.attrs.fetch_restrict.is_some()).count();
+    let fetch_unsatisfied = rows
+        .iter()
+        .filter(|r| r.attrs.fetch_restrict == Some(false))
+        .count();
     let plural =
         |n: usize, s: &str| format!("{C_BOLD}{n}{C_BOLD:#} {s}{}", if n == 1 { "" } else { "s" });
     // Order mirrors portage's PackageCounters.__str__: upgrades, downgrades,
-    // new, in new slot, reinstall.
+    // new, in new slot, reinstall, binary, interactive.
     let mut parts = Vec::new();
     if up > 0 {
         parts.push(plural(up, "upgrade"));
@@ -1382,6 +1393,15 @@ pub(super) fn total_line(
     }
     if re > 0 {
         parts.push(plural(re, "reinstall"));
+    }
+    if binary > 0 {
+        let noun = if binary == 1 { "binary" } else { "binaries" };
+        parts.push(format!("{C_BOLD}{binary}{C_BOLD:#} {noun}"));
+    }
+    if interactive > 0 {
+        parts.push(format!(
+            "{C_BOLD}{interactive}{C_BOLD:#} {C_WARN}interactive{C_WARN:#}"
+        ));
     }
 
     let n = order.len();
@@ -1400,22 +1420,44 @@ pub(super) fn total_line(
         ", Size of downloads: {C_BOLD}{}{C_BOLD:#}",
         format_kib(total_bytes)
     );
-    if parts.is_empty() {
+    let mut line = if parts.is_empty() {
         format!("\nTotal: {C_BOLD}{n}{C_BOLD:#} {pkgs}{downloads}")
     } else {
         format!(
             "\nTotal: {C_BOLD}{n}{C_BOLD:#} {pkgs} ({}){downloads}",
             parts.join(", ")
         )
+    };
+    if fetch_restrict > 0 {
+        let s = if fetch_restrict == 1 { "" } else { "s" };
+        line.push_str(&format!("\nFetch Restriction: {fetch_restrict} package{s}"));
+        if fetch_unsatisfied > 0 {
+            line.push_str(&format!(" {C_ERROR}({fetch_unsatisfied} unsatisfied){C_ERROR:#}"));
+        }
     }
+    line
 }
 
-/// Build the 7-char status field that follows `[ebuild ` in the merge list,
-/// placing each action letter at the fixed column portage uses so columns line
-/// up across rows: `N`/`NS` (new / new slot), `R` (reinstall), `U`/`D`
-/// (upgrade / downgrade).
-fn status_field(tag: &str, forced_rebuild: bool) -> String {
-    let mut f = [b' '; 7];
+/// The status columns of one plan row besides its action letters
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RowAttrs {
+    /// `PROPERTIES=interactive` (`I`)
+    interactive: bool,
+    /// `RESTRICT=fetch`: whether its restricted distfiles are already fetched (`f`) or not (`F`)
+    fetch_restrict: Option<bool>,
+    /// Mask column character (` `, `~`, `#`, `*`); `None` drops the column
+    mask: Option<u8>,
+}
+
+/// Build the status field that follows `[ebuild ` in the merge list, placing
+/// each letter at the fixed column portage uses so columns line up across
+/// rows: `I` (interactive), `N`/`NS` (new / new slot), `R` (reinstall), `F`/`f`
+/// (fetch restriction), `U`/`UD` (upgrade / downgrade), then the mask column.
+fn status_field(tag: &str, forced_rebuild: bool, attrs: RowAttrs) -> String {
+    let mut f = vec![b' '; 6];
+    if attrs.interactive {
+        f[0] = b'I';
+    }
     // Portage's lowercase `r` (forced rebuild, e.g. a slot-operator `:=`
     // rebind) shares the `N` column.
     if forced_rebuild {
@@ -1436,26 +1478,28 @@ fn status_field(tag: &str, forced_rebuild: bool) -> String {
         }
         _ => {}
     }
-    // SAFETY: f is an array of ASCII bytes [b' '; 7], so it's valid UTF-8
-    String::from_utf8(f.to_vec()).expect("array of ASCII spaces is valid UTF-8")
+    match attrs.fetch_restrict {
+        Some(true) => f[3] = b'f',
+        Some(false) => f[3] = b'F',
+        None => {}
+    }
+    f.extend(attrs.mask);
+    String::from_utf8(f).expect("status letters are ASCII")
 }
 
-/// Colorize the status field characters according to portage conventions:
-/// - N: green
-/// - S: green
-/// - U: cyan
-/// - D: blue
-/// - R: yellow
+/// Colorize the status field characters according to portage conventions
 fn colorize_status_field(field: &str) -> String {
     let mut result = String::new();
     for (i, c) in field.chars().enumerate() {
         let style = match (i, c) {
+            (0, 'I') | (6, '~') => C_WARN,
             (1, 'N') => C_STATUS_N,
-            (1, 'r') => C_ON,
-            (2, 'S') => C_STATUS_S,
+            (1, 'r') | (3, 'F') => C_ON,
+            (2, 'S') | (3, 'f') => C_STATUS_S,
             (2, 'R') => C_STATUS_R,
             (4, 'U') => C_STATUS_U,
             (5, 'D') => C_STATUS_D,
+            (6, '#' | '*') => C_ERROR,
             _ => Style::new(), // No color for spaces or other positions
         };
         result.push_str(&format!("{style}{c}{style:#}"));
@@ -1528,6 +1572,10 @@ pub(super) struct PrettyCtx<'a> {
     /// without a marker column — a dependency pulled in to satisfy one of
     /// these stays in the ordinary palette.
     pub requested: &'a std::collections::HashSet<portage_atom::Cpn>,
+    /// `package.mask`, for the `#` mask column
+    pub package_mask: &'a portage_resolve::repo::PolicyMaskList,
+    /// [`portage_resolve::download_size::fetch_restricted`] of the plan, for `F`/`f`
+    pub fetch_restrict: &'a HashMap<Cpv, bool>,
 }
 
 /// Print the emerge-style pretty plan, honouring each entry's
@@ -1556,6 +1604,167 @@ pub(super) fn print_pretty_rooted(
     print_pretty_with_roots(ctx, &order, &merge_roots, cross);
 }
 
+/// One row's effective USE, its parenthesised `use.force`/`use.mask` set, and
+/// whether `-k`/`-K` would reuse a local binpkg for it
+struct RowUse {
+    effective: UseConfig,
+    forced: HashSet<Interned<DefaultInterner>>,
+    binary: bool,
+}
+
+fn row_use(
+    ctx: &PrettyCtx,
+    pkg: &PortagePackage,
+    cpv: &Cpv,
+    cache: Option<&CacheEntry>,
+    merge_root: portage_atom_pubgrub::MergeRoot,
+) -> RowUse {
+    let defaults = cache
+        .map(super::effective_use::iuse_defaults)
+        .unwrap_or_default();
+    let iuse_flags = cache
+        .map(|c| super::effective_use::iuse_flags(&c.metadata))
+        .unwrap_or_default();
+    let mut effective_use = resolve_effective_use(
+        &defaults,
+        &iuse_flags,
+        ctx.defaults,
+        cpv,
+        pkg.slot(),
+        ctx.package_use,
+        ctx.env_use,
+        ctx.profile_package_use,
+        ctx.conf,
+    );
+    // `use.force`/`use.mask` (global + package + `*.stable.*`): applied to
+    // effective USE (forced on, then masked off — mask wins, matching
+    // portage), and their union is also the parenthesised-flag set portage
+    // shows in the USE string (`_create_use_string:325` sets
+    // `iuse_forced = use.force ∪ use.mask`).
+    let mut forced_display: HashSet<Interned<DefaultInterner>> = HashSet::new();
+    if let Some(c) = cache {
+        let repo = Some(super::repo::repo_name_of(ctx.data, cpv));
+        let stable = ctx
+            .accept_keywords
+            .is_stable(&c.metadata.keywords, cpv, pkg.slot(), repo);
+        let iuse = super::effective_use::iuse_set(c, &ctx.force_mask.iuse_injection);
+        let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
+        if !ctx.force_mask.is_empty() {
+            let (forced, masked) = ctx.force_mask.effective(cpv, slot_key.as_ref(), stable, &iuse);
+            for &f in &forced {
+                effective_use.enable(f);
+            }
+            for &f in &masked {
+                effective_use.disable(f);
+            }
+            forced_display = forced.union(&masked).copied().collect();
+        }
+    }
+    super::effective_use::apply_ceded(&mut effective_use, cpv.cpn, ctx.ceded);
+
+    // The same reuse test the merge applies, against the local index only. A reused binpkg
+    // is installed with the USE it was built with, so that is the USE shown.
+    let built_use = ctx.binpkg_preview.and_then(|(preview, keys)| {
+        let facts = cache.map(|c| {
+            let repo = Some(super::repo::repo_name_of(ctx.data, cpv));
+            let stable = ctx
+                .accept_keywords
+                .is_stable(&c.metadata.keywords, cpv, pkg.slot(), repo);
+            let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
+            let forced = ctx.force_mask.forced_or_masked(cpv, slot_key.as_ref(), stable);
+            crate::binpkg::EbuildFacts::new(c, &forced)
+        });
+        let host = merge_root == portage_atom_pubgrub::MergeRoot::Host;
+        preview.reusable(
+            keys,
+            host,
+            cpv,
+            ctx.build_ids.get(cpv).copied(),
+            &effective_use.enabled_flags(),
+            facts.as_ref(),
+        )
+    });
+    if let (Some(built), Some(c)) = (&built_use, cache) {
+        for flag in c.metadata.iuse.iter().map(Interned::from) {
+            if built.contains(flag.as_str()) {
+                effective_use.enable(flag);
+            } else {
+                effective_use.disable(flag);
+            }
+        }
+    }
+    RowUse {
+        effective: effective_use,
+        forced: forced_display,
+        binary: built_use.is_some(),
+    }
+}
+
+fn row_attrs(
+    ctx: &PrettyCtx,
+    cpv: &Cpv,
+    cache: Option<&CacheEntry>,
+    effective: &UseConfig,
+    binary: bool,
+) -> RowAttrs {
+    let Some(c) = cache else {
+        return RowAttrs {
+            mask: Some(b' '),
+            ..RowAttrs::default()
+        };
+    };
+    let enabled = |flag: &str| matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled);
+    let interactive = portage_metadata::RestrictExpr::active_tokens(&c.metadata.properties, &enabled)
+        .contains(&"interactive");
+    // Portage judges the mask column on the raw config: package.unmask and
+    // package.accept_keywords do not clear it.
+    let repo = super::repo::repo_name_of(ctx.data, cpv);
+    let hard_masked = portage_resolve::repo::is_masked(
+        ctx.package_mask,
+        &portage_resolve::repo::PolicyMaskList::EMPTY,
+        cpv,
+        &c.metadata.slot,
+        repo,
+    );
+    let mask = if hard_masked {
+        b'#'
+    } else {
+        match ctx.accept_keywords.global_keyword_mask(&c.metadata.keywords) {
+            None => b' ',
+            Some(portage_resolve::repo::KeywordMask::Testing) => b'~',
+            Some(portage_resolve::repo::KeywordMask::Missing) => b'*',
+        }
+    };
+    RowAttrs {
+        interactive,
+        fetch_restrict: if binary {
+            None
+        } else {
+            ctx.fetch_restrict.get(cpv).copied()
+        },
+        mask: Some(mask),
+    }
+}
+
+/// What the `Total:` line counts for one plan row
+pub(super) struct RowStatus {
+    binary: bool,
+    attrs: RowAttrs,
+}
+
+/// The [`RowStatus`] of one plan row, as [`total_line`] counts it
+pub(super) fn row_status(ctx: &PrettyCtx, pkg: &PortagePackage, ver: &Version) -> RowStatus {
+    let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+    let cache = find_cache(ctx.data, pkg, ver);
+    let RowUse {
+        effective, binary, ..
+    } = row_use(ctx, pkg, &cpv, cache, pkg.merge_root());
+    RowStatus {
+        binary,
+        attrs: row_attrs(ctx, &cpv, cache, &effective, binary),
+    }
+}
+
 /// Builds the two halves of one row of the emerge-style plan display: the
 /// bracket status column (`"[ebuild  U  ]"`), and everything after it
 /// (`cpn-ver`, old-version column, USE flags, size, destination suffix).
@@ -1582,25 +1791,27 @@ pub(super) fn format_plan_parts(
         data,
         installed,
         installed_entries,
-        defaults: defaults_layer,
-        conf,
-        env_use,
-        package_use,
-        profile_package_use,
+        defaults: _,
+        conf: _,
+        env_use: _,
+        package_use: _,
+        profile_package_use: _,
         use_expand,
         use_expand_hidden,
         flag_reqs,
         sizes,
         slot_op_cpns,
         verbose,
-        ceded,
-        force_mask,
-        accept_keywords,
-        build_ids,
-        binpkg_preview,
+        ceded: _,
+        force_mask: _,
+        accept_keywords: _,
+        build_ids: _,
+        binpkg_preview: _,
         resolve_secs: _,
         selected,
         requested,
+        package_mask: _,
+        fetch_restrict: _,
     } = ctx;
 
     let dest_suffix = match super::root_aware::display_root(merge_root, &cross.target, cross) {
@@ -1612,80 +1823,12 @@ pub(super) fn format_plan_parts(
     let req = flag_reqs.get(pkg).copied();
     let cache = find_cache(data, pkg, ver);
 
-    // emerge -p always shows USE flags; -v additionally shows the
-    // :slot/subslot::repo suffix and download size.
     let cpv = Cpv::new(*cpn, ver.clone());
-    let defaults = cache
-        .map(super::effective_use::iuse_defaults)
-        .unwrap_or_default();
-    let iuse_flags = cache
-        .map(|c| super::effective_use::iuse_flags(&c.metadata))
-        .unwrap_or_default();
-    let mut effective_use = resolve_effective_use(
-        &defaults,
-        &iuse_flags,
-        defaults_layer,
-        &cpv,
-        pkg.slot(),
-        package_use,
-        env_use,
-        profile_package_use,
-        conf,
-    );
-    // `use.force`/`use.mask` (global + package + `*.stable.*`): applied to
-    // effective USE (forced on, then masked off — mask wins, matching
-    // portage), and their union is also the parenthesised-flag set portage
-    // shows in the USE string (`_create_use_string:325` sets
-    // `iuse_forced = use.force ∪ use.mask`).
-    let mut forced_display: HashSet<Interned<DefaultInterner>> = HashSet::new();
-    if let Some(c) = cache {
-        let repo = Some(super::repo::repo_name_of(data, &cpv));
-        let stable = accept_keywords.is_stable(&c.metadata.keywords, &cpv, pkg.slot(), repo);
-        let iuse = super::effective_use::iuse_set(c, &force_mask.iuse_injection);
-        let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
-        if !force_mask.is_empty() {
-            let (forced, masked) = force_mask.effective(&cpv, slot_key.as_ref(), stable, &iuse);
-            for &f in &forced {
-                effective_use.enable(f);
-            }
-            for &f in &masked {
-                effective_use.disable(f);
-            }
-            forced_display = forced.union(&masked).copied().collect();
-        }
-    }
-    super::effective_use::apply_ceded(&mut effective_use, *cpn, ceded);
-
-    // The same reuse test the merge applies, against the local index only. A reused binpkg
-    // is installed with the USE it was built with, so that is the USE shown.
-    let built_use = binpkg_preview.and_then(|(preview, keys)| {
-        let facts = cache.map(|c| {
-            let repo = Some(super::repo::repo_name_of(data, &cpv));
-            let stable = accept_keywords.is_stable(&c.metadata.keywords, &cpv, pkg.slot(), repo);
-            let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
-            let forced = force_mask.forced_or_masked(&cpv, slot_key.as_ref(), stable);
-            crate::binpkg::EbuildFacts::new(c, &forced)
-        });
-        let host = merge_root == portage_atom_pubgrub::MergeRoot::Host;
-        preview.reusable(
-            keys,
-            host,
-            &cpv,
-            build_ids.get(&cpv).copied(),
-            &effective_use.enabled_flags(),
-            facts.as_ref(),
-        )
-    });
-    if let (Some(built), Some(c)) = (&built_use, cache) {
-        for flag in c.metadata.iuse.iter().map(Interned::from) {
-            if built.contains(flag.as_str()) {
-                effective_use.enable(flag);
-            } else {
-                effective_use.disable(flag);
-            }
-        }
-    }
-    let is_binary = built_use.is_some();
+    let RowUse {
+        effective: effective_use,
+        forced: forced_display,
+        binary: is_binary,
+    } = row_use(ctx, pkg, &cpv, cache, merge_root);
 
     let previous = previous_entry(pkg, ver, installed_entries);
 
@@ -1778,7 +1921,8 @@ pub(super) fn format_plan_parts(
     // letter — padded to the same 14-char bracket width `ebuild `/`binary `
     // plus their 7-char status field already have.
     let (kind, pad, colored_field) = if in_plan {
-        let field = status_field(tag, slot_op_cpns.contains(cpn));
+        let attrs = row_attrs(ctx, &cpv, cache, &effective_use, is_binary);
+        let field = status_field(tag, slot_op_cpns.contains(cpn), attrs);
         (
             if is_binary { "binary" } else { "ebuild" },
             " ",
@@ -2357,6 +2501,12 @@ mod tests {
         })
     }
 
+    const SHOWN: RowAttrs = RowAttrs {
+        interactive: false,
+        fetch_restrict: None,
+        mask: Some(b' '),
+    };
+
     #[test]
     fn eapi_hint_follows_an_eapi_masked_target_only() {
         let target = |reason: FilterReason| UnsatisfiableTarget {
@@ -2389,8 +2539,64 @@ mod tests {
 
     #[test]
     fn status_field_marks_a_downgrade_ud() {
-        assert_eq!(status_field("D", false), "    UD ");
-        assert_eq!(status_field("U", false), "    U  ");
+        assert_eq!(status_field("D", false, SHOWN), "    UD ");
+        assert_eq!(status_field("U", false, SHOWN), "    U  ");
+    }
+
+    #[test]
+    fn status_field_fills_the_interactive_fetch_and_mask_columns() {
+        let attrs = |interactive, fetch_restrict, mask| RowAttrs {
+            interactive,
+            fetch_restrict,
+            mask,
+        };
+        assert_eq!(status_field("N", false, attrs(true, None, Some(b' '))), "IN     ");
+        assert_eq!(status_field("N", false, attrs(false, Some(false), Some(b'~'))), " N F  ~");
+        assert_eq!(status_field("R", false, attrs(false, Some(true), Some(b'#'))), "  Rf  #");
+        assert_eq!(status_field("U", false, attrs(false, None, Some(b'*'))), "    U *");
+        // `--quiet` drops the mask column.
+        assert_eq!(status_field("N", false, attrs(false, None, None)), " N    ");
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                chars.by_ref().find(|&c| c == 'm');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn total_line_counts_binaries_interactive_and_fetch_restriction() {
+        let order = [
+            (pkg("app-misc/a"), ver("1")),
+            (pkg("app-misc/b"), ver("1")),
+        ];
+        let rows = [
+            RowStatus {
+                binary: true,
+                attrs: SHOWN,
+            },
+            RowStatus {
+                binary: false,
+                attrs: RowAttrs {
+                    interactive: true,
+                    fetch_restrict: Some(false),
+                    mask: Some(b' '),
+                },
+            },
+        ];
+        let line = strip_ansi(&total_line(&order, &HashMap::new(), &HashMap::new(), &rows));
+        assert_eq!(
+            line,
+            "\nTotal: 2 packages (2 new, 1 binary, 1 interactive), Size of downloads: 0 KiB\n\
+             Fetch Restriction: 1 package (1 unsatisfied)"
+        );
     }
 
     #[test]

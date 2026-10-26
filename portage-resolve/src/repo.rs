@@ -576,6 +576,22 @@ impl AcceptKeywords {
             .is_stable_for(&keywords, wild)
     }
 
+    /// Why the global `ACCEPT_KEYWORDS` alone (no `package.accept_keywords`)
+    /// rejects `keywords`, as emerge's `-p` mask column shows it
+    pub fn global_keyword_mask(&self, keywords: &[Keyword]) -> Option<KeywordMask> {
+        if self.global.accepts(keywords, KeywordWild::default()) {
+            return None;
+        }
+        let testing_of_accepted_arch = keywords
+            .iter()
+            .any(|kw| kw.stability == Stability::Testing && self.global.stable.contains(&kw.arch));
+        Some(if testing_of_accepted_arch {
+            KeywordMask::Testing
+        } else {
+            KeywordMask::Missing
+        })
+    }
+
     /// The keyword token an autounmask would need: the version is not accepted
     /// Returns `~arch` when a testing keyword for the host arch is present,
     /// otherwise `**` for fully unkeyworded / foreign-arch-only versions so
@@ -632,6 +648,15 @@ impl AtomIndex {
             (None, _) => wild.next(),
         })
     }
+}
+
+/// See [`AcceptKeywords::global_keyword_mask`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordMask {
+    /// Only a testing keyword of an accepted stable arch (`~`)
+    Testing,
+    /// No keyword for an accepted arch at all (`*`)
+    Missing,
 }
 
 /// Global `ACCEPT_LICENSE` plus per-package `package.license`
@@ -2801,6 +2826,28 @@ mod tests {
             ],
         );
         assert!(reversed.accepts(&keywords, &cpv, None, None));
+    }
+
+    #[test]
+    fn global_keyword_mask_ignores_package_accept_keywords() {
+        let arch = Arch::intern("arm64");
+        let tok = |s: &str| AcceptToken::parse(s).unwrap();
+        let kws = |s: &str| Keyword::parse_line(s).unwrap();
+        let per = AcceptKeywords::new(
+            &arch,
+            &[tok("arm64")],
+            vec![(atom("dev-libs/foo"), vec![tok("~arm64")])],
+        );
+        assert_eq!(per.global_keyword_mask(&kws("arm64")), None);
+        assert_eq!(
+            per.global_keyword_mask(&kws("~arm64")),
+            Some(KeywordMask::Testing)
+        );
+        assert_eq!(
+            per.global_keyword_mask(&kws("~amd64")),
+            Some(KeywordMask::Missing)
+        );
+        assert_eq!(per.global_keyword_mask(&[]), Some(KeywordMask::Missing));
     }
 
     #[test]

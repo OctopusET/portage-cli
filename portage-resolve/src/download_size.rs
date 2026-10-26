@@ -4,6 +4,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::{CededFlag, PortagePackage, UseFlagState};
+use portage_metadata::{RestrictExpr, SrcUriEntry};
 use portage_repo::{Manifest, ManifestEntry};
 
 use crate::effective_use::effective_use;
@@ -89,6 +90,95 @@ pub fn compute(
     sizes
 }
 
+/// `RESTRICT=fetch` state of each fetch-restricted package in `order`:
+/// `true` when every restricted distfile is already in `DISTDIR` (emerge's `f`),
+/// `false` when one is missing (`F`). Unrestricted packages are absent.
+pub fn fetch_restricted(
+    repo_path_of: &dyn Fn(&Cpv) -> Utf8PathBuf,
+    distdir: &str,
+    data: &RepoData,
+    order: &[(PortagePackage, Version)],
+    policy: &ResolvePolicy,
+    ceded: &[CededFlag],
+) -> HashMap<Cpv, bool> {
+    let distdir = Utf8Path::new(distdir);
+    let mut out = HashMap::new();
+    for (pkg, ver) in order {
+        if pkg.is_virtual() {
+            continue;
+        }
+        let Some(cache) = find_cache(data, pkg, ver) else {
+            continue;
+        };
+        if !RestrictExpr::flat_tokens(&cache.metadata.restrict).contains(&"fetch") {
+            continue;
+        }
+        let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+        let repo = crate::repo::repo_name_of(data, &cpv);
+        let stable = policy.accept_keywords.is_stable(
+            &cache.metadata.keywords,
+            &cpv,
+            pkg.slot(),
+            Some(repo),
+        );
+        let effective = effective_use(policy, pkg, ver, cache, repo, stable, ceded);
+        let enabled = |flag: &str| -> bool {
+            matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled)
+        };
+        if !RestrictExpr::active_tokens(&cache.metadata.restrict, &enabled).contains(&"fetch") {
+            continue;
+        }
+        let mut restricted = Vec::new();
+        for entry in cache.metadata.src_uri.list() {
+            restricted_filenames(entry, &enabled, &mut restricted);
+        }
+        let manifest = load_manifest_sizes(&repo_path_of(&cpv), pkg.cpn());
+        let satisfied = restricted.iter().all(|filename| {
+            std::fs::metadata(distdir.join(filename).as_std_path())
+                .is_ok_and(|m| manifest.get(filename).is_none_or(|&size| m.len() == size))
+        });
+        out.insert(cpv, satisfied);
+    }
+    out
+}
+
+/// The active distfiles of `entry` that `RESTRICT=fetch` covers: a `fetch+` or
+/// `mirror+` URI is exempt (PMS 7.3.2).
+fn restricted_filenames(entry: &SrcUriEntry, enabled: &dyn Fn(&str) -> bool, out: &mut Vec<String>) {
+    match entry {
+        SrcUriEntry::Uri {
+            filename: name,
+            restriction,
+            ..
+        }
+        | SrcUriEntry::Renamed {
+            target: name,
+            restriction,
+            ..
+        } => {
+            if !matches!(restriction.as_deref(), Some("fetch" | "mirror")) {
+                out.push(name.clone());
+            }
+        }
+        SrcUriEntry::UseConditional {
+            flag,
+            negated,
+            entries,
+        } => {
+            if enabled(flag) != *negated {
+                for e in entries {
+                    restricted_filenames(e, enabled, out);
+                }
+            }
+        }
+        SrcUriEntry::Group(entries) => {
+            for e in entries {
+                restricted_filenames(e, enabled, out);
+            }
+        }
+    }
+}
+
 /// Parse `<repo>/<cat>/<pkg>/Manifest` into a `filename -> size` map
 fn load_manifest_sizes(repo_path: &Utf8Path, cpn: &Cpn) -> HashMap<String, u64> {
     let path = repo_path
@@ -126,27 +216,23 @@ mod tests {
         std::fs::write(dir.join("Manifest"), line).unwrap();
     }
 
-    #[test]
-    fn an_overlay_package_is_sized_from_its_own_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
-        let (main, overlay) = (root.join("main"), root.join("overlay"));
-        write_manifest(&main, 1024);
-        write_manifest(&overlay, 4096);
-
+    // `app-misc/foo-1` from `repo` with the given extra md5-cache lines
+    fn foo(extra: &str, repo: &str) -> (Cpv, RepoData) {
         let cpv = Cpv::parse("app-misc/foo-1").unwrap();
-        let entry = CacheEntry::parse(
-            "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nSRC_URI=https://x/foo-1.tar.gz\n",
-        )
-        .unwrap();
+        let text = format!(
+            "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nSRC_URI=https://x/foo-1.tar.gz\n{extra}"
+        );
         let data = RepoData::from_parts(
             vec![cpv.cpn],
-            HashMap::from([(cpv.cpn, vec![(cpv.clone(), entry)])]),
+            HashMap::from([(cpv.cpn, vec![(cpv.clone(), CacheEntry::parse(&text).unwrap())])]),
             "gentoo".into(),
-            HashMap::from([(cpv.clone(), "overlay".into())]),
+            HashMap::from([(cpv.clone(), repo.into())]),
             HashMap::new(),
         );
+        (cpv, data)
+    }
 
+    fn with_policy<R>(f: impl FnOnce(&ResolvePolicy) -> R) -> R {
         let accept_keywords =
             AcceptKeywords::from_global(&gentoo_core::Arch::intern("amd64"), &["amd64"]);
         let licenses = AcceptOverlay::new(
@@ -155,7 +241,7 @@ mod tests {
         );
         let layer = portage_atom_pubgrub::UseLayer::default();
         let force_mask = ForceMask::default();
-        let policy = ResolvePolicy {
+        f(&ResolvePolicy {
             accept_keywords: &accept_keywords,
             package_mask: &PolicyMaskList::EMPTY,
             package_unmask: &PolicyMaskList::EMPTY,
@@ -169,8 +255,17 @@ mod tests {
             profile_package_use: &[],
             force_mask: &force_mask,
             facts: None,
-        };
+        })
+    }
 
+    #[test]
+    fn an_overlay_package_is_sized_from_its_own_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let (main, overlay) = (root.join("main"), root.join("overlay"));
+        write_manifest(&main, 1024);
+        write_manifest(&overlay, 4096);
+        let (cpv, data) = foo("", "overlay");
         let repo_path_of = |c: &Cpv| {
             if crate::repo::repo_name_of(&data, c).as_str() == "overlay" {
                 overlay.clone()
@@ -180,7 +275,33 @@ mod tests {
         };
         let order = [(PortagePackage::unslotted(cpv.cpn), cpv.version.clone())];
         let distdir = root.join("distfiles");
-        let sizes = compute(&repo_path_of, distdir.as_str(), &data, &order, &policy, &[]);
+        let sizes = with_policy(|policy| {
+            compute(&repo_path_of, distdir.as_str(), &data, &order, policy, &[])
+        });
         assert_eq!(sizes.get(&cpv), Some(&4096));
+    }
+
+    #[test]
+    fn fetch_restriction_is_satisfied_once_the_distfile_is_in_distdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let repo = root.join("repo");
+        let distdir = root.join("distfiles");
+        std::fs::create_dir_all(&distdir).unwrap();
+        write_manifest(&repo, 3);
+        let repo_path_of = |_: &Cpv| repo.clone();
+        let check = |extra: &str| {
+            let (cpv, data) = foo(extra, "gentoo");
+            let order = [(PortagePackage::unslotted(cpv.cpn), cpv.version.clone())];
+            with_policy(|policy| {
+                fetch_restricted(&repo_path_of, distdir.as_str(), &data, &order, policy, &[])
+            })
+            .get(&cpv)
+            .copied()
+        };
+        assert_eq!(check(""), None);
+        assert_eq!(check("RESTRICT=fetch\n"), Some(false));
+        std::fs::write(distdir.join("foo-1.tar.gz"), "abc").unwrap();
+        assert_eq!(check("RESTRICT=fetch\n"), Some(true));
     }
 }
