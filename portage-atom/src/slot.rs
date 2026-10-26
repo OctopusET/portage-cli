@@ -260,8 +260,8 @@ pub(crate) fn parse_slot_dep(input: &mut &str) -> ModalResult<SlotDep> {
     alt((
         // Just operator: := or :*
         parse_slot_operator.map(SlotDep::Operator),
-        // Slot with optional operator: :0, :0=, :0/1.2
-        (parse_slot, opt(parse_slot_operator)).map(|(slot, op)| SlotDep::Slot {
+        // Slot with optional operator: :0, :0=, :0/1.2; `*` only stands alone
+        (parse_slot, opt('='.value(SlotOperator::Equal))).map(|(slot, op)| SlotDep::Slot {
             slot: Some(slot),
             op,
         }),
@@ -273,6 +273,15 @@ pub(crate) fn parse_slot_dep(input: &mut &str) -> ModalResult<SlotDep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn star_operator_only_without_a_named_slot() {
+        assert!(SlotDep::parse("0*").is_err());
+        assert!(SlotDep::parse("0/1*").is_err());
+        for ok in ["*", "=", "0=", "0/1.2="] {
+            assert!(SlotDep::parse(ok).is_ok(), "{ok}");
+        }
+    }
 
     #[test]
     fn test_slot_parsing() {
