@@ -187,16 +187,24 @@ fn compute_cleanlist(
     let mut kept: HashSet<Cpv> = HashSet::new();
     let mut queue: VecDeque<Cpv> = VecDeque::new();
 
-    let seed = |dep: &Dep, kept: &mut HashSet<Cpv>, queue: &mut VecDeque<Cpv>| {
-        for pkg in matching(dep, installed) {
-            if kept.insert(pkg.cpv().clone()) {
-                queue.push_back(pkg.cpv().clone());
-            }
+    let keep = |pkg: &InstalledPackage, kept: &mut HashSet<Cpv>, queue: &mut VecDeque<Cpv>| {
+        if kept.insert(pkg.cpv().clone()) {
+            queue.push_back(pkg.cpv().clone());
         }
     };
+    // A set or dependency atom pulls in one package, as the resolver would pick: the highest
+    // installed match, so an unslotted atom does not keep every older slot.
+    let best = |dep: &Dep| matching(dep, installed).max_by(|a, b| a.cpv().cmp(b.cpv()));
 
-    for dep in world_atoms.iter().chain(exclude_atoms.iter()) {
-        seed(dep, &mut kept, &mut queue);
+    for dep in world_atoms {
+        if let Some(pkg) = best(dep) {
+            keep(pkg, &mut kept, &mut queue);
+        }
+    }
+    for dep in exclude_atoms {
+        for pkg in matching(dep, installed) {
+            keep(pkg, &mut kept, &mut queue);
+        }
     }
 
     if !target_atoms.is_empty() {
@@ -204,8 +212,8 @@ fn compute_cleanlist(
             let is_target = target_atoms
                 .iter()
                 .any(|d| d.matches_cpv(pkg.cpv(), pkg.slot().ok().as_ref()));
-            if !is_target && kept.insert(pkg.cpv().clone()) {
-                queue.push_back(pkg.cpv().clone());
+            if !is_target {
+                keep(pkg, &mut kept, &mut queue);
             }
         }
     }
@@ -215,7 +223,9 @@ fn compute_cleanlist(
             continue;
         };
         for dep in own_atoms(pkg, with_bdeps) {
-            seed(&dep, &mut kept, &mut queue);
+            if let Some(dep_pkg) = best(&dep) {
+                keep(dep_pkg, &mut kept, &mut queue);
+            }
         }
     }
 
@@ -434,6 +444,37 @@ mod tests {
 
         assert_eq!(cleanlist.len(), 1);
         assert_eq!(cleanlist[0].cpv().cpn.to_string(), "dev-libs/orphan");
+    }
+
+    #[test]
+    fn unslotted_atom_keeps_only_the_highest_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vdb_root = tmp.path().join("var/db/pkg");
+        write_fake_package(&vdb_root, "dev-lang", "python-3.11.9", "", "");
+        write_fake_package(&vdb_root, "dev-lang", "python-3.12.4", "", "");
+        std::fs::write(vdb_root.join("dev-lang/python-3.11.9/SLOT"), "3.11").unwrap();
+        std::fs::write(vdb_root.join("dev-lang/python-3.12.4/SLOT"), "3.12").unwrap();
+        write_fake_package(
+            &vdb_root,
+            "app-misc",
+            "tool-1.0",
+            "dev-lang/python:3.11",
+            "",
+        );
+
+        let vdb = open_vdb(tmp.path());
+        let installed: Vec<InstalledPackage> = vdb.packages().into_iter().collect();
+        let world = vec![Dep::parse("dev-lang/python").unwrap()];
+        let cleanlist = compute_cleanlist(&installed, &world, &[], &[], false);
+        let mut names: Vec<String> = cleanlist.iter().map(|p| p.cpv().to_string()).collect();
+        names.sort();
+        assert_eq!(names, ["app-misc/tool-1.0", "dev-lang/python-3.11.9"]);
+
+        let world = vec![
+            Dep::parse("dev-lang/python").unwrap(),
+            Dep::parse("app-misc/tool").unwrap(),
+        ];
+        assert!(compute_cleanlist(&installed, &world, &[], &[], false).is_empty());
     }
 
     #[test]
