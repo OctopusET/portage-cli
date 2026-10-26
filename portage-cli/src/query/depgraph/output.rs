@@ -535,20 +535,7 @@ pub(super) struct UnsatisfiableTarget {
 
 /// Portage's `(masked by: …)` parenthetical for one filtered version
 fn masked_by(reasons: &[FilterReason]) -> String {
-    let parts: Vec<String> = reasons
-        .iter()
-        .map(|r| match r {
-            // `keyword_needed` reports `**` when the arch has no keyword at all.
-            FilterReason::Keyword(kw) if kw == "**" => "missing keyword".to_string(),
-            FilterReason::Keyword(kw) => format!("{kw} keyword"),
-            FilterReason::Masked => "package.mask".to_string(),
-            FilterReason::License(l) => format!("{} license(s)", l.join(" ")),
-            FilterReason::Properties(p) => format!("{} propert(y/ies)", p.join(" ")),
-            FilterReason::Restrict(r) => format!("{} restriction(s)", r.join(" ")),
-            FilterReason::Invalid(why) => format!("invalid: {why}"),
-        })
-        .collect();
-    parts.join(", ")
+    super::repo::filter_reason_text(reasons)
 }
 
 /// A line as styled runs: atoms and versions green, the `::repo` suffix in the
@@ -612,6 +599,16 @@ fn target_lines(target: &UnsatisfiableTarget, data: &RepoData, multi_repo: bool)
             seg(plain_style, format!(" ({})", masked_by(&c.reasons))),
         ]
     }));
+    let eapi_masked = target
+        .reasons
+        .iter()
+        .any(|c| c.reasons.iter().any(|r| matches!(r, FilterReason::Eapi(_))));
+    if eapi_masked {
+        lines.push(vec![seg(
+            plain_style,
+            "  em must be upgraded before EAPI masked packages can be installed",
+        )]);
+    }
     lines
 }
 

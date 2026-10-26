@@ -122,7 +122,7 @@ Ebuild metadata cache parser.
 
 - `struct CacheEntry<I>` — Parsed md5-cache entry: `parse()`, `from_kv_pairs()`, `serialize()`
 - `struct RawCacheEntry<I>` — Unparsed raw cache entry
-- `struct EbuildMetadata<I>` — 21 metadata fields (eapi, description, slot, homepage, src_uri, license, keywords, iuse, required_use, restrict, properties, depend, rdepend, bdepend, pdepend, idepend, inherit, inherited, defined_phases)
+- `struct EbuildMetadata<I>` — 21 metadata fields (eapi, description, slot, homepage, src_uri, license, keywords, iuse, required_use, restrict, properties, depend, rdepend, bdepend, pdepend, idepend, inherit, inherited, defined_phases); `invalid` keeps fields that failed to parse (and an unsupported EAPI) verbatim
 - `enum Eapi` — EAPI 0–9 with feature-query methods
 - `enum Phase` — 15 ebuild phase functions
 - `struct Keyword<I>` / `enum Stability` — `Stable`, `Testing`, `Disabled`, `DisabledAll`
@@ -735,10 +735,12 @@ its flag in the target's IUSE. em reads the declared IUSE only, not the
 profile's `IUSE_IMPLICIT` / `USE_EXPAND_IMPLICIT`, so such a dep on an
 implicit flag (`elibc_*`, `kernel_*`) rejects every candidate. The tree has none.
 
-**Invalid metadata.** A version whose dependency field fails to parse is masked
-`invalid` for the solver, but the `:*` slot map (built for the whole tree from
-unforced metadata) still counts its slot, and the query and list views still
-show it.
+**Invalid metadata.** An ebuild with an unsupported EAPI, an unparsable dependency field,
+LICENSE, KEYWORDS, IUSE, REQUIRED_USE, RESTRICT or PROPERTIES, or a USE conditional outside
+`IUSE_EFFECTIVE` is masked (`EAPI N`, `invalid: ...`) as emerge does. Narrower than emerge: the
+IUSE check covers EAPI 5+ only and skips `[flag?]` USE-dep conditionals, a SRC_URI syntax error
+is not masked, and the `:*` slot map and the query views still count a version whose dependency
+field fails to parse.
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC

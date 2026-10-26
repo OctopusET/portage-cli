@@ -129,6 +129,11 @@ impl IuseInjection {
         }
     }
 
+    /// Whether no profile contributed anything, so `IUSE_EFFECTIVE` is only the ebuild's IUSE
+    pub fn is_empty(&self) -> bool {
+        self.injected.is_empty() && self.non_injected.is_empty()
+    }
+
     /// The cached profile-invariant `IUSE_EFFECTIVE` half for `eapi`'s injection class
     fn profile_part(&self, eapi: Eapi) -> &HashSet<Flag> {
         if eapi.has_profile_iuse_injection() {

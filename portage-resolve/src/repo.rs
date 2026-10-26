@@ -24,8 +24,10 @@ pub enum FilterReason {
     Properties(Vec<String>),
     /// One or more `RESTRICT` tokens not in ACCEPT_RESTRICT
     Restrict(Vec<String>),
-    /// A dependency field failed to parse, with Portage's `FIELD: error` summary
-    Invalid(String),
+    /// An EAPI this package manager cannot read
+    Eapi(String),
+    /// Metadata that fails validation, one message per problem
+    Invalid(Vec<String>),
 }
 
 impl FilterReason {
@@ -1537,6 +1539,11 @@ impl Adapter<'_> {
         version_accepted_for(&self.policy(), cpv, cache, repo_name_of(self.data, cpv))
     }
 
+    /// Whether a widened solve may pick this rejected version: no unmask makes invalid metadata usable
+    fn widenable(&self, cache: &CacheEntry) -> bool {
+        self.autounmask_widen && invalid_reason(&self.policy(), &cache.metadata).is_none()
+    }
+
     /// The newest keyword/mask/license-accepted version of `cpn`, with its cache entry
     ///
     /// `None` when the CPN is absent from the repo or has no accepted version.
@@ -1745,7 +1752,7 @@ impl PackageRepository for Adapter<'_> {
         if let Some(entries) = self.data.versions.get(cpn) {
             for (cpv, cache) in entries {
                 let accepted = self.version_accepted(cpv, cache);
-                if !accepted && !self.autounmask_widen {
+                if !accepted && !self.widenable(cache) {
                     continue;
                 }
                 // SLOT is mandatory in md5-cache (`CacheEntry::parse` rejects a
@@ -1804,7 +1811,7 @@ impl PackageRepository for Adapter<'_> {
                     .iter()
                     .filter_map(|(cpv, cache)| {
                         let accepted = self.version_accepted(cpv, cache);
-                        if !accepted && !self.autounmask_widen {
+                        if !accepted && !self.widenable(cache) {
                             return None;
                         }
                         let meta = &cache.metadata;
@@ -2133,6 +2140,7 @@ fn version_accepted_uncached(
         && license_ok_for(cpv, meta, policy, repo, effective)
         && properties_ok_for(cpv, meta, policy, repo, effective)
         && restrict_ok_for(cpv, meta, policy, repo, effective)
+        && invalid_reason(policy, meta).is_none()
 }
 
 /// Whether a dependency field of `meta` failed to parse, which Portage masks as `invalid`
@@ -2236,10 +2244,52 @@ pub fn filter_reason_text(reasons: &[FilterReason]) -> String {
             FilterReason::License(l) => format!("{} license(s)", l.join(" ")),
             FilterReason::Properties(p) => format!("{} propert(y/ies)", p.join(" ")),
             FilterReason::Restrict(r) => format!("{} restriction(s)", r.join(" ")),
-            FilterReason::Invalid(why) => format!("invalid: {why}"),
+            FilterReason::Eapi(e) => format!("EAPI {e}"),
+            FilterReason::Invalid(msgs) => invalid_text(msgs),
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Portage's `invalid: <message>` mask parts
+pub fn invalid_text(msgs: &[String]) -> String {
+    msgs.iter()
+        .map(|m| format!("invalid: {m}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Why `meta` is unusable whatever the user accepts: an unsupported EAPI or invalid metadata
+///
+/// USE conditionals are checked against `IUSE_EFFECTIVE` only for EAPIs with profile IUSE
+/// injection, and only when a profile supplied it.
+pub fn invalid_reason(
+    policy: &ResolvePolicy,
+    meta: &portage_metadata::EbuildMetadata,
+) -> Option<FilterReason> {
+    if let Some(eapi) = meta.unsupported_eapi() {
+        return Some(FilterReason::Eapi(eapi.to_string()));
+    }
+    let mut msgs: Vec<String> = meta
+        .invalid
+        .iter()
+        .map(|f| format!("{}: {}", f.key, f.message))
+        .collect();
+    let injection = &policy.force_mask.iuse_injection;
+    if meta.eapi.has_profile_iuse_injection() && !injection.is_empty() {
+        let iuse = crate::force_mask::iuse_effective_set(
+            meta.eapi,
+            meta.iuse.iter().map(Interned::from),
+            injection,
+        );
+        let mut seen = HashSet::new();
+        for (key, flag) in meta.conditional_flags() {
+            if !iuse.contains(&Interned::intern(flag)) && seen.insert((key, flag)) {
+                msgs.push(format!("{key}: USE flag '{flag}' is not in IUSE"));
+            }
+        }
+    }
+    (!msgs.is_empty()).then_some(FilterReason::Invalid(msgs))
 }
 
 /// [`filter_reasons_for`] narrowed to the versions `dep` itself matches
@@ -2290,6 +2340,22 @@ pub fn filter_reasons_for(
 
         let mut reasons = Vec::new();
 
+        match invalid_reason(policy, meta) {
+            // portage reads nothing else of an ebuild whose EAPI it cannot read
+            Some(eapi @ FilterReason::Eapi(_)) => {
+                candidates.push(AutounmaskCandidate {
+                    cpv: cpv.clone(),
+                    slot: None,
+                    reasons: vec![eapi],
+                    widened: false,
+                    live_upper_bound: None,
+                    is_live: false,
+                });
+                continue;
+            }
+            Some(invalid) => reasons.push(invalid),
+            None => {}
+        }
         if let Some(kw) =
             policy
                 .accept_keywords
@@ -2350,7 +2416,7 @@ pub fn filter_reasons_for(
             }
         }
         if deps_invalid(meta) {
-            reasons.push(FilterReason::Invalid(meta.parse_failure_summary()));
+            reasons.push(FilterReason::Invalid(vec![meta.parse_failure_summary()]));
         }
 
         if !reasons.is_empty() {
@@ -4027,6 +4093,78 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_eapi_and_invalid_metadata_are_masked_not_dropped() {
+        let entry = |extra: &str| format!("EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n{extra}");
+        let data = repo_with_many(&[
+            ("app-misc/thing-1.0", &entry("")),
+            ("app-misc/thing-2.0", "EAPI=10\n"),
+            ("app-misc/thing-3.0", &entry("LICENSE=|| (\n")),
+            ("app-misc/thing-4.0", &entry("DEPEND=foo? ( dev-libs/a )\n")),
+            (
+                "app-misc/thing-5.0",
+                &entry("IUSE=foo\nDEPEND=foo? ( dev-libs/a )\n"),
+            ),
+        ]);
+        let arch = Arch::intern("amd64");
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let force_mask = ForceMask {
+            iuse_injection: crate::force_mask::IuseInjection::new(
+                vec!["prefix".into()],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                HashMap::new(),
+            ),
+            ..Default::default()
+        };
+        let policy = ResolvePolicy {
+            accept_keywords: &ak,
+            package_mask: &PolicyMaskList::EMPTY,
+            package_unmask: &PolicyMaskList::EMPTY,
+            accept_licenses: &AcceptOverlay::new(accept_all_licenses(), Vec::new()),
+            accept_properties: &AcceptProperties::new(accept_all_licenses(), Vec::new()),
+            accept_restrict: &AcceptRestrict::new(accept_all_licenses(), Vec::new()),
+            defaults: empty_layer(),
+            conf: empty_layer(),
+            env_use: empty_layer(),
+            package_use: &[],
+            profile_package_use: &[],
+            force_mask: &force_mask,
+            facts: None,
+        };
+        let cpn = Cpn::try_new("app-misc/thing").expect("cpn parses");
+        let found = filter_reasons_for(
+            &data,
+            &cpn,
+            &portage_atom_pubgrub::PortageVersionSet::any(),
+            &policy,
+        );
+        let text: Vec<(String, String)> = found
+            .iter()
+            .map(|c| (c.cpv.version.to_string(), filter_reason_text(&c.reasons)))
+            .collect();
+        assert_eq!(text.len(), 3, "{text:?}");
+        assert_eq!(text[0], ("2.0".into(), "EAPI 10".into()));
+        assert!(
+            text[1].0 == "3.0" && text[1].1.starts_with("invalid: LICENSE: "),
+            "{text:?}"
+        );
+        assert_eq!(
+            text[2],
+            (
+                "4.0".into(),
+                "invalid: DEPEND: USE flag 'foo' is not in IUSE".into()
+            )
+        );
+        let accepted: Vec<String> = data.versions[&cpn]
+            .iter()
+            .filter(|(cpv, cache)| version_accepted_for(&policy, cpv, cache, data.repo_name))
+            .map(|(cpv, _)| cpv.version.to_string())
+            .collect();
+        assert_eq!(accepted, ["1.0", "5.0"]);
+    }
+
+    #[test]
     fn filter_reasons_are_empty_when_a_candidate_is_accepted() {
         let data = repo_with_many(&[(
             "app-misc/thing-1.0",
@@ -4764,7 +4902,7 @@ mod tests {
         );
         assert!(
             matches!(reasons.as_slice(), [c] if matches!(c.reasons.as_slice(),
-                [FilterReason::Invalid(why)] if why.starts_with("RDEPEND: ")))
+                [FilterReason::Invalid(why)] if why[0].starts_with("RDEPEND: ")))
         );
     }
 
