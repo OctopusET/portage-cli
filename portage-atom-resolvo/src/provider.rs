@@ -1524,7 +1524,7 @@ fn resolve_use_deps(dep: &Dep, use_config: &UseConfig) -> Vec<(Interned<DefaultI
             }
             UseDepKind::ConditionalInverse => {
                 if !parent_flag_on {
-                    constraints.push((ud.flag, true));
+                    constraints.push((ud.flag, false));
                 }
             }
             UseDepKind::Equal => {
@@ -1538,4 +1538,26 @@ fn resolve_use_deps(dep: &Dep, use_config: &UseConfig) -> Vec<(Interned<DefaultI
     #[allow(clippy::unnecessary_sort_by)]
     constraints.sort_by(|a, b| a.0.cmp(&b.0));
     constraints
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn use_config(enabled: &[&str]) -> UseConfig {
+        UseConfig {
+            enabled: enabled.iter().copied().map(Interned::intern).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn conditional_inverse_disables_the_flag_when_parent_lacks_it() {
+        let dep = Dep::parse("cat/pkg[!foo?]").unwrap();
+        assert_eq!(
+            resolve_use_deps(&dep, &use_config(&[])),
+            vec![(Interned::intern("foo"), false)]
+        );
+        assert!(resolve_use_deps(&dep, &use_config(&["foo"])).is_empty());
+    }
 }

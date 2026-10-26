@@ -170,7 +170,7 @@ fn use_deps_satisfied(
             UseDepKind::Enabled => state == Some(true),
             UseDepKind::Disabled => state == Some(false),
             UseDepKind::Conditional => !parent || state == Some(true),
-            UseDepKind::ConditionalInverse => parent || state == Some(true),
+            UseDepKind::ConditionalInverse => parent || state == Some(false),
             UseDepKind::Equal => state == Some(parent),
             UseDepKind::EqualInverse => state == Some(!parent),
         }
@@ -463,6 +463,31 @@ mod tests {
             &on,
             &iuse,
             &parent_set(&[])
+        ));
+    }
+
+    #[test]
+    fn conditional_inverse_requires_the_flag_off_when_parent_lacks_it() {
+        let iuse = set(&["x"]);
+        let on = set(&["x"]);
+        let off = set(&[]);
+        assert!(use_deps_satisfied(
+            &deps("!x?"),
+            &off,
+            &iuse,
+            &parent_set(&[])
+        ));
+        assert!(!use_deps_satisfied(
+            &deps("!x?"),
+            &on,
+            &iuse,
+            &parent_set(&[])
+        ));
+        assert!(use_deps_satisfied(
+            &deps("!x?"),
+            &on,
+            &iuse,
+            &parent_set(&["x"])
         ));
     }
 }
