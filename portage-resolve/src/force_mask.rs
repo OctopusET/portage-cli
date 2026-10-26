@@ -135,7 +135,7 @@ impl IuseInjection {
     }
 
     /// The cached profile-invariant `IUSE_EFFECTIVE` half for `eapi`'s injection class
-    fn profile_part(&self, eapi: Eapi) -> &HashSet<Flag> {
+    pub(crate) fn profile_part(&self, eapi: Eapi) -> &HashSet<Flag> {
         if eapi.has_profile_iuse_injection() {
             &self.injected
         } else {

@@ -138,21 +138,22 @@ impl<I: Interner> EbuildMetadata<I> {
             .map(|f| f.raw.as_str())
     }
 
-    /// Every USE flag a `flag?` conditional names, with its key, in the dependency classes,
-    /// `SRC_URI`, `LICENSE`, `PROPERTIES` and `RESTRICT`, plus every flag in `REQUIRED_USE`
+    /// Every USE flag a `flag?` conditional names, as `(key, flag, negated)`, in the dependency
+    /// classes, `LICENSE`, `PROPERTIES`, `RESTRICT` and `SRC_URI`, plus every `REQUIRED_USE` flag
     ///
-    /// Forces the lazy fields' parse.
-    pub fn conditional_flags(&self) -> Vec<(&'static str, &str)> {
-        fn deps<'a>(
-            key: &'static str,
-            list: &'a [DepEntry],
-            out: &mut Vec<(&'static str, &'a str)>,
-        ) {
+    /// Keys come in Portage's validation order. Forces the lazy fields' parse.
+    pub fn conditional_flags(&self) -> Vec<(&'static str, &str, bool)> {
+        type Out<'a> = Vec<(&'static str, &'a str, bool)>;
+        fn deps<'a>(key: &'static str, list: &'a [DepEntry], out: &mut Out<'a>) {
             for e in list {
                 match e {
                     DepEntry::Atom(_) => {}
-                    DepEntry::UseConditional { flag, children, .. } => {
-                        out.push((key, flag.as_str()));
+                    DepEntry::UseConditional {
+                        flag,
+                        negate,
+                        children,
+                    } => {
+                        out.push((key, flag.as_str(), *negate));
                         deps(key, children, out);
                     }
                     DepEntry::AllOf(c)
@@ -162,11 +163,15 @@ impl<I: Interner> EbuildMetadata<I> {
                 }
             }
         }
-        fn src_uri<'a>(list: &'a [SrcUriEntry], out: &mut Vec<(&'static str, &'a str)>) {
+        fn src_uri<'a>(list: &'a [SrcUriEntry], out: &mut Out<'a>) {
             for e in list {
                 match e {
-                    SrcUriEntry::UseConditional { flag, entries, .. } => {
-                        out.push(("SRC_URI", flag));
+                    SrcUriEntry::UseConditional {
+                        flag,
+                        negated,
+                        entries,
+                    } => {
+                        out.push(("SRC_URI", flag, *negated));
                         src_uri(entries, out);
                     }
                     SrcUriEntry::Group(entries) => src_uri(entries, out),
@@ -174,11 +179,15 @@ impl<I: Interner> EbuildMetadata<I> {
                 }
             }
         }
-        fn license<'a>(e: &'a LicenseExpr, out: &mut Vec<(&'static str, &'a str)>) {
+        fn license<'a>(e: &'a LicenseExpr, out: &mut Out<'a>) {
             match e {
                 LicenseExpr::License(_) => {}
-                LicenseExpr::UseConditional { flag, entries, .. } => {
-                    out.push(("LICENSE", flag));
+                LicenseExpr::UseConditional {
+                    flag,
+                    negated,
+                    entries,
+                } => {
+                    out.push(("LICENSE", flag, *negated));
                     entries.iter().for_each(|e| license(e, out));
                 }
                 LicenseExpr::AnyOf(entries) | LicenseExpr::All(entries) => {
@@ -186,23 +195,30 @@ impl<I: Interner> EbuildMetadata<I> {
                 }
             }
         }
-        fn restrict<'a>(
-            key: &'static str,
-            list: &'a [RestrictExpr],
-            out: &mut Vec<(&'static str, &'a str)>,
-        ) {
+        fn restrict<'a>(key: &'static str, list: &'a [RestrictExpr], out: &mut Out<'a>) {
             for e in list {
-                if let RestrictExpr::UseConditional { flag, entries, .. } = e {
-                    out.push((key, flag));
+                if let RestrictExpr::UseConditional {
+                    flag,
+                    negated,
+                    entries,
+                } = e
+                {
+                    out.push((key, flag, *negated));
                     restrict(key, entries, out);
                 }
             }
         }
-        fn required<'a>(e: &'a RequiredUseExpr, out: &mut Vec<(&'static str, &'a str)>) {
+        fn required<'a>(e: &'a RequiredUseExpr, out: &mut Out<'a>) {
             match e {
-                RequiredUseExpr::Flag { name, .. } => out.push(("REQUIRED_USE", name)),
-                RequiredUseExpr::UseConditional { flag, entries, .. } => {
-                    out.push(("REQUIRED_USE", flag));
+                RequiredUseExpr::Flag { name, negated } => {
+                    out.push(("REQUIRED_USE", name, *negated));
+                }
+                RequiredUseExpr::UseConditional {
+                    flag,
+                    negated,
+                    entries,
+                } => {
+                    out.push(("REQUIRED_USE", flag, *negated));
                     entries.iter().for_each(|e| required(e, out));
                 }
                 RequiredUseExpr::AnyOf(entries)
@@ -213,17 +229,17 @@ impl<I: Interner> EbuildMetadata<I> {
         }
 
         let mut out = Vec::new();
-        deps("DEPEND", self.depend.list(), &mut out);
-        deps("RDEPEND", self.rdepend.list(), &mut out);
         deps("BDEPEND", self.bdepend.list(), &mut out);
-        deps("PDEPEND", self.pdepend.list(), &mut out);
+        deps("DEPEND", self.depend.list(), &mut out);
         deps("IDEPEND", self.idepend.list(), &mut out);
-        src_uri(self.src_uri.list(), &mut out);
+        deps("PDEPEND", self.pdepend.list(), &mut out);
+        deps("RDEPEND", self.rdepend.list(), &mut out);
         if let Some(l) = &self.license {
             license(l, &mut out);
         }
         restrict("PROPERTIES", &self.properties, &mut out);
         restrict("RESTRICT", &self.restrict, &mut out);
+        src_uri(self.src_uri.list(), &mut out);
         if let Some(r) = &self.required_use {
             required(r, &mut out);
         }

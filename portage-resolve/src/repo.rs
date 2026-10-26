@@ -2261,8 +2261,8 @@ pub fn invalid_text(msgs: &[String]) -> String {
 
 /// Why `meta` is unusable whatever the user accepts: an unsupported EAPI or invalid metadata
 ///
-/// USE conditionals are checked against `IUSE_EFFECTIVE` only for EAPIs with profile IUSE
-/// injection, and only when a profile supplied it.
+/// USE flags outside `IUSE_EFFECTIVE` are checked for EAPIs with profile IUSE injection when a
+/// profile supplied it, and reported once per key, for the first such flag, as Portage does.
 pub fn invalid_reason(
     policy: &ResolvePolicy,
     meta: &portage_metadata::EbuildMetadata,
@@ -2277,16 +2277,24 @@ pub fn invalid_reason(
         .collect();
     let injection = &policy.force_mask.iuse_injection;
     if meta.eapi.has_profile_iuse_injection() && !injection.is_empty() {
-        let iuse = crate::force_mask::iuse_effective_set(
-            meta.eapi,
-            meta.iuse.iter().map(Interned::from),
-            injection,
-        );
-        let mut seen = HashSet::new();
-        for (key, flag) in meta.conditional_flags() {
-            if !iuse.contains(&Interned::intern(flag)) && seen.insert((key, flag)) {
-                msgs.push(format!("{key}: USE flag '{flag}' is not in IUSE"));
+        let implicit = injection.profile_part(meta.eapi);
+        let mut reported: Vec<&str> = Vec::new();
+        for (key, flag, negated) in meta.conditional_flags() {
+            if reported.contains(&key)
+                || meta.iuse.iter().any(|u| u.name() == flag)
+                || implicit.contains(&Interned::intern(flag))
+            {
+                continue;
             }
+            reported.push(key);
+            msgs.push(if key == "REQUIRED_USE" {
+                format!("{key}: USE flag '{flag}' is not in IUSE")
+            } else {
+                let bang = if negated { "!" } else { "" };
+                format!(
+                    "{key}: USE flag '{flag}' referenced in conditional '{bang}{flag}?' is not in IUSE"
+                )
+            });
         }
     }
     (!msgs.is_empty()).then_some(FilterReason::Invalid(msgs))
@@ -2505,9 +2513,13 @@ pub fn find_autounmask_candidates(
         let mut found = filter_reasons_for(data, dep.package.cpn(), &dep.version_set, policy);
         // Live ebuilds are never autounmasked: drop them from the exact-pin
         // suggestions so a masked/keywordless `.9999` never lands in config
-        // through this path.
+        // through this path. Nor is an invalid one: no config makes it usable.
         found.retain(|c| {
             !c.cpv.version.is_live()
+                && !c
+                    .reasons
+                    .iter()
+                    .any(|r| matches!(r, FilterReason::Invalid(_) | FilterReason::Eapi(_)))
                 && !data
                     .cache_entry(&c.cpv.cpn, &c.cpv.version)
                     .is_some_and(|cache| cache.metadata.is_live())
@@ -4099,7 +4111,10 @@ mod tests {
             ("app-misc/thing-1.0", &entry("")),
             ("app-misc/thing-2.0", "EAPI=10\n"),
             ("app-misc/thing-3.0", &entry("LICENSE=|| (\n")),
-            ("app-misc/thing-4.0", &entry("DEPEND=foo? ( dev-libs/a )\n")),
+            (
+                "app-misc/thing-4.0",
+                &entry("DEPEND=foo? ( !bar? ( dev-libs/a ) )\nREQUIRED_USE=!baz prefix\n"),
+            ),
             (
                 "app-misc/thing-5.0",
                 &entry("IUSE=foo\nDEPEND=foo? ( dev-libs/a )\n"),
@@ -4153,7 +4168,9 @@ mod tests {
             text[2],
             (
                 "4.0".into(),
-                "invalid: DEPEND: USE flag 'foo' is not in IUSE".into()
+                "invalid: DEPEND: USE flag 'foo' referenced in conditional 'foo?' is not in IUSE, \
+                 invalid: REQUIRED_USE: USE flag 'baz' is not in IUSE"
+                    .into()
             )
         );
         let accepted: Vec<String> = data.versions[&cpn]
@@ -5068,6 +5085,43 @@ mod tests {
             !versions.iter().any(|v| v.ends_with(".9999")),
             "live suggestion leaked: {versions:?}"
         );
+    }
+
+    #[test]
+    fn dropped_dep_suggestions_skip_invalid_versions() {
+        let data = repo_with_many(&[
+            (
+                "app-misc/thing-3.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=~amd64\nLICENSE=|| (\nDESCRIPTION=t\n",
+            ),
+            ("app-misc/thing-4.0", "EAPI=10\n"),
+        ]);
+        let arch = Arch::intern("amd64");
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let policy = ResolvePolicy {
+            accept_keywords: &ak,
+            package_mask: &PolicyMaskList::EMPTY,
+            package_unmask: &PolicyMaskList::EMPTY,
+            accept_licenses: &AcceptOverlay::new(accept_all_licenses(), Vec::new()),
+            accept_properties: &AcceptProperties::new(accept_all_licenses(), Vec::new()),
+            accept_restrict: &AcceptRestrict::new(accept_all_licenses(), Vec::new()),
+            defaults: empty_layer(),
+            conf: empty_layer(),
+            env_use: empty_layer(),
+            package_use: &[],
+            profile_package_use: &[],
+            force_mask: &ForceMask::default(),
+            facts: None,
+        };
+        let cpn = Cpn::try_new("app-misc/thing").unwrap();
+        let vs = portage_atom_pubgrub::PortageVersionSet::any();
+        assert_eq!(filter_reasons_for(&data, &cpn, &vs, &policy).len(), 2);
+        let dropped = vec![DroppedDep {
+            package: portage_atom_pubgrub::PortagePackage::unslotted(cpn),
+            version_set: vs,
+            alternatives: Vec::new(),
+        }];
+        assert!(find_autounmask_candidates(&data, &dropped, &policy).is_empty());
     }
 
     #[test]
