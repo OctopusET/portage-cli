@@ -373,7 +373,7 @@ impl PortageDependencyProvider {
             && inst == version
             && !matches!(policy, InstalledPolicy::Rebuild)
         {
-            let reinstalled = !self.selective && self.root_targets.contains_key(package);
+            let reinstalled = self.reinstalled_target(package);
             // `package.provided` has no VDB record to trust past its existence, so no deps.
             if matches!(policy, InstalledPolicy::Provided) || (!self.expand_kept && !reinstalled) {
                 return Dependencies::Available(DependencyConstraints::default());

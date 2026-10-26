@@ -1097,17 +1097,30 @@ impl PortageDependencyProvider {
         self.exclude = atoms.to_vec();
     }
 
+    /// Whether a non-selective resolve reinstalls this root target even at its installed version
+    pub(crate) fn reinstalled_target(&self, package: &PortagePackage) -> bool {
+        !self.selective && self.root_targets.contains_key(package)
+    }
+
+    /// Whether `package` at `version` stays installed as is, not built again
+    pub(crate) fn kept_unbuilt(&self, package: &PortagePackage, version: &Version) -> bool {
+        self.installed
+            .get(package)
+            .is_some_and(|(v, policy)| v == version && !matches!(policy, InstalledPolicy::Rebuild))
+            && !self.reinstalled_target(package)
+    }
+
     /// What a kept installed version lists in place of its repository entry, if anything
     pub(crate) fn kept_installed_deps(
         &self,
         package: &PortagePackage,
         version: &Version,
     ) -> Option<&VersionData> {
-        let kept = self.installed.get(package).is_some_and(|(v, policy)| {
-            v == version && matches!(policy, InstalledPolicy::Favor | InstalledPolicy::Lock)
-        });
-        let reinstalled = !self.selective && self.root_targets.contains_key(package);
-        if !kept || reinstalled {
+        let provided = matches!(
+            self.installed.get(package),
+            Some((_, InstalledPolicy::Provided))
+        );
+        if provided || !self.kept_unbuilt(package, version) {
             return None;
         }
         self.installed_deps

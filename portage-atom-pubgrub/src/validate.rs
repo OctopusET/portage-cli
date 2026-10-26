@@ -371,10 +371,7 @@ impl PortageDependencyProvider {
                 continue;
             };
             // A kept installed version is not built again, so its DEPEND/BDEPEND blockers are moot.
-            let kept = self.installed.get(pkg).is_some_and(|(v, policy)| {
-                v == version && !matches!(policy, crate::provider::InstalledPolicy::Rebuild)
-            });
-            let blockers = if kept {
+            let blockers = if self.kept_unbuilt(pkg, version) {
                 &vd.runtime_blockers
             } else {
                 &vd.blockers
@@ -1175,7 +1172,7 @@ mod tests {
     // the same version rebuilt under `-e` still honours it.
     #[test]
     fn check_blockers_ignores_build_blockers_of_a_kept_installed_owner() {
-        let hits_for = |policy: crate::provider::InstalledPolicy| {
+        let hits_for = |policy: crate::provider::InstalledPolicy, selective: bool| {
             let mut repo = InMemoryRepository::new();
             repo.add_version(
                 portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
@@ -1187,6 +1184,7 @@ mod tests {
                 },
             );
             let mut provider = PortageDependencyProvider::new(repo);
+            provider.set_selective(selective);
             for (cpn, ver) in [("app-misc/a", "1.0"), ("dev-libs/b", "1.0")] {
                 provider.add_installed(crate::provider::InstalledPackage {
                     package: PortagePackage::unslotted(Cpn::parse(cpn).unwrap()),
@@ -1204,8 +1202,11 @@ mod tests {
                 .unwrap();
             provider.check_blockers_detailed(&solution).len()
         };
-        assert_eq!(hits_for(crate::provider::InstalledPolicy::Favor), 0);
-        assert_eq!(hits_for(crate::provider::InstalledPolicy::Rebuild), 1);
+        use crate::provider::InstalledPolicy::{Favor, Rebuild};
+        assert_eq!(hits_for(Favor, true), 0);
+        // A non-selective root target is reinstalled from its ebuild, so its DEPEND blocker counts.
+        assert_eq!(hits_for(Favor, false), 1);
+        assert_eq!(hits_for(Rebuild, true), 1);
     }
 
     // The `app-alternatives/gpg` shape: `reference?` (default-on) RDEPEND pulls
