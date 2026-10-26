@@ -151,10 +151,13 @@ impl Eapi {
 impl Eapi {
     /// The atom syntax `dep` uses that this EAPI lacks, or `None` when it is allowed (PMS 8.3)
     ///
-    /// `::repo` is in no EAPI yet, so it is always reported.
+    /// `::repo` and binary package build ids are in no EAPI, so they are always reported.
     pub fn atom_violation(self, dep: &Dep) -> Option<&'static str> {
         if dep.repo.is_some() {
             return Some("repository deps");
+        }
+        if dep.build_id.is_some() {
+            return Some("build ids");
         }
         if dep.blocker == Some(Blocker::Strong) && self < Eapi::Two {
             return Some("strong blocks");
@@ -232,6 +235,7 @@ mod tests {
         let v = |eapi: Eapi, atom: &str| eapi.atom_violation(&Dep::parse(atom).unwrap());
         assert_eq!(v(Eapi::Eight, "cat/pkg::gentoo"), Some("repository deps"));
         assert_eq!(v(Eapi::Eight, "cat/pkg:="), None);
+        assert_eq!(v(Eapi::Nine, "=cat/pkg-1-3"), Some("build ids"));
         assert_eq!(v(Eapi::Four, "cat/pkg:="), Some("slot operators"));
         assert_eq!(v(Eapi::Four, "cat/pkg:0/1"), Some("sub-slot deps"));
         assert_eq!(v(Eapi::Zero, "cat/pkg:0"), Some("slot deps"));
