@@ -1,8 +1,8 @@
 use std::fmt;
 
 use portage_atom::Lazy;
-use winnow::ascii::multispace0;
-use winnow::combinator::{alt, cut_err, delimited, dispatch, opt, peek, preceded, repeat};
+use winnow::ascii::{multispace0, multispace1};
+use winnow::combinator::{alt, cut_err, delimited, dispatch, eof, opt, peek, preceded, repeat};
 use winnow::error::StrContext;
 use winnow::prelude::*;
 use winnow::token::{any, take_while};
@@ -167,15 +167,9 @@ impl SrcUriEntry {
     }
 }
 
-/// Extract filename from a URL (last path component)
-fn filename_from_url(url: &str) -> String {
-    url.rsplit('/')
-        .next()
-        .unwrap_or(url)
-        .split('?')
-        .next()
-        .unwrap_or(url)
-        .to_string()
+/// The distfile name of a URL: everything after the last `/`, query string included
+fn filename_from_url(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or(url)
 }
 
 impl fmt::Display for SrcUriEntry {
@@ -263,16 +257,6 @@ fn is_uri_char(c: char) -> bool {
         )
 }
 
-fn is_filename_char(c: char) -> bool {
-    // '{' and '}' are permitted for rename targets where the ebuild author
-    // wrote {P} instead of ${P}; portage accepts such filenames in practice.
-    // '@' appears in real rename targets (e.g. sec-keys/openpgp-keys-kernel
-    // uses `-> gregkh@kernel.org.key`). '!' and '%' appear in go-module.eclass
-    // generated rename targets (percent-encoded Go module paths with escaped
-    // uppercase letters, e.g. `-> github.com%2F!puerkito!bio%2Fgoquery%2F...`).
-    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '{' | '}' | '@' | '!' | '%')
-}
-
 fn is_flag_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '+' || c == '@'
 }
@@ -293,7 +277,8 @@ fn parse_restriction_prefix(input: &mut &str) -> ModalResult<Option<String>> {
 }
 
 fn parse_filename(input: &mut &str) -> ModalResult<String> {
-    take_while(1.., is_filename_char)
+    take_while(1.., |c: char| !c.is_whitespace())
+        .verify(|s: &str| !s.contains('/'))
         .map(|s: &str| s.to_string())
         .parse_next(input)
 }
@@ -305,6 +290,7 @@ fn parse_uri_entry(input: &mut &str) -> ModalResult<SrcUriEntry> {
         parse_uri,
         opt(preceded((multispace0, "->", multispace0), parse_filename)),
     )
+        .verify(|(_, url, rename)| rename.is_some() || !filename_from_url(url).is_empty())
         .map(|(restriction, url, rename)| {
             if let Some(target) = rename {
                 SrcUriEntry::Renamed {
@@ -313,7 +299,7 @@ fn parse_uri_entry(input: &mut &str) -> ModalResult<SrcUriEntry> {
                     restriction,
                 }
             } else {
-                let filename = filename_from_url(&url);
+                let filename = filename_from_url(&url).to_string();
                 SrcUriEntry::Uri {
                     url,
                     filename,
@@ -372,7 +358,16 @@ fn parse_src_uri_entry(input: &mut &str) -> ModalResult<SrcUriEntry> {
 
 /// Parse zero or more SRC_URI entries separated by whitespace
 fn parse_src_uri_entries(input: &mut &str) -> ModalResult<Vec<SrcUriEntry>> {
-    repeat(0.., preceded(multispace0, parse_src_uri_entry)).parse_next(input)
+    repeat(
+        0..,
+        delimited(
+            multispace0,
+            parse_src_uri_entry,
+            cut_err(peek(alt((multispace1.void(), eof.void(), ')'.void()))))
+                .context(StrContext::Label("whitespace after entry")),
+        ),
+    )
+    .parse_next(input)
 }
 
 /// Parse a complete SRC_URI string
@@ -399,6 +394,24 @@ mod tests {
             e.collect_filenames(&pred, &mut out);
         }
         out
+    }
+
+    #[test]
+    fn rename_target_is_the_whole_word() {
+        assert_eq!(
+            filenames("https://e.com/x -> foo=1.tar.gz", &[]),
+            vec!["foo=1.tar.gz".to_string()]
+        );
+        assert!(SrcUriEntry::parse("https://e.com/x -> a/b").is_err());
+    }
+
+    #[test]
+    fn uri_filename_keeps_the_query_string() {
+        assert_eq!(
+            filenames("https://e.com/dl?f=x.tgz", &[]),
+            vec!["dl?f=x.tgz".to_string()]
+        );
+        assert!(SrcUriEntry::parse("https://e.com/dir/").is_err());
     }
 
     #[test]
