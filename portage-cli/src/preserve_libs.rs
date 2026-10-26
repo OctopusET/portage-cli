@@ -63,20 +63,63 @@ pub(crate) fn package_needed(pkg: &InstalledPackage) -> Vec<NeededRecord> {
 /// One `cp:slot`'s registered preserved-lib set
 ///
 /// `paths` are stored as plain `String`s (not `Utf8PathBuf`) since `camino` doesn't
-/// implement `serde` traits without an extra feature flag on a shared workspace dep —
+/// implement `serde` traits without an extra feature flag on a shared workspace dep, so they are
 /// converted at the [`PreservedLibsRegistry`] API boundary instead.
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "WireEntry", into = "(String, String, Vec<String>)")]
 struct RegistryEntry {
     cpv: String,
     counter: u64,
     paths: Vec<String>,
 }
 
-/// `var/lib/portage/preserved_libs_registry` — real portage's own exact
-/// relative path, so it's recognizable to anyone inspecting the root. JSON
-/// map of `"cp:slot" -> {cpv, counter, paths}`; close to real portage's
-/// shape without needing to be byte-compatible (it's internal state either
-/// way, not a PMS-defined format).
+/// Portage's `[cpv, "counter", [paths]]`, or the object em wrote before matching it
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireEntry {
+    Portage(String, serde_json::Value, Vec<String>),
+    Legacy {
+        cpv: String,
+        counter: u64,
+        paths: Vec<String>,
+    },
+}
+
+impl From<WireEntry> for RegistryEntry {
+    fn from(wire: WireEntry) -> Self {
+        match wire {
+            WireEntry::Portage(cpv, counter, paths) => {
+                let counter = match counter {
+                    serde_json::Value::String(s) => s.trim().parse().unwrap_or(0),
+                    other => other.as_u64().unwrap_or(0),
+                };
+                Self {
+                    cpv,
+                    counter,
+                    paths,
+                }
+            }
+            WireEntry::Legacy {
+                cpv,
+                counter,
+                paths,
+            } => Self {
+                cpv,
+                counter,
+                paths,
+            },
+        }
+    }
+}
+
+impl From<RegistryEntry> for (String, String, Vec<String>) {
+    fn from(e: RegistryEntry) -> Self {
+        (e.cpv, e.counter.to_string(), e.paths)
+    }
+}
+
+/// `var/lib/portage/preserved_libs_registry`, in portage's own format: a JSON map of
+/// `"cp:slot" -> [cpv, "counter", [paths]]`, so em and emerge share one registry.
 pub struct PreservedLibsRegistry {
     path: Utf8PathBuf,
     data: HashMap<String, RegistryEntry>,
@@ -93,14 +136,20 @@ impl PreservedLibsRegistry {
     }
 
     fn load_path(path: &Utf8Path) -> Self {
-        let data: HashMap<String, RegistryEntry> = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let data = Self::read(path).unwrap_or_default();
         Self {
             path: path.to_owned(),
             original: data.clone(),
             data,
+        }
+    }
+
+    /// The file's entries; `None` when it exists but does not parse (empty means no entries)
+    fn read(path: &Utf8Path) -> Option<HashMap<String, RegistryEntry>> {
+        match std::fs::read_to_string(path) {
+            Ok(s) if s.trim().is_empty() => Some(HashMap::new()),
+            Ok(s) => serde_json::from_str(&s).ok(),
+            Err(_) => Some(HashMap::new()),
         }
     }
 
@@ -118,7 +167,10 @@ impl PreservedLibsRegistry {
         // its own one-shot path since this load; the delta also leaves a
         // concurrent writer's removals and updates intact, which a plain
         // merge of `self.data` over the file would not.
-        let mut disk = Self::load_path(&self.path).data;
+        let Some(mut disk) = Self::read(&self.path) else {
+            crate::style::warn_line!("not rewriting unparsable {}", self.path);
+            return;
+        };
         for key in self.original.keys() {
             if !self.data.contains_key(key) {
                 disk.remove(key);
@@ -129,10 +181,19 @@ impl PreservedLibsRegistry {
                 disk.insert(key.clone(), entry.clone());
             }
         }
+        // The replacement keeps the old file's mode and owner (portage creates it 0660 root:portage).
+        let old = std::fs::metadata(&self.path);
         match serde_json::to_string_pretty(&disk) {
             Ok(json) => {
                 if let Err(e) = write_atomic(&self.path, json) {
                     crate::style::warn_line!("could not write {}: {e:#}", self.path);
+                } else if let Ok(old) = old {
+                    use std::os::unix::fs::MetadataExt;
+                    let _ = std::os::unix::fs::chown(&self.path, Some(old.uid()), Some(old.gid()));
+                    let _ = std::fs::set_permissions(&self.path, old.permissions());
+                } else {
+                    let perms = std::os::unix::fs::PermissionsExt::from_mode(0o644);
+                    let _ = std::fs::set_permissions(&self.path, perms);
                 }
             }
             Err(e) => crate::style::warn_line!("could not serialize preserved_libs_registry: {e}"),
@@ -703,6 +764,44 @@ mod tests {
         reg2.store();
         let reloaded2 = PreservedLibsRegistry::load(&root);
         assert_eq!(reloaded2.all_paths().count(), 0);
+    }
+
+    #[test]
+    fn registry_reads_and_writes_portage_entries_and_never_clobbers_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::try_from(dir.path().to_owned()).unwrap();
+        let file = root.join("var/lib/portage/preserved_libs_registry");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"sys-libs/foo:0": ["sys-libs/foo-1.0", "7", ["/usr/lib64/libfoo.so.1"]]}"#,
+        )
+        .unwrap();
+        let mut reg = PreservedLibsRegistry::load(&root);
+        assert_eq!(reg.all_paths().count(), 1);
+        let bar = Cpv::parse("dev-libs/bar-2").unwrap();
+        reg.register(
+            &bar,
+            "0",
+            9,
+            vec![Utf8PathBuf::from("/usr/lib64/libbar.so.2")],
+        );
+        reg.store();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(json["sys-libs/foo:0"][1], "7");
+        assert_eq!(json["dev-libs/bar:0"][0], "dev-libs/bar-2");
+
+        std::fs::write(&file, "not json").unwrap();
+        let mut reg = PreservedLibsRegistry::load(&root);
+        reg.register(
+            &bar,
+            "0",
+            9,
+            vec![Utf8PathBuf::from("/usr/lib64/libbar.so.2")],
+        );
+        reg.store();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not json");
     }
 
     #[test]
