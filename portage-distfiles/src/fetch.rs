@@ -104,6 +104,9 @@ pub struct FetchConfig {
     /// Default `true`. A package build sets it from the repo's `allow-missing-manifests`,
     /// `FEATURES=digest` and `EBUILD_SKIP_MANIFEST`, refusing unverifiable files otherwise.
     pub allow_missing_digests: bool,
+    /// Downloads that may fail verification before a distfile gives up on its
+    /// remaining URLs (`PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS`). Defaults to 5
+    pub checksum_try_mirrors: usize,
 }
 
 impl Default for FetchConfig {
@@ -115,6 +118,7 @@ impl Default for FetchConfig {
             max_concurrent: 4,
             trust_existing_size: false,
             allow_missing_digests: true,
+            checksum_try_mirrors: 5,
         }
     }
 }
@@ -278,31 +282,34 @@ impl Fetcher {
             });
         }
 
-        // Try each URL in order.
+        // Each URL with the primary strategy, then again with the fallback command.
+        let fallback = self
+            .config
+            .fallback_command
+            .clone()
+            .map(FetchStrategy::Command);
+        let attempts = df.urls.iter().map(|url| (&self.config.strategy, url));
+        let fallback_attempts = fallback
+            .iter()
+            .flat_map(|strategy| df.urls.iter().map(move |url| (strategy, url)));
         let mut last_err = None;
-        for url in &df.urls {
-            let result = self
-                .fetch_one_url(&self.config.strategy, url, &dest, manifest_entry)
-                .await;
-            match result {
+        let mut verify_failures = 0;
+        for (strategy, url) in attempts.chain(fallback_attempts) {
+            match self
+                .fetch_one_url(strategy, url, &dest, manifest_entry)
+                .await
+            {
                 Ok(()) => return Ok(FetchStatus::Downloaded),
                 Err(e) => {
                     eprintln!("fetch: {url}: {e}");
+                    let verify = matches!(e, Error::Verify { .. });
                     last_err = Some(e);
-                }
-            }
-        }
-
-        // Primary strategy exhausted — try fallback command if configured.
-        if let Some(cmd_template) = &self.config.fallback_command {
-            let fallback = FetchStrategy::Command(cmd_template.clone());
-            for url in &df.urls {
-                match self
-                    .fetch_one_url(&fallback, url, &dest, manifest_entry)
-                    .await
-                {
-                    Ok(()) => return Ok(FetchStatus::Downloaded),
-                    Err(e) => last_err = Some(e),
+                    if verify {
+                        verify_failures += 1;
+                        if verify_failures >= self.config.checksum_try_mirrors.max(1) {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -716,16 +723,77 @@ fn verify_ok(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> bool {
     check_distfile(manifest_entry, dest).is_ok()
 }
 
-/// Verify `dest`; on failure delete it (so it can't be treated as a resumable
-/// partial later) and return the error.
+/// Verify `dest`; on failure move it out of the way (so it can't be treated as a
+/// resumable partial later) and return the error.
 fn verify_or_discard(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> Result<()> {
     check_distfile(manifest_entry, dest).map_err(|reason| {
-        let _ = std::fs::remove_file(dest.as_std_path());
+        match manifest_entry {
+            Some(_) => quarantine(dest),
+            None => {
+                let _ = std::fs::remove_file(dest.as_std_path());
+            }
+        }
         Error::Verify {
             filename: dest.file_name().unwrap_or("?").to_owned(),
             reason,
         }
     })
+}
+
+/// Keep a download that failed its checksum as `<name>._checksum_failure_.<random>`, as
+/// portage does, unless an identical one is already kept; delete it when that fails
+fn quarantine(dest: &Utf8Path) {
+    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
+        return;
+    };
+    let prefix = format!(
+        "{}._checksum_failure_.",
+        name.strip_suffix(DOWNLOAD_SUFFIX).unwrap_or(name)
+    );
+    let kept = std::fs::read_dir(dir.as_std_path())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .any(|e| same_content(&e.path(), dest.as_std_path()));
+    let moved = !kept
+        && tempfile::Builder::new()
+            .prefix(&prefix)
+            .tempfile_in(dir.as_std_path())
+            .and_then(|t| t.keep().map_err(|e| e.error))
+            .and_then(|(_, path)| std::fs::rename(dest.as_std_path(), path))
+            .is_ok();
+    if !moved {
+        let _ = std::fs::remove_file(dest.as_std_path());
+    }
+}
+
+fn same_content(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::io::Read;
+    let size = |p| std::fs::metadata(p).map(|m| m.len()).ok();
+    if size(a).is_none() || size(a) != size(b) {
+        return false;
+    }
+    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let (mut ra, mut rb) = (std::io::BufReader::new(fa), std::io::BufReader::new(fb));
+    let (mut ba, mut bb) = (vec![0u8; 65536], vec![0u8; 65536]);
+    loop {
+        let Ok(n) = ra.read(&mut ba) else {
+            return false;
+        };
+        if n == 0 {
+            return true;
+        }
+        if rb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
+    }
 }
 
 /// Stream a response body into `file` to completion, then flush
@@ -994,6 +1062,46 @@ mod tests {
         assert!(matches!(err, Error::Verify { .. }));
         assert_eq!(std::fs::read(&dest).unwrap(), b"other");
         assert!(!download_path(&dest).exists());
+    }
+
+    #[tokio::test]
+    async fn checksum_failures_stop_at_the_try_mirrors_cap_and_keep_the_bad_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let distdir = Utf8Path::from_path(tmp.path()).unwrap().to_path_buf();
+        let filename = "foo.tar.gz";
+        let digests = DistDigests::from(&Manifest {
+            entries: vec![dist_entry(filename, b"payload")],
+        });
+        let count = distdir.join("count");
+        let config = FetchConfig {
+            checksum_try_mirrors: 2,
+            ..FetchConfig::from_make_conf(
+                Some(format!(
+                    r#"echo >> '{count}'; printf wronged > "${{DISTDIR}}/${{FILE}}""#
+                )),
+                None,
+            )
+        };
+        let df = Distfile {
+            filename: filename.to_string(),
+            urls: (0..4)
+                .map(|i| format!("http://m{i}.invalid/{filename}"))
+                .collect(),
+            restriction: None,
+        };
+        let err = Fetcher::new(distdir.clone(), config)
+            .fetch_distfile_digests(&df, &digests)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Verify { .. }));
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 2);
+        let kept: Vec<String> = std::fs::read_dir(&distdir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("foo.tar.gz._checksum_failure_."))
+            .collect();
+        assert_eq!(kept.len(), 1, "identical bad downloads are kept once");
+        assert!(!distdir.join(filename).exists());
     }
 
     // Regression: two independent fetch calls for the same filename (e.g. one

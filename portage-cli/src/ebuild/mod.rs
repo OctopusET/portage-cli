@@ -2240,9 +2240,16 @@ async fn run_fetch(
     };
 
     let (fetch_cmd, resume_cmd) = read_fetch_commands(shell);
+    let defaults = FetchConfig::from_make_conf(fetch_cmd, resume_cmd);
     let config = FetchConfig {
         allow_missing_digests: allow_missing_digests(shell, repo),
-        ..FetchConfig::from_make_conf(fetch_cmd, resume_cmd)
+        checksum_try_mirrors: checksum_try_mirrors(
+            shell
+                .get_var("PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS")
+                .as_deref(),
+            defaults.checksum_try_mirrors,
+        ),
+        ..defaults
     };
     let ro_distdirs: Vec<Utf8PathBuf> = shell
         .get_var("PORTAGE_RO_DISTDIRS")
@@ -2329,6 +2336,22 @@ async fn run_fetch(
 /// the ebuild defines it, so a network failure never prints the default SRC_URI list
 fn should_run_nofetch(restrict_fetch: bool, defines_nofetch: bool) -> bool {
     restrict_fetch || defines_nofetch
+}
+
+/// `PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS`, or `default` when it is unset or not a positive integer
+fn checksum_try_mirrors(value: Option<&str>, default: usize) -> usize {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return default;
+    };
+    match value.parse::<usize>() {
+        Ok(n) if n >= 1 => n,
+        _ => {
+            crate::style::warn_line!(
+                "PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS is not a positive integer: '{value}', using {default}"
+            );
+            default
+        }
+    }
 }
 
 /// Whether a distfile with no `DIST` entry may be fetched unverified, as portage allows
@@ -4262,6 +4285,14 @@ fn read_fetch_commands(shell: &portage_repo::EbuildShell) -> (Option<String>, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checksum_try_mirrors_falls_back_on_a_bad_value() {
+        assert_eq!(checksum_try_mirrors(Some("2"), 5), 2);
+        assert_eq!(checksum_try_mirrors(None, 5), 5);
+        assert_eq!(checksum_try_mirrors(Some("0"), 5), 5);
+        assert_eq!(checksum_try_mirrors(Some("many"), 5), 5);
+    }
 
     #[test]
     fn nofetch_runs_only_for_restrict_fetch_or_an_ebuild_definition() {
