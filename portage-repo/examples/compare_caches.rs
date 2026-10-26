@@ -276,7 +276,7 @@ fn normalize_required_use_entry(e: &RequiredUseExpr) -> String {
             };
             format!("{prefix} ( {} )", normalize_required_use_entries(entries))
         }
-        RequiredUseExpr::All(entries) => normalize_required_use_entries(entries),
+        RequiredUseExpr::All(entries) => format!("( {} )", normalize_required_use_entries(entries)),
     }
 }
 

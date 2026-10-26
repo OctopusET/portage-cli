@@ -38,7 +38,7 @@ pub enum RequiredUseExpr {
         /// Children guarded by this flag
         entries: Vec<RequiredUseExpr>,
     },
-    /// Top-level grouping: all children must be satisfied
+    /// All children must be satisfied: the top level, or a `( ... )` group
     All(Vec<RequiredUseExpr>),
 }
 
@@ -79,9 +79,9 @@ impl RequiredUseExpr {
     /// [PMS 7.3.4](https://projects.gentoo.org/pms/9/pms.html#use-state-constraints):
     ///
     /// - a bare flag is satisfied when enabled (a negated flag when disabled);
-    /// - `|| ( ... )` — at least one child satisfied (empty group is satisfied
-    ///   in EAPI 0–6, unmatched in EAPI 7–9 — see [`Self::is_satisfied_groups`]);
-    /// - `^^ ( ... )` — exactly one child satisfied;
+    /// - `|| ( ... )` — at least one child satisfied;
+    /// - `^^ ( ... )` — exactly one child satisfied (an empty `||` or `^^` is
+    ///   satisfied in EAPI 0–6, unmatched in EAPI 7–9 — see [`Self::is_satisfied_groups`]);
     /// - `?? ( ... )` — at most one child satisfied;
     /// - `flag? ( ... )` / `!flag? ( ... )` — when the guard is active, all
     ///   children must be satisfied; otherwise vacuously satisfied.
@@ -119,11 +119,12 @@ impl RequiredUseExpr {
                     .iter()
                     .filter(|c| c.is_group_member(enabled))
                     .collect();
-                members
-                    .iter()
-                    .filter(|c| c.is_satisfied_groups(enabled, empty_any_of_matches))
-                    .count()
-                    == 1
+                members.is_empty() && empty_any_of_matches
+                    || members
+                        .iter()
+                        .filter(|c| c.is_satisfied_groups(enabled, empty_any_of_matches))
+                        .count()
+                        == 1
             }
             RequiredUseExpr::AtMostOne(children) => {
                 let members: Vec<_> = children
@@ -317,7 +318,10 @@ fn fmt_entries(f: &mut fmt::Formatter, entries: &[RequiredUseExpr]) -> fmt::Resu
         if i > 0 {
             write!(f, " ")?;
         }
-        write!(f, "{entry}")?;
+        match entry {
+            RequiredUseExpr::All(_) => write!(f, "( {entry} )")?,
+            _ => write!(f, "{entry}")?,
+        }
     }
     Ok(())
 }
@@ -414,12 +418,20 @@ fn parse_flag(input: &mut &str) -> ModalResult<RequiredUseExpr> {
         .parse_next(input)
 }
 
+/// A `( ... )` group stays one node, so it counts as a single member of `||`/`^^`/`??`
 fn parse_paren_group(input: &mut &str) -> ModalResult<Vec<RequiredUseExpr>> {
     delimited(
         '(',
         parse_required_use_entries,
         cut_err((multispace0, ')')).context(StrContext::Label("closing ')'")),
     )
+    .map(|entries: Vec<RequiredUseExpr>| {
+        if entries.len() == 1 {
+            entries
+        } else {
+            vec![RequiredUseExpr::All(entries)]
+        }
+    })
     .parse_next(input)
 }
 
@@ -458,6 +470,33 @@ pub(crate) fn parse_required_use_string(input: &mut &str) -> ModalResult<Vec<Req
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paren_group_is_one_member_of_exactly_one() {
+        let expr = RequiredUseExpr::parse("^^ ( ( !32bit 64bit ) ( 32bit !64bit ) )").unwrap();
+        let RequiredUseExpr::ExactlyOne(children) = &expr else {
+            panic!("expected ^^, got {expr:?}");
+        };
+        assert_eq!(children.len(), 2);
+        assert!(
+            children
+                .iter()
+                .all(|c| matches!(c, RequiredUseExpr::All(v) if v.len() == 2))
+        );
+        assert_eq!(expr.to_string(), "^^ ( ( !32bit 64bit ) ( 32bit !64bit ) )");
+        let with = |on: &'static [&'static str]| move |f: &str| on.contains(&f);
+        assert!(expr.is_satisfied(&with(&["64bit"])));
+        assert!(!expr.is_satisfied(&with(&[])));
+        assert!(!expr.is_satisfied(&with(&["32bit", "64bit"])));
+    }
+
+    #[test]
+    fn empty_exactly_one_follows_the_empty_group_policy() {
+        let expr = RequiredUseExpr::parse("^^ ( foo? ( a ) )").unwrap();
+        let none = |_: &str| false;
+        assert!(expr.is_satisfied_groups(&none, true));
+        assert!(!expr.is_satisfied_groups(&none, false));
+    }
 
     #[test]
     fn parse_single_flag() {
