@@ -1480,6 +1480,8 @@ pub(super) struct PrettyCtx<'a> {
     /// would add a network fetch to a plain `-p` preview; the merge itself
     /// still checks them via `run_merge_plan`'s own index.
     pub binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
+    /// The `BUILD_ID` a build-id target pins, by cpv: only that build counts as `[binary]`
+    pub build_ids: &'a HashMap<Cpv, u64>,
     /// Wall-clock time spent in the resolution phase (initial solve + any
     /// `--complete-graph` repair rounds), shown on the Pretty plan as
     /// `Dependency resolution took N.NN s.` — the one emerge-parity stats
@@ -1535,6 +1537,19 @@ pub(super) fn print_pretty_rooted(
     print_pretty_with_roots(ctx, &order, &merge_roots, cross);
 }
 
+/// Whether the plan display marks `cpv` `[binary]`: a reusable local build, the pinned one if any
+fn has_reusable_binpkg(
+    idx: &portage_binpkg::BinpkgIndex,
+    cpv: &Cpv,
+    build_id: Option<u64>,
+    desired_use: &[String],
+) -> bool {
+    // Empty CHOST and build_env_key: preview skips both gates (same as "unknown");
+    // the real merge path passes make.conf CHOST and build_env_key.
+    idx.find_reusable(&cpv.to_string(), build_id, desired_use, "", "")
+        .is_some()
+}
+
 /// Builds the two halves of one row of the emerge-style plan display: the
 /// bracket status column (`"[ebuild  U  ]"`), and everything after it
 /// (`cpn-ver`, old-version column, USE flags, size, destination suffix).
@@ -1576,6 +1591,7 @@ fn format_plan_parts(
         force_mask,
         accept_keywords,
         binpkg_index,
+        build_ids,
         resolve_secs: _,
         selected,
         requested,
@@ -1639,10 +1655,7 @@ fn format_plan_parts(
             .iter()
             .map(|f| f.as_str().to_string())
             .collect();
-        // Empty CHOST and build_env_key: preview skips both gates (same as "unknown");
-        // the real merge path passes make.conf CHOST and build_env_key.
-        idx.find_reusable(&cpv.to_string(), None, &desired_use, "", "")
-            .is_some()
+        has_reusable_binpkg(idx, &cpv, build_ids.get(&cpv).copied(), &desired_use)
     });
 
     let previous = previous_entry(pkg, ver, installed_entries);
@@ -2291,6 +2304,29 @@ fn render_tree(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_pinned_build_marks_a_row_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = |id: u32, use_: &str| {
+            format!(
+                "CPV: app-misc/bar-1\nPATH: app-misc/bar/bar-1-{id}.gpkg.tar\nBUILD_ID: {id}\n\
+                 IUSE: foo\nUSE: {use_}\n"
+            )
+        };
+        let text = format!("VERSION: 0\n\n{}\n{}", entry(1, ""), entry(3, "foo"));
+        std::fs::write(dir.path().join("Packages"), text).unwrap();
+        let idx = portage_binpkg::BinpkgIndex::open(dir.path()).unwrap();
+        let cpv = super::Cpv::parse("app-misc/bar-1").unwrap();
+        assert!(super::has_reusable_binpkg(&idx, &cpv, None, &[]));
+        assert!(!super::has_reusable_binpkg(&idx, &cpv, Some(3), &[]));
+        assert!(super::has_reusable_binpkg(
+            &idx,
+            &cpv,
+            Some(3),
+            &["foo".into()]
+        ));
+    }
+
     use super::*;
 
     // Call [`flag_token`] with the given comparison state, returning the

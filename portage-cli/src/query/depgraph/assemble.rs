@@ -248,6 +248,7 @@ pub(super) fn assemble(
         force_mask: &force_mask,
         accept_keywords: &accept_keywords,
         binpkg_index,
+        build_ids: &build_ids,
         resolve_secs,
         selected: &selected,
         requested: &root_cpns,

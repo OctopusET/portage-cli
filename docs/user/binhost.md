@@ -80,6 +80,8 @@ em --target "$T" -b -k @system
 A single `PKGDIR` can hold multiple boards' binpkgs at once — the index is
 multi-instance (`cpv → Vec<entry>`), and `find_reusable` picks the newest
 `BUILD_ID` among the entries matching CHOST + key.
+A target atom with a build id, `=cat/pkg-1.0-3`, merges that `BUILD_ID` only. It needs `-k`/`-K`
+and a local `PKGDIR` that holds the build, and never falls back to a source build.
 
 Boards may build into it at the same time: em locks `PKGDIR/.em-pkgdir.lock`
 while it allocates a `BUILD_ID`, writes a container and rewrites `Packages`,
