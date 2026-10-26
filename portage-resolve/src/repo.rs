@@ -227,12 +227,19 @@ impl KeywordAccept {
     ///
     /// `downgrade` re-checks with every `Stable` package keyword treated as
     /// `Testing` first — Portage's `isStable` recheck (see [`Self::is_stable_for`]).
-    fn accepts_inner(&self, keywords: &[Keyword], downgrade: bool) -> bool {
-        if self.any {
+    fn accepts_inner(&self, keywords: &[Keyword], wild: KeywordWild, downgrade: bool) -> bool {
+        if self.any || (wild.star && !downgrade) {
             return true;
         }
-        let mut has_stable = false;
-        let mut has_testing = false;
+        // Downgrading turns a package `*` into `~*` and `**` into `~**`.
+        let mut has_stable = wild.star_star && !downgrade;
+        let mut has_testing = wild.star_star && downgrade;
+        if wild.tilde_star || (wild.star && downgrade) {
+            has_testing = true;
+            if self.any_testing || !self.testing.is_empty() {
+                return true;
+            }
+        }
         for kw in keywords {
             let stability = if downgrade && kw.stability == Stability::Stable {
                 Stability::Testing
@@ -258,8 +265,8 @@ impl KeywordAccept {
         (has_stable && self.any_stable) || (has_testing && self.any_testing)
     }
 
-    fn accepts(&self, keywords: &[Keyword]) -> bool {
-        self.accepts_inner(keywords, false)
+    fn accepts(&self, keywords: &[Keyword], wild: KeywordWild) -> bool {
+        self.accepts_inner(keywords, wild, false)
     }
 
     /// Whether the package is accepted on a *stable* keyword path (gates
@@ -271,8 +278,8 @@ impl KeywordAccept {
     /// in, nothing is "forced" by stability. `ACCEPT_KEYWORDS="arm64
     /// ~arm64"` with `KEYWORDS="arm64"` is **not** stable this way (the
     /// `~arm64` grant alone already accepts it).
-    fn is_stable_for(&self, keywords: &[Keyword]) -> bool {
-        self.accepts_inner(keywords, false) && !self.accepts_inner(keywords, true)
+    fn is_stable_for(&self, keywords: &[Keyword], wild: KeywordWild) -> bool {
+        self.accepts_inner(keywords, wild, false) && !self.accepts_inner(keywords, wild, true)
     }
 }
 
@@ -313,6 +320,42 @@ pub struct AcceptKeywords {
     package_keywords_index: AtomIndex,
 }
 
+/// Package-side wildcards a profile `package.keywords` line added to `KEYWORDS`
+#[derive(Clone, Copy, Default)]
+struct KeywordWild {
+    /// `*`: visible whatever is accepted
+    star: bool,
+    /// `~*`: visible when any testing keyword is accepted
+    tilde_star: bool,
+    /// `**`: a stable keyword only `*` or `**` accepts
+    star_star: bool,
+}
+
+impl KeywordWild {
+    /// The field `token` (`*`, `~*` or `**`) names
+    fn field(&mut self, token: &str) -> Option<&mut bool> {
+        match token {
+            "*" => Some(&mut self.star),
+            "~*" => Some(&mut self.tilde_star),
+            "**" => Some(&mut self.star_star),
+            _ => None,
+        }
+    }
+
+    /// Set (`add`) or clear each wildcard that `edit` names
+    fn apply(&mut self, edit: KeywordWild, add: bool) {
+        for (field, named) in [
+            (&mut self.star, edit.star),
+            (&mut self.tilde_star, edit.tilde_star),
+            (&mut self.star_star, edit.star_star),
+        ] {
+            if named {
+                *field = add;
+            }
+        }
+    }
+}
+
 /// One profile `package.keywords` token, applied incrementally to `KEYWORDS`
 #[derive(Clone)]
 enum KeywordEdit {
@@ -322,6 +365,8 @@ enum KeywordEdit {
     Remove(Keyword),
     /// `kw`
     Add(Keyword),
+    /// `*`, `~*` or `**` added (`true`) or removed with a `-`
+    Wild(KeywordWild, bool),
 }
 
 impl KeywordEdit {
@@ -329,10 +374,17 @@ impl KeywordEdit {
         if token == "-*" {
             return Some(Self::Clear);
         }
-        match token.strip_prefix('-') {
-            Some(kw) => Keyword::parse(kw).ok().map(Self::Remove),
-            None => Keyword::parse(token).ok().map(Self::Add),
+        let (add, kw) = match token.strip_prefix('-') {
+            Some(kw) => (false, kw),
+            None => (true, token),
+        };
+        let mut wild = KeywordWild::default();
+        if let Some(on) = wild.field(kw) {
+            *on = true;
+            return Some(Self::Wild(wild, add));
         }
+        let kw = Keyword::parse(kw).ok()?;
+        Some(if add { Self::Add(kw) } else { Self::Remove(kw) })
     }
 }
 
@@ -404,9 +456,10 @@ impl AcceptKeywords {
         cpv: &Cpv,
         slot: Option<Interned<DefaultInterner>>,
         repo: Option<Interned<DefaultInterner>>,
-    ) -> Cow<'k, [Keyword]> {
+    ) -> (Cow<'k, [Keyword]>, KeywordWild) {
+        let mut wild = KeywordWild::default();
         if self.package_keywords.is_empty() {
-            return Cow::Borrowed(keywords);
+            return (Cow::Borrowed(keywords), wild);
         }
         let slot = slot.map(portage_atom::Slot::from_name);
         let mut out: Option<Vec<Keyword>> = None;
@@ -425,17 +478,21 @@ impl AcceptKeywords {
             });
             for edit in edits {
                 match edit {
-                    KeywordEdit::Clear => list.clear(),
+                    KeywordEdit::Clear => {
+                        list.clear();
+                        wild = KeywordWild::default();
+                    }
                     KeywordEdit::Remove(kw) => list.retain(|k| k != kw),
                     KeywordEdit::Add(kw) => {
                         if !list.contains(kw) {
                             list.push(kw.clone());
                         }
                     }
+                    KeywordEdit::Wild(w, add) => wild.apply(*w, *add),
                 }
             }
         }
-        out.map_or(Cow::Borrowed(keywords), Cow::Owned)
+        (out.map_or(Cow::Borrowed(keywords), Cow::Owned), wild)
     }
 
     /// Test-only constructor from a global token list (no per-package entries)
@@ -495,8 +552,8 @@ impl AcceptKeywords {
         slot: Option<Interned<DefaultInterner>>,
         repo: Option<Interned<DefaultInterner>>,
     ) -> bool {
-        let keywords = self.edited_keywords(keywords, cpv, slot, repo);
-        self.decision(cpv, slot, repo).accepts(&keywords)
+        let (keywords, wild) = self.edited_keywords(keywords, cpv, slot, repo);
+        self.decision(cpv, slot, repo).accepts(&keywords, wild)
     }
 
     /// Whether this version is merged on a *stable* keyword path
@@ -512,8 +569,9 @@ impl AcceptKeywords {
         slot: Option<Interned<DefaultInterner>>,
         repo: Option<Interned<DefaultInterner>>,
     ) -> bool {
-        let keywords = self.edited_keywords(keywords, cpv, slot, repo);
-        self.decision(cpv, slot, repo).is_stable_for(&keywords)
+        let (keywords, wild) = self.edited_keywords(keywords, cpv, slot, repo);
+        self.decision(cpv, slot, repo)
+            .is_stable_for(&keywords, wild)
     }
 
     /// The keyword token an autounmask would need: the version is not accepted
@@ -530,7 +588,7 @@ impl AcceptKeywords {
         if self.accepts(keywords, cpv, slot, repo) {
             return None;
         }
-        let keywords = self.edited_keywords(keywords, cpv, slot, repo);
+        let (keywords, _) = self.edited_keywords(keywords, cpv, slot, repo);
         if keywords
             .iter()
             .any(|kw| kw.arch == self.arch && kw.stability == Stability::Testing)
@@ -2522,6 +2580,27 @@ mod tests {
         assert!(added(&["amd64", "~amd64"]).accepts(&[], &foo, None, None));
         let bar = Cpv::parse("dev-libs/bar-1").unwrap();
         assert!(!added(&["amd64", "~amd64"]).accepts(&[], &bar, None, None));
+    }
+
+    #[test]
+    fn profile_package_keywords_wildcards_follow_get_missing_keywords() {
+        let arch = Arch::intern("amd64");
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+        let ak = |global: &[&str], toks: &[&str]| {
+            let line = vec![(
+                atom("dev-libs/foo"),
+                toks.iter().map(|t| t.to_string()).collect(),
+            )];
+            AcceptKeywords::from_global(&arch, global).with_package_keywords(line)
+        };
+        assert!(ak(&["amd64"], &["*"]).accepts(&[], &foo, None, None));
+        assert!(ak(&["amd64"], &["*"]).is_stable(&[], &foo, None, None));
+        assert!(!ak(&["amd64"], &["~*"]).accepts(&[], &foo, None, None));
+        assert!(ak(&["amd64", "~arm64"], &["~*"]).accepts(&[], &foo, None, None));
+        assert!(!ak(&["amd64"], &["**"]).accepts(&[], &foo, None, None));
+        assert!(ak(&["*"], &["**"]).accepts(&[], &foo, None, None));
+        assert!(!ak(&["amd64"], &["*", "-*"]).accepts(&[], &foo, None, None));
+        assert!(!ak(&["~amd64"], &["~*", "-~*"]).accepts(&[], &foo, None, None));
     }
 
     #[test]
