@@ -177,7 +177,7 @@ impl DependencyProvider for PortageDependencyProvider {
         }
         let candidates = if replaceable { offered } else { candidates };
 
-        // `--deep` / native emptytree: for a `:*` any-slot dep (`SlotChoice`),
+        // `-uD` / native emptytree: for a `:*` any-slot dep (`SlotChoice`),
         // bump to the newest slot instead of keeping a satisfying installed slot
         // — matching `emerge -uD`/`-e` (e.g. firefox pulling the newest
         // `dev-lang/rust-bin` slot). Slots are version-ranked, so the `max()`

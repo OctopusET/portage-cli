@@ -13,8 +13,8 @@ pub struct DepgraphFlags {
     /// Re-examine transitive dependencies
     ///
     /// With `--update` (`-uD`), upgrades installed packages in the depgraph to the newest
-    /// accepted in-slot version (emerge `-uD`). Alone, still bumps `:*` any-slot deps to the
-    /// newest slot rather than keeping a satisfying installed slot.
+    /// accepted in-slot version and bumps `:*` any-slot deps to the newest slot (emerge `-uD`).
+    /// Alone, it descends into installed dependencies without upgrading them.
     #[arg(short = 'D', long)]
     pub deep: bool,
 

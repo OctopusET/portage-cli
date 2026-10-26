@@ -104,7 +104,7 @@ How far to re-examine installed dependencies.
 
 * `-D, --deep` — Re-examine transitive dependencies
 
-  With `--update` (`-uD`), upgrades installed packages in the depgraph to the newest accepted in-slot version (emerge `-uD`). Alone, still bumps `:*` any-slot deps to the newest slot rather than keeping a satisfying installed slot.
+  With `--update` (`-uD`), upgrades installed packages in the depgraph to the newest accepted in-slot version and bumps `:*` any-slot deps to the newest slot (emerge `-uD`). Alone, it descends into installed dependencies without upgrading them.
 * `-N, --newuse` — Reinstall installed packages when their planned USE or IUSE differs from the VDB (emerge `--newuse`)
 
   Applies to packages that appear in the depgraph; pairs with `--deep` for a full-tree USE recheck.

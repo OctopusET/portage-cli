@@ -317,7 +317,7 @@ pub struct PortageDependencyProvider {
     /// `--emptytree`: do not prefer installed virtual/OR branches; full deep
     /// closure from repository candidates
     pub(crate) rebuild_tree: bool,
-    /// `--deep` (and native `--emptytree`): for a `:*` any-slot dep
+    /// `--update --deep` (and native `--emptytree`): for a `:*` any-slot dep
     /// (`SlotChoice`), bump to the newest slot instead of keeping the installed
     /// slot that already satisfies `>=MIN` — matching `emerge -uD`/`-e`
     ///
@@ -956,7 +956,7 @@ impl PortageDependencyProvider {
         self.rebuild_tree = active;
     }
 
-    /// `--deep` / native `--emptytree`: bump `:*` any-slot deps (`SlotChoice`)
+    /// `-uD` / native `--emptytree`: bump `:*` any-slot deps (`SlotChoice`)
     /// to the newest slot rather than keeping a satisfying installed slot
     pub fn set_prefer_newest_slot(&mut self, active: bool) {
         self.prefer_newest_slot = active;

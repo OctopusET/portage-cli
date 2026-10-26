@@ -331,7 +331,7 @@ Intended target semantics (all match emerge):
   installed version (**`InstalledPolicy::Favor`**), unless **`-uD`**
   (`prefer_update`): then every package in the solve takes the newest accepted
   in-slot version (emerge `--update --deep`). `-u` alone does **not** mass-upgrade
-  transitive deps; `-D` alone still only bumps `:*` slots (`prefer_newest_slot`).
+  transitive deps; `-uD` also bumps `:*` slots (`prefer_newest_slot`), `-D` alone does not.
 - A **bare command-line target denotes the best accepted version** of the matched
   set = its newest accepted slot (`em -p python` ≡ `em -p python:3.14`; `python:*`
   likewise). Multi-slot is not an ambiguity; it is a deterministic best-slot pick.
