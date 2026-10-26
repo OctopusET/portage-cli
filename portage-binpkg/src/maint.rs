@@ -211,6 +211,7 @@ pub fn verify(
     let policy = VerifyPolicy {
         require_signature,
         keyring,
+        ..Default::default()
     };
 
     let mut ok = 0usize;

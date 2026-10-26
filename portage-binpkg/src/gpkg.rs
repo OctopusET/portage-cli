@@ -369,6 +369,9 @@ pub struct VerifyPolicy<'a> {
     /// clearsign wrapper (and any per-member `.sig`) is cryptographically
     /// checked — independent of `require_signature`.
     pub keyring: Option<&'a gpg::Keyring>,
+    /// `FEATURES=binpkg-ignore-signature`: extract a signed container without
+    /// checking it. Otherwise a signed Manifest needs `keyring` to be extracted.
+    pub ignore_signature: bool,
 }
 
 /// Result of [`verify_container_signature`]
@@ -654,11 +657,25 @@ fn find_member<'a>(members: &'a [String], prefix: &str, container: &Path) -> Res
 ///
 /// `policy` is checked first (via [`verify_container_signature`]) — a
 /// signature-required-but-missing or fails-to-verify container is rejected
-/// before any extraction happens. `VerifyPolicy::default()` reproduces the
-/// old unconditional (no signature checking at all) behavior.
+/// before any extraction happens, and so is a signed one with no keyring to
+/// check it against unless `policy.ignore_signature` is set.
 pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Result<()> {
+    let policy = if policy.ignore_signature {
+        VerifyPolicy {
+            keyring: None,
+            ..policy
+        }
+    } else {
+        policy
+    };
     let staged = stage_verified_container(container, &policy, true)?;
     let report = &staged.report;
+    if report.signed && report.signature_valid.is_none() && !policy.ignore_signature {
+        return Err(Error::Signature(format!(
+            "{} is signed, but no keyring is configured to verify it",
+            container.display()
+        )));
+    }
     if report.signature_valid == Some(false) {
         return Err(Error::Signature(format!(
             "Manifest signature does not verify against the configured keyring: {}",
@@ -1151,6 +1168,7 @@ mod tests {
             &VerifyPolicy {
                 require_signature: true,
                 keyring: Some(&keyring),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1175,6 +1193,7 @@ mod tests {
             VerifyPolicy {
                 require_signature: true,
                 keyring: Some(&keyring),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1217,10 +1236,47 @@ mod tests {
             VerifyPolicy {
                 require_signature: false,
                 keyring: Some(&wrong_keyring),
+                ..Default::default()
             },
         )
         .unwrap_err();
         assert!(matches!(err, Error::Signature(_)));
+    }
+
+    #[test]
+    fn a_signed_gpkg_needs_a_keyring_unless_signatures_are_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (image, meta) = build_fixture(root);
+        let (signing, _keyring) = gen_signing_key(root);
+        let other_root = root.join("other");
+        fs::create_dir_all(&other_root).unwrap();
+        let (_other_signing, wrong_keyring) = gen_signing_key(&other_root);
+
+        let container = root.join("app-test/foo-1.0-1.gpkg.tar");
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        write_gpkg(
+            &GpkgInput {
+                image_dir: &image,
+                metadata_dir: &meta,
+                basename: "foo-1.0",
+                signing: Some(&signing),
+                build_id: None,
+            },
+            &container,
+        )
+        .unwrap();
+
+        let err = extract_image(&container, &root.join("a"), VerifyPolicy::default()).unwrap_err();
+        assert!(matches!(err, Error::Signature(_)), "{err}");
+        for keyring in [None, Some(&wrong_keyring)] {
+            let policy = VerifyPolicy {
+                keyring,
+                ignore_signature: true,
+                ..Default::default()
+            };
+            extract_image(&container, &root.join("b"), policy).unwrap();
+        }
     }
 
     // `FEATURES=binpkg-request-signature` (`require_signature: true`)
@@ -1252,6 +1308,7 @@ mod tests {
             VerifyPolicy {
                 require_signature: true,
                 keyring: None,
+                ..Default::default()
             },
         )
         .unwrap_err();

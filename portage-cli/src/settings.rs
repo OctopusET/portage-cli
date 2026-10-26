@@ -177,6 +177,7 @@ pub(crate) async fn seed_build_shell(shell: &mut EbuildShell, settings: &Setting
 
 /// `FEATURES` switches em acts on when the configuration sets them
 const HONOURED_FEATURES: &[&str] = &[
+    "binpkg-ignore-signature",
     "binpkg-request-signature",
     "binpkg-signing",
     "buildpkg",

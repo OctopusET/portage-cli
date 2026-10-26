@@ -1521,7 +1521,14 @@ impl PackageSetup {
                 features.contains("binpkg-request-signature") || force_verify_signature;
             // Where src_install would have put it: the package holds `ED`.
             let image = shell.image_ed(&ebuild, wd.as_std_path(), root.as_std_path());
-            let saved = extract_binpkg(&shell, bp, &image, config_root, require_signature)?;
+            let saved = extract_binpkg(
+                &shell,
+                bp,
+                &image,
+                config_root,
+                require_signature,
+                &features,
+            )?;
             if let Some(shipped) = portage_binpkg::read_ebuild(bp.as_std_path())
                 .with_context(|| format!("reading the ebuild of {bp}"))?
             {
@@ -1697,6 +1704,7 @@ fn extract_binpkg(
     image_dir: &std::path::Path,
     config_root: Option<&Utf8Path>,
     require_signature: bool,
+    features: &std::collections::HashSet<String>,
 ) -> Result<Option<Vec<u8>>> {
     std::fs::create_dir_all(image_dir)
         .with_context(|| format!("creating {}", image_dir.display()))?;
@@ -1718,9 +1726,12 @@ fn extract_binpkg(
             "FEATURES=binpkg-request-signature (or this binpkg's binrepos.conf verify-signature=yes) requires a GPG verify keyring at {verify_home} — run `em maint binpkg gpg-import <keyfile>` first"
         );
     }
+    // binpkg-request-signature wins over binpkg-ignore-signature, as in portage.
+    let ignore_signature = !require_signature && features.contains("binpkg-ignore-signature");
     let policy = portage_binpkg::VerifyPolicy {
         require_signature,
         keyring: keyring.as_ref(),
+        ignore_signature,
     };
     portage_binpkg::extract_image(bp.as_std_path(), image_dir, policy)
         .with_context(|| format!("extracting image from {bp}"))?;
