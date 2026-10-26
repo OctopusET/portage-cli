@@ -418,7 +418,7 @@ Stages, in order:
    (at its installed version or newer), so `--exclude` and visibility apply to it.
    Under `-uD` a consumer in the graph is also rebuilt when the installed provider's
    subslot already differs, or when its ebuild's unslotted `:=` accepts a newer
-   planned slot (`--rebuild-if-new-slot`; emerge also does this under `-u` alone).
+   planned or visible slot (`--rebuild-if-new-slot`); see the divergences below.
 7. **Post-solve checks** — see [Post-solve validation](#post-solve-validation).
 8. **Install order** (`install_order`) — SCC condensation (iterative Tarjan) +
    lexicographic Kahn; hard (DEPEND/BDEPEND) edges before soft (RDEPEND); cycles
@@ -665,6 +665,16 @@ package lists its deps under the USE it was built with: its ebuild's when the
 repository still has that version, the VDB's otherwise (emerge's default
 `--dynamic-deps=y`). Unlike emerge, the VDB's bound `:=` sub-slots are not
 merged into the ebuild's deps.
+
+**`--exclude` on a hard dependency.** em steers `||` choices away from an
+excluded package, but a hard dependency on one still resolves and the package is
+dropped from the plan after the solve. emerge never selects it (mask reason
+"exclude option"), so the same resolve fails there.
+
+**Slot-operator rebuilds gated on `-uD`.** A consumer whose VDB `slot/subslot=`
+no longer matches the installed provider, or whose unslotted `:=` could bind a
+newer slot, is rebuilt only under `--update --deep`. emerge checks any consumer
+in the graph, a root target under plain `-u` included.
 
 **Installed packages masked only by KEYWORDS, PROPERTIES or RESTRICT.** As in
 emerge, such an installed version is visible and is never reported as masked,
