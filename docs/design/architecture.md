@@ -567,10 +567,11 @@ lines take `portage_atom::ConfigAtom`: a PMS `Dep` or Portage's extended wildcar
 syntax (not PMS). Each file is reordered by `order_by_specificity` (Portage's
 `ordered_by_atom_specificity`) at load, so folding in order applies the most
 specific matching line last; profile files are ordered per profile node.
-A bare `*/*` line in `package.use`/`package.env` (USE), `package.license`,
-`package.properties` or `package.accept_restrict` extends the global
-`USE`/`ACCEPT_*` setting instead, as Portage does. `::repo` is honoured in
-masks, keywords, licenses, properties and restrict.
+A bare `*/*` line in `package.use`, `package.license`, `package.properties`
+or `package.accept_restrict` extends make.conf's `USE`/`ACCEPT_*` instead
+(below the process environment), as Portage does; a `package.env` one applies
+per package. `package.env` USE folds before `package.use`, which overrides it.
+`::repo` is honoured in masks, keywords, licenses, properties and restrict.
 
 Divergences: Portage's version-distance tie-break between two ranged atoms
 (`>=a` vs `<b`) is not reproduced (the line written first applies last), and `::repo` on a

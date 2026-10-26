@@ -299,6 +299,7 @@ async fn compute_use_env(
     let package_license = per_package_accept(
         [site_license, overlay_license],
         &mut accept_license_tokens,
+        env.get("ACCEPT_LICENSE"),
         |toks| AcceptSet::from_tokens(toks, &license_groups),
     );
     let accept_license = AcceptSet::from_tokens(&accept_license_tokens, &license_groups);
@@ -322,6 +323,7 @@ async fn compute_use_env(
     let package_properties = per_package_accept(
         site_and_overlay("package.properties"),
         &mut accept_properties_tokens,
+        env.get("ACCEPT_PROPERTIES"),
         AcceptSet::from_tokens_plain,
     );
     let accept_properties = AcceptSet::from_tokens_plain(&accept_properties_tokens);
@@ -330,6 +332,7 @@ async fn compute_use_env(
     let package_restrict = per_package_accept(
         site_and_overlay("package.accept_restrict"),
         &mut accept_restrict_tokens,
+        env.get("ACCEPT_RESTRICT"),
         AcceptSet::from_tokens_plain,
     );
     let accept_restrict = AcceptSet::from_tokens_plain(&accept_restrict_tokens);
@@ -401,9 +404,9 @@ async fn compute_use_env(
         profile_package_use.push(profile_node(layer.package_use.clone(), UseLayer::empty()));
     }
 
-    // User `package.use`, then `package.env`'s own USE, per config directory (host,
-    // then overlay; Portage does not interleave config layers). A `*/*` line of either
-    // extends make.conf's USE, as Portage folds it into the `conf` layer.
+    // `package.env`'s own USE, then user `package.use` (which overrides it), per config
+    // directory (host, then overlay). Only a `package.use` `*/*` line extends make.conf's
+    // USE; Portage applies a `package.env` one per package like any other line.
     let mut conf_use = resolved.conf_use.clone();
     let mut package_use: Vec<(ConfigAtom, Vec<UseOverride>)> = Vec::new();
     for dir in std::iter::once(portage_dir.as_path()).chain(config_overlay) {
@@ -412,8 +415,8 @@ async fn compute_use_env(
             .filter(|(_, flags)| !flags.is_empty())
             .collect();
         let site_use = expand_flags(raw);
-        let env_overrides = load_package_env_use(dir).await;
-        for (atom, overrides) in site_use.into_iter().chain(env_overrides) {
+        package_use.extend(load_package_env_use(dir).await);
+        for (atom, overrides) in site_use {
             if !atom.is_match_all() {
                 package_use.push((atom, overrides));
                 continue;
@@ -596,22 +599,31 @@ fn parse_keyword_tokens(
 }
 
 /// `package.license`-style layers, each ordered by atom specificity, as per-package
-/// overlays; a `*/*` line's tokens extend the global `accept_tokens` instead, as in Portage
+/// overlays. A `*/*` line's tokens join the stacked `accept_tokens` at make.conf's
+/// layer, as in Portage: below `env_value`, the process environment's own tokens.
 fn per_package_accept(
     layers: impl IntoIterator<Item = Vec<(ConfigAtom, Vec<String>)>>,
     accept_tokens: &mut Vec<String>,
+    env_value: Option<&str>,
     to_set: impl Fn(&[String]) -> AcceptSet,
 ) -> Vec<(ConfigAtom, AcceptSet)> {
     let mut out = Vec::new();
+    let mut global = Vec::new();
     for layer in layers {
         for (atom, toks) in order_by_specificity(layer) {
             if atom.is_match_all() {
-                accept_tokens.extend(toks);
+                global.extend(toks);
             } else {
                 let set = to_set(&toks);
                 out.push((atom, set));
             }
         }
+    }
+    let env: Vec<&str> = env_value.unwrap_or_default().split_whitespace().collect();
+    // The stacked list ends with the env tokens unless they restart it, which drops `global` too.
+    if !env.iter().any(|t| matches!(*t, "*" | "-*")) {
+        let at = accept_tokens.len().saturating_sub(env.len());
+        accept_tokens.splice(at..at, global);
     }
     out
 }
@@ -772,8 +784,9 @@ fn stack_user_atoms(acc: &mut Vec<ConfigAtom>, lines: Vec<(bool, ConfigAtom)>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptToken, PendingConfig, PendingProfile, ProfileLayer, UseEnv, build_use_env,
+        AcceptSet, AcceptToken, PendingConfig, PendingProfile, ProfileLayer, UseEnv, build_use_env,
         expand_use_expand_colon, flags_have_use_clear_all, load_atom_tokens, load_package_env_use,
+        per_package_accept,
     };
     use portage_atom::{ConfigAtom, Cpv, Dep};
     use portage_atom_pubgrub::UseOverride;
@@ -1028,7 +1041,9 @@ mod tests {
         let etc = root_dir.path().join("etc/portage");
         std::fs::create_dir_all(&etc).unwrap();
         for (name, body) in site {
-            std::fs::write(etc.join(name), body).unwrap();
+            let path = etc.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
         }
         let root = camino::Utf8Path::from_path(root_dir.path()).unwrap();
         build_use_env(&repos, Some(root), None, None, Some(&pending))
@@ -1059,6 +1074,64 @@ mod tests {
         assert!(env.accept_license.accepts("GPL-2"));
         let mask: Vec<_> = env.package_mask.iter().map(|a| a.to_string()).collect();
         assert_eq!(mask, ["dev-libs/*::gentoo"]);
+    }
+
+    #[tokio::test]
+    async fn wildcard_lines_in_the_other_files() {
+        let env = env_with_site(&[
+            ("package.env", "*/* e\n"),
+            ("env/e", "USE=\"y\"\n"),
+            ("package.properties", "*/* -interactive\n"),
+            ("package.accept_restrict", "*/* -fetch\n"),
+            ("package.mask", "dev-libs/*\n-dev-libs/*\n"),
+        ])
+        .await;
+        let y = portage_atom::interner::Interned::intern("y");
+        assert!(!env.conf.mentions(y));
+        assert_eq!(atoms(&env.package_use), ["*/*"]);
+        assert!(env.package_properties.is_empty());
+        assert!(!env.accept_properties.accepts("interactive"));
+        assert!(env.accept_properties.accepts("live"));
+        assert!(!env.accept_restrict.accepts("fetch"));
+        assert!(env.package_mask.is_empty());
+    }
+
+    #[tokio::test]
+    async fn package_use_overrides_package_env_use() {
+        let env = env_with_site(&[
+            ("package.env", "dev-libs/foo e\n"),
+            ("env/e", "USE=\"x\"\n"),
+            ("package.use", "dev-libs/foo -x\n"),
+        ])
+        .await;
+        let empty = portage_atom_pubgrub::UseLayer::default();
+        let cfg = portage_atom_pubgrub::resolve_effective_use(
+            &Default::default(),
+            &empty,
+            &Cpv::parse("dev-libs/foo-1").unwrap(),
+            None,
+            &env.package_use,
+            &empty,
+            &[],
+            &empty,
+        );
+        assert_eq!(
+            cfg.get(portage_atom::interner::Interned::intern("x")),
+            portage_atom_pubgrub::UseFlagState::Disabled
+        );
+    }
+
+    #[test]
+    fn a_match_all_accept_line_sits_below_the_env_layer() {
+        let line = || vec![(ConfigAtom::parse("*/*").unwrap(), vec!["GPL-2".to_string()])];
+        let stack = |tokens: &[&str], env: Option<&str>| {
+            let mut tokens: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+            per_package_accept([line()], &mut tokens, env, AcceptSet::from_tokens_plain);
+            AcceptSet::from_tokens_plain(&tokens)
+        };
+        assert!(stack(&["MIT"], None).accepts("GPL-2"));
+        assert!(!stack(&["MIT", "-GPL-2"], Some("-GPL-2")).accepts("GPL-2"));
+        assert!(!stack(&["-*", "MIT"], Some("-* MIT")).accepts("GPL-2"));
     }
 
     #[tokio::test]
