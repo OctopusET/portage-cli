@@ -9,7 +9,6 @@ use portage_metadata::{LicenseExpr, RestrictExpr};
 
 use crate::error::{Error, Result};
 use crate::repo::named_groups::{GroupEntry, expand_group, group_ref_name};
-use crate::repo::repository::Repository;
 
 /// Parsed `profiles/license_groups`: group name → direct members
 #[derive(Debug, Clone, Default)]
@@ -18,24 +17,27 @@ pub struct LicenseGroupRegistry {
 }
 
 impl LicenseGroupRegistry {
-    /// Load group definitions from `repo/profiles/license_groups`
-    pub fn from_repo(repo: &Repository) -> Result<Self> {
-        let path = repo.path().join("profiles/license_groups");
-        Self::from_file(path.as_std_path())
-    }
-
-    /// Parse a `license_groups` file (tolerates absence → empty registry)
-    pub fn from_file(path: &Path) -> Result<Self> {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return Ok(Self::default());
-        };
-        Ok(Self::parse(&content))
+    /// Merge the `license_groups` files at `paths`, skipping unreadable ones
+    ///
+    /// A group defined in several files gets the members of every definition.
+    pub fn from_files<P: AsRef<Path>>(paths: impl IntoIterator<Item = P>) -> Self {
+        let mut out = Self::default();
+        for path in paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                out.add(&content);
+            }
+        }
+        out
     }
 
     /// Parse `profiles/license_groups` content
     pub fn parse(content: &str) -> Self {
-        let mut groups: HashMap<String, Vec<GroupEntry<Interned<DefaultInterner>>>> =
-            HashMap::new();
+        let mut out = Self::default();
+        out.add(content);
+        out
+    }
+
+    fn add(&mut self, content: &str) {
         for line in content.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -49,10 +51,12 @@ impl LicenseGroupRegistry {
                 .filter_map(|t| classify_license_token(t).ok())
                 .collect();
             if !members.is_empty() {
-                groups.insert(name.to_string(), members);
+                self.groups
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(members);
             }
         }
-        Self { groups }
     }
 
     /// Expand a group name to interned license identifiers (cycle-safe)
@@ -353,6 +357,20 @@ OSI Apache-2.0
         assert!(names.contains("MIT"));
         assert!(names.contains("GPL-2+"));
         assert!(names.contains("Apache-2.0"));
+    }
+
+    #[test]
+    fn from_files_extends_a_group_defined_in_several_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let user = dir.path().join("user");
+        std::fs::write(&repo, "EULA geekbench\n").unwrap();
+        std::fs::write(&user, "EULA RAR\nLOCAL my-license\n").unwrap();
+        let reg = LicenseGroupRegistry::from_files([&repo, &dir.path().join("absent"), &user]);
+        let eula = reg.expand("EULA");
+        let eula: HashSet<_> = eula.iter().map(|l| l.as_str()).collect();
+        assert_eq!(eula, HashSet::from(["geekbench", "RAR"]));
+        assert!(reg.contains("LOCAL"));
     }
 
     #[test]

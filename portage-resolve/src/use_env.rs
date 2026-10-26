@@ -262,8 +262,13 @@ async fn compute_use_env(
     if let Some(pending) = pending {
         package_accept_keywords.extend(pending.package_accept_keywords.iter().cloned());
     }
-    let license_groups = LicenseGroupRegistry::from_repo(repo)
-        .map_err(|e| anyhow::anyhow!("failed to load license groups: {e}"))?;
+    let license_groups = LicenseGroupRegistry::from_files(
+        repos
+            .iter()
+            .map(|r| r.path().join("profiles/license_groups"))
+            .chain(std::iter::once(portage_dir.join("license_groups")))
+            .chain(config_overlay.map(|o| o.join("license_groups"))),
+    );
     // The `ACCEPT_*` lists arrive stacked, the process environment included; an empty one
     // takes Portage's default.
     let accept_list = |name: &str, default: &str| {
