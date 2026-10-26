@@ -134,18 +134,21 @@ impl Ebuild {
     /// Skips blank and comment lines, then checks whether the first
     /// non-blank non-comment line is an `EAPI=` assignment. If matched,
     /// returns the parsed [`Eapi`]; otherwise defaults to [`Eapi::Zero`].
+    /// An EAPI this package manager does not support is an `InvalidEapi` error.
     ///
     /// See [PMS 7.3.1](https://projects.gentoo.org/pms/9/pms.html#x1-690007.3.1).
     pub fn detect_eapi(&self) -> Result<Eapi> {
         let content = self.read_raw()?;
-        Ok(detect_eapi_from_str(&content))
+        detect_eapi_from_str(&content)
+            .map_err(|raw| portage_metadata::Error::InvalidEapi(raw).into())
     }
 }
 
 /// Parse EAPI from ebuild file content per PMS 7.3.1
 ///
 /// Extracted as a free function for testability without filesystem access.
-pub(crate) fn detect_eapi_from_str(content: &str) -> Eapi {
+/// `Err` holds the raw value of an unsupported EAPI.
+pub(crate) fn detect_eapi_from_str(content: &str) -> std::result::Result<Eapi, String> {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -160,13 +163,16 @@ pub(crate) fn detect_eapi_from_str(content: &str) -> Eapi {
                 .or_else(|| caps.get(3))
                 .map(|m| m.as_str())
                 .unwrap_or("");
-            return eapi_str.parse().unwrap_or(Eapi::Zero);
+            if eapi_str.is_empty() {
+                return Ok(Eapi::Zero);
+            }
+            return eapi_str.parse().map_err(|_| eapi_str.to_string());
         }
         // Not an EAPI assignment — default to 0
-        return Eapi::Zero;
+        return Ok(Eapi::Zero);
     }
     // Empty file or only blanks/comments — default to 0
-    Eapi::Zero
+    Ok(Eapi::Zero)
 }
 
 #[cfg(test)]
@@ -213,60 +219,68 @@ mod tests {
 
     #[test]
     fn detect_eapi_simple() {
-        assert_eq!(detect_eapi_from_str("EAPI=8\n"), Eapi::Eight);
+        assert_eq!(detect_eapi_from_str("EAPI=8\n"), Ok(Eapi::Eight));
     }
 
     #[test]
     fn detect_eapi_single_quoted() {
-        assert_eq!(detect_eapi_from_str("EAPI='7'\n"), Eapi::Seven);
+        assert_eq!(detect_eapi_from_str("EAPI='7'\n"), Ok(Eapi::Seven));
     }
 
     #[test]
     fn detect_eapi_double_quoted() {
-        assert_eq!(detect_eapi_from_str("EAPI=\"6\"\n"), Eapi::Six);
+        assert_eq!(detect_eapi_from_str("EAPI=\"6\"\n"), Ok(Eapi::Six));
     }
 
     #[test]
     fn detect_eapi_with_comment_and_blanks() {
         let content = "\n# Copyright\n# License\n\nEAPI=8\n";
-        assert_eq!(detect_eapi_from_str(content), Eapi::Eight);
+        assert_eq!(detect_eapi_from_str(content), Ok(Eapi::Eight));
     }
 
     #[test]
     fn detect_eapi_trailing_comment() {
-        assert_eq!(detect_eapi_from_str("EAPI=7 # foo\n"), Eapi::Seven);
+        assert_eq!(detect_eapi_from_str("EAPI=7 # foo\n"), Ok(Eapi::Seven));
     }
 
     #[test]
     fn detect_eapi_leading_whitespace() {
-        assert_eq!(detect_eapi_from_str("  EAPI=5\n"), Eapi::Five);
-        assert_eq!(detect_eapi_from_str("\tEAPI=5\n"), Eapi::Five);
+        assert_eq!(detect_eapi_from_str("  EAPI=5\n"), Ok(Eapi::Five));
+        assert_eq!(detect_eapi_from_str("\tEAPI=5\n"), Ok(Eapi::Five));
     }
 
     #[test]
     fn detect_eapi_missing_defaults_to_zero() {
         let content = "inherit eutils\nSRC_URI=foo\n";
-        assert_eq!(detect_eapi_from_str(content), Eapi::Zero);
+        assert_eq!(detect_eapi_from_str(content), Ok(Eapi::Zero));
     }
 
     #[test]
     fn detect_eapi_empty_value_defaults_to_zero() {
-        assert_eq!(detect_eapi_from_str("EAPI=\n"), Eapi::Zero);
+        assert_eq!(detect_eapi_from_str("EAPI=\n"), Ok(Eapi::Zero));
+    }
+
+    #[test]
+    fn detect_eapi_unsupported_keeps_the_raw_value() {
+        assert_eq!(detect_eapi_from_str("EAPI=10\n"), Err("10".to_string()));
     }
 
     #[test]
     fn detect_eapi_empty_file() {
-        assert_eq!(detect_eapi_from_str(""), Eapi::Zero);
+        assert_eq!(detect_eapi_from_str(""), Ok(Eapi::Zero));
     }
 
     #[test]
     fn detect_eapi_only_comments() {
-        assert_eq!(detect_eapi_from_str("# comment\n# another\n"), Eapi::Zero);
+        assert_eq!(
+            detect_eapi_from_str("# comment\n# another\n"),
+            Ok(Eapi::Zero)
+        );
     }
 
     #[test]
     fn detect_eapi_mismatched_quotes_defaults_to_zero() {
         // Mismatched quotes: single open, double close — regex won't match
-        assert_eq!(detect_eapi_from_str("EAPI='7\"\n"), Eapi::Zero);
+        assert_eq!(detect_eapi_from_str("EAPI='7\"\n"), Ok(Eapi::Zero));
     }
 }

@@ -1381,6 +1381,18 @@ impl EbuildShell {
         // re-source. (See `phase_sourced_ebuild`.)
         self.phase_sourced_ebuild = None;
 
+        // PMS 7.3.1: an unsupported EAPI means the rest of the ebuild cannot be read.
+        let eapi = match crate::repo::ebuild::detect_eapi_from_str(content) {
+            Ok(eapi) => eapi,
+            Err(raw) => {
+                return Ok(crate::source::SourcedEbuild {
+                    metadata: portage_metadata::CacheEntry::unsupported_eapi(&raw, None).metadata,
+                    eclasses: Vec::new(),
+                    ebuild_md5,
+                });
+            }
+        };
+
         // Set PM-provided variables
         let PmsNames { p, pf, .. } = self.set_pms_name_vars(ebuild);
         let category = ebuild.category();
@@ -1396,8 +1408,6 @@ impl EbuildShell {
             .unwrap_or_else(|| self.repo_path.join(category).join(pn).join("files"));
         self.set_var("FILESDIR", filesdir.as_str());
 
-        // Detect EAPI before sourcing per PMS 7.3.1
-        let eapi = crate::repo::ebuild::detect_eapi_from_str(content);
         self.set_var("EAPI", &eapi.to_string());
 
         // Absolute path to the ebuild file (PMS 11.1)
@@ -1523,6 +1533,15 @@ impl EbuildShell {
         }
         if let Some(message) = self.die_flag.take() {
             return Err(Error::Shell(format!("die: {message}")));
+        }
+        // PMS 7.3.1: sourcing must leave EAPI as the head line set it; an unsupported value is
+        // left to the head-parsed EAPI, as portage does.
+        let sourced_eapi = self.get_var("EAPI").unwrap_or_default();
+        if sourced_eapi.is_empty() || sourced_eapi.parse::<Eapi>().is_ok_and(|e| e != eapi) {
+            return Err(Error::Shell(format!(
+                "{}: EAPI '{sourced_eapi}' conflicts with '{eapi}' from the head of the ebuild",
+                ebuild.path()
+            )));
         }
 
         // PMS 10.2: combine ebuild-defined values with eclass contributions.

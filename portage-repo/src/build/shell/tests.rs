@@ -2915,3 +2915,40 @@ async fn pipestatus_returns_the_last_failure_of_the_previous_pipeline() {
     assert_eq!(shell.get_var("EM_OK").as_deref(), Some("0"));
     assert_eq!(shell.get_var("EM_V").as_deref(), Some("0 2"));
 }
+
+#[tokio::test]
+async fn sourcing_that_reassigns_eapi_fails_metadata_generation() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    let path = write_minimal_ebuild(&repo_path, "app-misc", "flip");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{text}EAPI=7\n")).unwrap();
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    let err = shell
+        .source_ebuild(&Ebuild::from_path(&path).unwrap())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("conflicts"), "{err}");
+}
+
+#[tokio::test]
+async fn unsupported_eapi_yields_a_stub_without_sourcing() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    let path = write_minimal_ebuild(&repo_path, "app-misc", "future");
+    std::fs::write(&path, "EAPI=10\nthis is not bash (\n").unwrap();
+    let repo = Repository::builder()
+        .in_memory_cache()
+        .open(&repo_path)
+        .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    let sourced = shell
+        .source_ebuild(&Ebuild::from_path(&path).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(sourced.metadata.unsupported_eapi(), Some("10"));
+}

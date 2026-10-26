@@ -762,6 +762,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_eapi_and_invalid_license_ebuilds_stay_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_repo(&dir);
+        let pkg_dir = dir.path().join("sys-apps").join("foo");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("foo-1.0.ebuild"), "EAPI=99\nnot bash (\n").unwrap();
+        std::fs::write(
+            pkg_dir.join("foo-2.0.ebuild"),
+            "EAPI=8\nDESCRIPTION=t\nSLOT=0\nLICENSE=\"|| (\"\n",
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            let mut entries = repo_entries(&repo).await;
+            entries.sort_by(|a, b| a.0.version.cmp(&b.0.version));
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].1.metadata.unsupported_eapi(), Some("99"));
+            assert_eq!(entries[1].1.metadata.invalid[0].key, "LICENSE");
+        }
+    }
+
+    #[tokio::test]
     async fn a_changed_eclass_invalidates_an_otherwise_covered_cache_entry() {
         let dir = tempfile::tempdir().unwrap();
         let cache_root = tempfile::tempdir().unwrap();
