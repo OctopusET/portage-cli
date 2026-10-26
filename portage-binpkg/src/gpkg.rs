@@ -10,7 +10,7 @@
 //!    member (must be last).
 //!
 //! `<basename>` is the package `PF` (e.g. `gentoo-functions-1.7.6`). The two inner
-//! tars are produced with GNU `tar` (`--numeric-owner`, pax `--xattrs` for the
+//! tars are produced with GNU `tar` (pax, owner names kept, `--xattrs` for the
 //! image so file capabilities/ACLs and device nodes survive) and compressed with
 //! zstd — the Portage default. Requires `tar` and `zstd` on `PATH`.
 
@@ -175,8 +175,8 @@ fn tar_tree(dir: &Path, prefix: &str, out: &Path, xattrs: bool) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let mut cmd = Command::new("tar");
+    // Owner names are recorded, as Portage's tarfile does, so an extract maps them to local ids.
     cmd.arg("--zstd")
-        .arg("--numeric-owner")
         .arg("--format=pax")
         // Rename the `.`-rooted members to `<prefix>/…`: member names and
         // hard link targets, but not symlink targets, which are not paths in
@@ -744,12 +744,12 @@ pub fn extract_image(container: &Path, dest: &Path, policy: VerifyPolicy) -> Res
     }
 
     // Extract with the `image/` prefix stripped, preserving mode/xattrs, and the recorded
-    // owners when run as root (tar's default then; an unprivileged extract keeps its own).
+    // owners when run as root (tar's default then: by name, else by id; an unprivileged
+    // extract keeps its own).
     std::fs::create_dir_all(dest)?;
     run(
         "tar",
         Command::new("tar")
-            .arg("--numeric-owner")
             .arg("--xattrs")
             .arg("--xattrs-include=*")
             .arg("--strip-components=1")
@@ -1109,6 +1109,54 @@ mod tests {
             fs::metadata(dest.join("usr/bin/hi")).unwrap().ino(),
             fs::metadata(dest.join("usr/bin/hello")).unwrap().ino()
         );
+    }
+
+    #[test]
+    fn the_image_records_owner_names() {
+        let output = |cmd: &mut Command| {
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "{cmd:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let user = output(Command::new("id").arg("-un")).trim().to_owned();
+        if user.chars().all(|c| c.is_ascii_digit()) {
+            eprintln!("skipping: uid has no passwd entry");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (image, meta) = build_fixture(tmp.path());
+        let container = tmp.path().join("foo-1.0-1.gpkg.tar");
+        write_gpkg(
+            &GpkgInput {
+                image_dir: &image,
+                metadata_dir: &meta,
+                basename: "foo-1.0",
+                signing: None,
+                build_id: None,
+            },
+            &container,
+        )
+        .unwrap();
+        let unpacked = tmp.path().join("unpacked");
+        fs::create_dir_all(&unpacked).unwrap();
+        output(
+            Command::new("tar")
+                .arg("-xf")
+                .arg(&container)
+                .arg("-C")
+                .arg(&unpacked),
+        );
+        let listing = output(
+            Command::new("tar")
+                .arg("--zstd")
+                .arg("-tvf")
+                .arg(unpacked.join("foo-1.0/image.tar.zst")),
+        );
+        let hello = listing
+            .lines()
+            .find(|l| l.ends_with("usr/bin/hello"))
+            .unwrap();
+        assert!(hello.contains(&format!(" {user}/")), "{hello}");
     }
 
     // Build a fake `${D}` + VDB-style metadata dir under `root`, returning
