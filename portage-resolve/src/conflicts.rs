@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Blocker, Cpn, Cpv, Dep, DepEntry, Operator, Version};
-use portage_atom_pubgrub::{BlockerHit, PortageVersionSet};
+use portage_atom_pubgrub::{BlockerHit, MergeRoot, PortageVersionSet};
 
 use crate::installed::VdbEntry;
 
@@ -491,6 +491,7 @@ pub fn classify_blockers(
     for hit in hits {
         for victim in &hit.victims {
             match (hit.owner_installed, victim.retained_installed) {
+                (false, true) if victim.package.merge_root() == MergeRoot::Host => {}
                 (false, true) => {
                     candidates.insert((*victim.package.cpn(), victim.package.slot()));
                 }
@@ -536,6 +537,13 @@ pub fn classify_blockers(
                     match (hit.owner_installed, victim.retained_installed) {
                         (true, true) => BlockerVerdict::PreExisting { cpv: victim_cpv },
                         (false, false) => BlockerVerdict::PlannedCoexistence { cpv: victim_cpv },
+                        // `installed` and the unmerge step only cover ROOT, never BROOT.
+                        (false, true) if victim.package.merge_root() == MergeRoot::Host => {
+                            BlockerVerdict::StillNeeded {
+                                cpv: victim_cpv,
+                                obstacles: Vec::new(),
+                            }
+                        }
                         // Forward hit: the victim is the removal candidate.
                         (false, true) => verdict_for_candidate(
                             *victim.package.cpn(),
@@ -1428,6 +1436,26 @@ mod tests {
                 "sys-apps/systemd-260.2".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn a_blocked_broot_package_is_never_auto_unmerged() {
+        let mut h = hit(HitSpec {
+            owner_cpn: "dev-build/user",
+            owner_slot: "0",
+            owner_ver: "1.0",
+            owner_installed: false,
+            atom: "!dev-build/blocked",
+            victim_cpn: "dev-build/blocked",
+            victim_slot: "0",
+            victim_ver: "1.0",
+            victim_retained_installed: true,
+        });
+        h.owner = h.owner.at_merge_root(MergeRoot::Host);
+        h.victims[0].package = h.victims[0].package.at_merge_root(MergeRoot::Host);
+        let classified = classify_blockers(&[h], &[], &[]);
+        assert!(planned_unmerges(&classified).is_empty());
+        assert!(is_hard_conflict(&classified));
     }
 
     #[test]

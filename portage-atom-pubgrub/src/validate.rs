@@ -2,7 +2,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Dep, SlotOperator, UseDepKind, Version};
 
 use crate::error::Error;
-use crate::package::PortagePackage;
+use crate::package::{MergeRoot, PortagePackage};
 use crate::provider::PortageDependencyProvider;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
@@ -353,11 +353,14 @@ impl PortageDependencyProvider {
         solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
     ) -> Vec<BlockerHit> {
         let mut hits = Vec::new();
-        // `(cpn, slot)` the plan installs into; an installed package absent here
-        // is retained after the merge. O(1) vs scanning the whole solution.
-        let solution_keys: std::collections::HashSet<_> =
-            solution.iter().map(|(p, _)| (p.cpn(), p.slot())).collect();
-        let retained = |p: &PortagePackage| !solution_keys.contains(&(p.cpn(), p.slot()));
+        // `(cpn, slot, root)` the plan installs into; an installed package absent
+        // here is retained after the merge. O(1) vs scanning the whole solution.
+        let solution_keys: std::collections::HashSet<_> = solution
+            .iter()
+            .map(|(p, _)| (p.cpn(), p.slot(), p.merge_root()))
+            .collect();
+        let retained =
+            |p: &PortagePackage| !solution_keys.contains(&(p.cpn(), p.slot(), p.merge_root()));
 
         // A blocker fires when its atom is satisfied by a package present after
         // the plan: a solution member or a retained installed one. The installed
@@ -418,7 +421,7 @@ impl PortageDependencyProvider {
 
     /// Every package present after the plan (a solution member, or an
     /// installed one `retained` keeps in place) that satisfies `blocker`'s
-    /// atom
+    /// atom, on the owner's own merge root (a `Host` owner blocks only BROOT)
     ///
     /// PMS 8.3.2: "weak blocks on the package version of the ebuild itself
     /// do not count" — `owner`/`owner_version` exclude the owner's own
@@ -437,22 +440,44 @@ impl PortageDependencyProvider {
         let is_self = |p: &PortagePackage, v: &Version| {
             blocker.blocker == Some(portage_atom::Blocker::Weak) && p == owner && v == owner_version
         };
+        let root = owner.merge_root();
         let mut victims: Vec<BlockerVictim> = solution
             .iter()
-            .filter(|(p, v)| !is_self(p, v) && self.blocker_satisfied_by(blocker, p, v, false))
+            .filter(|(p, v)| {
+                p.merge_root() == root
+                    && !is_self(p, v)
+                    && self.blocker_satisfied_by(blocker, p, v, None)
+            })
             .map(|(p, v)| BlockerVictim {
                 package: p.clone(),
                 version: v.clone(),
                 retained_installed: false,
             })
             .collect();
+        let installed: Vec<(&PortagePackage, &Version, &[Interned<DefaultInterner>])> =
+            if root == MergeRoot::Host {
+                self.host_installed
+                    .iter()
+                    .map(|(p, e)| (p, &e.version, e.active_use.as_slice()))
+                    .collect()
+            } else {
+                self.installed
+                    .iter()
+                    .map(|(p, (v, _))| {
+                        let use_ = self.installed_use.get(p).map_or(&[][..], Vec::as_slice);
+                        (p, v, use_)
+                    })
+                    .collect()
+            };
         victims.extend(
-            self.installed
-                .iter()
-                .filter(|(p, (v, _))| {
-                    !is_self(p, v) && retained(p) && self.blocker_satisfied_by(blocker, p, v, true)
+            installed
+                .into_iter()
+                .filter(|(p, v, use_)| {
+                    !is_self(p, v)
+                        && retained(p)
+                        && self.blocker_satisfied_by(blocker, p, v, Some(use_))
                 })
-                .map(|(p, (v, _))| BlockerVictim {
+                .map(|(p, v, _)| BlockerVictim {
                     package: p.clone(),
                     version: v.clone(),
                     retained_installed: true,
@@ -464,8 +489,8 @@ impl PortageDependencyProvider {
     /// Whether `blocker`'s atom (cpn/slot, version, and any USE-dep) is satisfied
     /// by `(cand_pkg, cand_ver)`
     ///
-    /// `from_installed` picks the USE source: VDB flags for an installed
-    /// candidate, freshly-resolved USE otherwise. A `!foo[bar]` blocker
+    /// `installed_use` is an installed candidate's VDB USE; `None` reads a
+    /// solution member's freshly-resolved USE. A `!foo[bar]` blocker
     /// fires only when the candidate has the flag (so `!glibc[crypt(-)]`
     /// ignores a glibc built without `crypt`).
     fn blocker_satisfied_by(
@@ -473,7 +498,7 @@ impl PortageDependencyProvider {
         blocker: &Dep,
         cand_pkg: &PortagePackage,
         cand_ver: &Version,
-        from_installed: bool,
+        installed_use: Option<&[Interned<DefaultInterner>]>,
     ) -> bool {
         if !blocker_cpn_slot_matches(cand_pkg, blocker) {
             return false;
@@ -487,12 +512,9 @@ impl PortageDependencyProvider {
         match &blocker.use_deps {
             None => true,
             Some(use_deps) => use_deps.iter().all(|ud| {
-                let eff = if from_installed {
-                    self.installed_use
-                        .get(cand_pkg)
-                        .is_some_and(|u| u.contains(&ud.flag))
-                } else {
-                    self.effective_flag_new(cand_pkg, cand_ver, ud.flag, ud.default)
+                let eff = match installed_use {
+                    Some(u) => u.contains(&ud.flag),
+                    None => self.effective_flag_new(cand_pkg, cand_ver, ud.flag, ud.default),
                 };
                 match ud.kind {
                     UseDepKind::Enabled => eff,
@@ -892,69 +914,79 @@ mod tests {
         assert_eq!(hits[0].victims.len(), 1);
     }
 
-    // Regression test for the same alias-miss bug class as `graph.rs`'s
-    // `host_package_bdepend_on_another_host_package_orders_correctly`: a
-    // `Host`-flavored solved package's data lives under its `Target`-flavored
-    // alias, so a raw `self.packages.get(pkg)` in `check_blockers`'s main
-    // loop silently missed it, dropping every blocker a Host-routed package
-    // declares. `dev-build/user` is an unsatisfied Host BDEPEND that blocks
-    // `dev-build/blocked`, separately pulled in as a normal Target RDEPEND —
-    // both genuinely present, so the conflict must be detected.
-    #[test]
-    fn check_blockers_fires_from_a_host_routed_packages_own_blocker() {
+    // A `Host`-flavored solved package's data lives under its `Target` alias, so
+    // `check_blockers` must read its blockers through `package_data`. A blocker
+    // only reaches the owner's own merge root: BROOT for this Host-routed `user`.
+    fn host_routed_blocker_hits(blocked_on_target: bool) -> Vec<BlockerHit> {
         let mut repo = InMemoryRepository::new();
-        let empty = || PackageDeps {
-            depend: (vec![]).into(),
-            rdepend: (vec![]).into(),
-            bdepend: (vec![]).into(),
-            pdepend: (vec![]).into(),
-            idepend: (vec![]).into(),
-        };
-
+        let slot = || Some(Interned::intern("0"));
         repo.add_version(
             portage_atom::Cpv::parse("dev-build/user-1.0").unwrap(),
-            Some(Interned::intern("0")),
+            slot(),
             None,
             PackageDeps {
                 depend: (vec![DepEntry::Atom(Dep::parse("!dev-build/blocked").unwrap())]).into(),
-                ..empty()
+                ..empty_deps()
             },
         );
         repo.add_version(
             portage_atom::Cpv::parse("dev-build/blocked-1.0").unwrap(),
-            Some(Interned::intern("0")),
+            slot(),
             None,
-            empty(),
+            empty_deps(),
         );
+        let rdepend = if blocked_on_target {
+            vec![DepEntry::Atom(Dep::parse("dev-build/blocked").unwrap())]
+        } else {
+            vec![]
+        };
         repo.add_version(
             portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
-            Some(Interned::intern("0")),
+            slot(),
             None,
             PackageDeps {
                 bdepend: (vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())]).into(),
-                rdepend: (vec![DepEntry::Atom(Dep::parse("dev-build/blocked").unwrap())]).into(),
-                ..empty()
+                rdepend: rdepend.into(),
+                ..empty_deps()
             },
         );
 
         let mut provider = PortageDependencyProvider::new(repo);
         provider.set_cross_active(true);
+        provider.set_is_cross_arch(true);
         provider.set_with_bdeps(true);
-        // No `add_host_installed`: the host lacks `user`, so it schedules as
-        // an unsatisfied Host BDEPEND — a genuinely Host-flavored solved
-        // package whose own `!dev-build/blocked` declaration must still be
-        // read via the alias.
-
+        if !blocked_on_target {
+            provider.add_host_installed(
+                PortagePackage::slotted(
+                    Cpn::parse("dev-build/blocked").unwrap(),
+                    Interned::intern("0"),
+                ),
+                Version::parse("1.0").unwrap(),
+                vec![],
+                vec![],
+            );
+        }
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
         let solution = provider
             .resolve_targets(vec![(a, PortageVersionSet::any())])
             .unwrap();
+        provider.check_blockers_detailed(&solution)
+    }
 
-        let conflicts = provider.check_blockers(&solution);
-        assert!(
-            !conflicts.is_empty(),
-            "Host-routed user's own blocker on blocked must be detected"
-        );
+    #[test]
+    fn check_blockers_ignores_a_host_owner_against_a_target_package() {
+        let hits = host_routed_blocker_hits(true);
+        assert!(hits.is_empty(), "BROOT and ROOT never collide: {hits:?}");
+    }
+
+    #[test]
+    fn check_blockers_fires_from_a_host_owner_against_a_host_installed_package() {
+        let hits = host_routed_blocker_hits(false);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].owner.merge_root(), MergeRoot::Host);
+        assert_eq!(hits[0].victims.len(), 1);
+        assert!(hits[0].victims[0].retained_installed);
+        assert_eq!(hits[0].victims[0].package.merge_root(), MergeRoot::Host);
     }
 
     #[test]
