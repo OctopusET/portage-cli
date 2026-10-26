@@ -178,6 +178,9 @@ pub struct DepgraphOutcome {
     /// in the order they were reported. The same list is printed before `Total:`.
     #[cfg(test)]
     pub masked_installed: Vec<(Cpv, String)>,
+    /// The `-p` row of each plan entry, uncolored
+    #[cfg(test)]
+    pub rows: Vec<String>,
 }
 
 /// Whether pending autounmask changes (keyword/mask/license/…) may be

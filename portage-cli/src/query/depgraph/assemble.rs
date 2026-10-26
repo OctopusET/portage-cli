@@ -288,6 +288,21 @@ pub(super) fn assemble(
             }
         }
     }
+    #[cfg(test)]
+    let rows = plan_entries
+        .iter()
+        .map(|e| {
+            let (bracket, rest) = output::format_plan_parts(
+                &pretty_ctx,
+                &e.pkg,
+                &e.version,
+                e.merge_root,
+                &cross,
+                true,
+            );
+            anstream::adapter::strip_str(&format!("{bracket} {rest}")).to_string()
+        })
+        .collect();
 
     // Advisory warnings are emitted after the plan so the merge list reads
     // first and the caveats follow it (emerge lists issues at the bottom too).
@@ -505,17 +520,13 @@ pub(super) fn assemble(
                     stable,
                     &ceded,
                 );
-                let iuse = effective_use::iuse_set(cache, &force_mask.iuse_injection);
                 let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
-                let (forced, masked) = force_mask.effective(&cpv, slot_key.as_ref(), stable, &iuse);
+                let forced = force_mask.forced_or_masked(&cpv, slot_key.as_ref(), stable);
                 (
                     cache.metadata.depend.list().to_vec(),
                     cache.metadata.bdepend.list().to_vec(),
                     effective.enabled_flags(),
-                    Some(crate::binpkg::EbuildFacts::new(
-                        cache,
-                        forced.iter().chain(&masked),
-                    )),
+                    Some(crate::binpkg::EbuildFacts::new(cache, &forced)),
                 )
             } else {
                 let mut effective = portage_atom_pubgrub::resolve_effective_use(
@@ -661,5 +672,7 @@ pub(super) fn assemble(
         unmerges,
         #[cfg(test)]
         masked_installed,
+        #[cfg(test)]
+        rows,
     })
 }

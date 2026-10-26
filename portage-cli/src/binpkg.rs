@@ -255,6 +255,22 @@ impl BinpkgPreview {
         })
     }
 
+    /// A preview of `pkgdir` for a run whose target and host are both `roots`
+    #[cfg(test)]
+    pub(crate) async fn for_test(
+        pkgdir: &std::path::Path,
+        policy: ReusePolicy,
+        roots: &Roots,
+    ) -> Self {
+        let dirs = DesiredBuildEnv::portage_dirs(roots);
+        Self {
+            index: portage_binpkg::BinpkgIndex::open(pkgdir).unwrap(),
+            policy,
+            target: (DesiredBuildEnv::for_roots(roots).await, dirs.clone()),
+            host: (DesiredBuildEnv::for_roots(roots).await, dirs),
+        }
+    }
+
     /// The build-env keys of `pkgs`, given as (merges to the host, cpv)
     pub(crate) async fn keys(
         &self,
@@ -272,21 +288,6 @@ impl BinpkgPreview {
     /// The local index
     pub(crate) fn index(&self) -> &portage_binpkg::BinpkgIndex {
         &self.index
-    }
-
-    /// A preview of `index` under `-k`'s policy, for an unconfigured host
-    #[cfg(test)]
-    pub(crate) fn for_test(index: portage_binpkg::BinpkgIndex) -> Self {
-        let flags = crate::cli::MergeFlags {
-            usepkg: true,
-            ..Default::default()
-        };
-        Self {
-            index,
-            policy: ReusePolicy::new(&flags, false, false),
-            target: (DesiredBuildEnv::default(), Vec::new()),
-            host: (DesiredBuildEnv::default(), Vec::new()),
-        }
     }
 
     /// The USE of the binpkg that would stand in for building `cpv` with `use_flags`, if any

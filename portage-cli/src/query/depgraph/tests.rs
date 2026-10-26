@@ -46,6 +46,7 @@ struct Solve<'a> {
     exclude: &'a [String],
     resume: HashSet<(MergeRoot, String)>,
     binpkg_preview: Option<&'a crate::binpkg::BinpkgPreview>,
+    verbose: u8,
 }
 
 impl<'a> Solve<'a> {
@@ -65,6 +66,7 @@ impl<'a> Solve<'a> {
             exclude: &[],
             resume: HashSet::new(),
             binpkg_preview: None,
+            verbose: 0,
         }
     }
 }
@@ -195,7 +197,7 @@ fn try_solve(fix: &Fix, opts: Solve<'_>) -> anyhow::Result<super::DepgraphOutcom
         world_additions: world,
         arch: &arch,
         format: DepgraphFormat::Pretty,
-        verbose: 0,
+        verbose: opts.verbose,
         empty: opts.empty,
         autounmask_write: false,
         autounmask_persist: AutounmaskPersist::Never,
@@ -1192,7 +1194,22 @@ fn bar_binpkgs(dir: &tempfile::TempDir) -> portage_binpkg::BinpkgIndex {
 fn a_build_id_target_pins_its_binary_package() {
     let fix = fixture(&pair(), &[]);
     let pkgdir = tempfile::tempdir().unwrap();
-    let preview = crate::binpkg::BinpkgPreview::for_test(bar_binpkgs(&pkgdir));
+    bar_binpkgs(&pkgdir);
+    let flags = crate::cli::MergeFlags {
+        usepkg: true,
+        ..Default::default()
+    };
+    let policy = crate::binpkg::ReusePolicy::new(&flags, false, false);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let preview = rt.block_on(crate::binpkg::BinpkgPreview::for_test(
+        pkgdir.path(),
+        policy,
+        &fix.roots,
+    ));
+    drop(rt);
     let atoms = [TargetAtom::explicit("=app-misc/bar-1-3")];
     let outcome = solve(
         &fix,
@@ -1214,4 +1231,88 @@ fn a_build_id_needs_that_binary_package() {
     assert!(super::require_binpkg_build(Some(&index), atom, &cpv, 3).is_ok());
     assert!(super::require_binpkg_build(Some(&index), atom, &cpv, 2).is_err());
     assert!(super::require_binpkg_build(None, atom, &cpv, 3).is_err());
+}
+
+/// The `-pv` plan of `app-test/foo-1.0` (ebuild `IUSE=nls`) under `args`, with a `PKGDIR` entry
+/// built with `CFLAGS=-march=x86-64-v3` and `binpkg`'s `IUSE`/`USE`
+fn binpkg_plan(
+    args: &[&str],
+    binpkg: &str,
+    cflags: &str,
+    use_mask: &str,
+) -> super::DepgraphOutcome {
+    let pkgs = [Pkg {
+        cpv: "app-test/foo-1.0",
+        keywords: "amd64",
+        depend: "",
+        rdepend: "",
+        iuse: "nls",
+        slot: "0",
+    }];
+    let fix = fixture(&pkgs, &[]);
+    let base = fix.root.parent().unwrap();
+    std::fs::write(base.join("repo/profiles/base/use.mask"), use_mask).unwrap();
+    std::fs::write(
+        fix.root.join("etc/portage/make.conf"),
+        format!(
+            "ARCH=\"amd64\"\nACCEPT_KEYWORDS=\"amd64\"\nCHOST=\"x86_64-pc-linux-gnu\"\n\
+             CFLAGS=\"{cflags}\"\n"
+        ),
+    )
+    .unwrap();
+    let pkgdir = base.join("pkgdir");
+    std::fs::create_dir_all(&pkgdir).unwrap();
+    std::fs::write(
+        pkgdir.join("Packages"),
+        format!(
+            "VERSION: 0\n\nCPV: app-test/foo-1.0\nCHOST: x86_64-pc-linux-gnu\nCFLAGS: -march=x86-64-v3\n\
+             {binpkg}PATH: app-test/foo/foo-1.0-1.gpkg.tar\n"
+        ),
+    )
+    .unwrap();
+    let cli = crate::cli::parse_cli(&[&["em", "emerge"], args, &["app-test/foo"]].concat());
+    let f = cli.depgraph_flags();
+    let policy = crate::binpkg::ReusePolicy::new(&cli.merge_flags(), f.newuse, f.changed_use);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let preview = rt.block_on(crate::binpkg::BinpkgPreview::for_test(
+        pkgdir.as_std_path(),
+        policy,
+        &fix.roots,
+    ));
+    drop(rt);
+    let atoms = [TargetAtom::explicit("app-test/foo")];
+    let mut opts = Solve::new(&atoms);
+    opts.binpkg_preview = Some(&preview);
+    opts.verbose = 1;
+    let outcome = solve(&fix, opts);
+    assert_eq!(outcome.rows.len(), 1);
+    outcome
+}
+
+#[test]
+fn the_preview_takes_a_keyed_binpkg_only_when_the_build_env_key_matches() {
+    let plan = binpkg_plan(&["-k"], "IUSE: nls\n", "-march=x86-64-v3", "");
+    assert!(plan.rows[0].starts_with("[binary"), "{}", plan.rows[0]);
+    let plan = binpkg_plan(&["-k"], "IUSE: nls\n", "-march=x86-64-v2", "");
+    assert!(plan.rows[0].starts_with("[ebuild"), "{}", plan.rows[0]);
+}
+
+#[test]
+fn a_flag_dropped_from_iuse_does_not_reject_the_binpkg_when_the_profile_masks_it() {
+    let plan = binpkg_plan(&["-k"], "IUSE: nls foo\n", "-march=x86-64-v3", "foo\n");
+    assert!(plan.rows[0].starts_with("[binary"), "{}", plan.rows[0]);
+    let facts = plan.plan[0].facts.as_ref().unwrap();
+    assert!(facts.forced.contains("foo"), "the merge's exempt set");
+    let plan = binpkg_plan(&["-k"], "IUSE: nls foo\n", "-march=x86-64-v3", "");
+    assert!(plan.rows[0].starts_with("[ebuild"), "{}", plan.rows[0]);
+}
+
+#[test]
+fn usepkgonly_shows_a_binpkg_with_the_use_it_was_built_with() {
+    let plan = binpkg_plan(&["-K"], "IUSE: nls\nUSE: nls\n", "-march=x86-64-v3", "");
+    assert!(plan.rows[0].starts_with("[binary"), "{}", plan.rows[0]);
+    assert!(plan.rows[0].contains("USE=\"nls\""), "{}", plan.rows[0]);
 }

@@ -1570,7 +1570,7 @@ pub(super) fn print_pretty_rooted(
 ///
 /// Everything else (USE, old-version, size) is computed identically either
 /// way: emerge's own `-t` still shows a `[nomerge]` row's full detail.
-fn format_plan_parts(
+pub(super) fn format_plan_parts(
     ctx: &PrettyCtx,
     pkg: &PortagePackage,
     ver: &Version,
@@ -1659,7 +1659,13 @@ fn format_plan_parts(
     // The same reuse test the merge applies, against the local index only. A reused binpkg
     // is installed with the USE it was built with, so that is the USE shown.
     let built_use = binpkg_preview.and_then(|(preview, keys)| {
-        let facts = cache.map(|c| crate::binpkg::EbuildFacts::new(c, &forced_display));
+        let facts = cache.map(|c| {
+            let repo = Some(super::repo::repo_name_of(data, &cpv));
+            let stable = accept_keywords.is_stable(&c.metadata.keywords, &cpv, pkg.slot(), repo);
+            let slot_key = pkg.slot().map(portage_atom::Slot::from_name);
+            let forced = force_mask.forced_or_masked(&cpv, slot_key.as_ref(), stable);
+            crate::binpkg::EbuildFacts::new(c, &forced)
+        });
         let host = merge_root == portage_atom_pubgrub::MergeRoot::Host;
         preview.reusable(
             keys,

@@ -274,15 +274,41 @@ impl ForceMask {
         stable: bool,
         iuse: &HashSet<Flag>,
     ) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
+        let (mut forced, masked) =
+            self.fold(cpv, slot, stable, |r, set| apply_folded(r, set, iuse));
+        forced.retain(|f| !masked.contains(f));
+        (forced, masked)
+    }
+
+    /// Every flag forced or masked for `cpv`, in `IUSE` or not, as portage's
+    /// `useforce | usemask`
+    pub fn forced_or_masked(
+        &self,
+        cpv: &Cpv,
+        slot: Option<&portage_atom::Slot>,
+        stable: bool,
+    ) -> BTreeSet<Flag> {
+        let (mut forced, masked) = self.fold(cpv, slot, stable, apply_folded_all);
+        forced.extend(masked);
+        forced
+    }
+
+    fn fold(
+        &self,
+        cpv: &Cpv,
+        slot: Option<&portage_atom::Slot>,
+        stable: bool,
+        apply: impl Fn(&FoldedFlags, &mut BTreeSet<Flag>),
+    ) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
         let mut forced = BTreeSet::new();
         let mut masked = BTreeSet::new();
         // Same per-node order as Portage `UseManager.getUseMask`/`getUseForce`.
         for layer in &self.layers {
-            apply_folded(&layer.use_force, &mut forced, iuse);
-            apply_folded(&layer.use_mask, &mut masked, iuse);
+            apply(&layer.use_force, &mut forced);
+            apply(&layer.use_mask, &mut masked);
             if stable {
-                apply_folded(&layer.use_stable_force, &mut forced, iuse);
-                apply_folded(&layer.use_stable_mask, &mut masked, iuse);
+                apply(&layer.use_stable_force, &mut forced);
+                apply(&layer.use_stable_mask, &mut masked);
             }
             accumulate(&layer.pkg_force, cpv, slot, &mut forced);
             accumulate(&layer.pkg_mask, cpv, slot, &mut masked);
@@ -291,7 +317,6 @@ impl ForceMask {
                 accumulate(&layer.pkg_stable_mask, cpv, slot, &mut masked);
             }
         }
-        forced.retain(|f| !masked.contains(f));
         (forced, masked)
     }
 
@@ -402,7 +427,7 @@ fn apply_one(set: &mut BTreeSet<Flag>, flag: Flag, remove: bool) {
     }
 }
 
-/// Apply every one of `resolved`'s actions, ignoring `iuse` (for [`ForceMask::pins`])
+/// Apply every one of `resolved`'s actions, ignoring `iuse`
 fn apply_folded_all(resolved: &FoldedFlags, set: &mut BTreeSet<Flag>) {
     for (&flag, &remove) in resolved {
         apply_one(set, flag, remove);
@@ -550,6 +575,24 @@ mod tests {
         let pins = fm.pins(&c, None, false, &iuse);
         assert!(pins.contains(&flag("abi_x86_32")));
         assert!(pins.contains(&flag("unrelated_flag")));
+    }
+
+    #[test]
+    fn forced_or_masked_keeps_flags_outside_iuse() {
+        let fm = ForceMask::one(ForceMaskLayer {
+            use_mask: HashMap::from([(flag("foo"), false)]),
+            use_stable_force: HashMap::from([(flag("bar"), false)]),
+            ..Default::default()
+        });
+        let c = cpv("dev-libs/foo-1");
+        assert!(
+            fm.effective(&c, None, true, &iuse_of(&["nls"]))
+                .1
+                .is_empty()
+        );
+        let all = fm.forced_or_masked(&c, None, true);
+        assert_eq!(all, BTreeSet::from([flag("foo"), flag("bar")]));
+        assert!(!fm.forced_or_masked(&c, None, false).contains(&flag("bar")));
     }
 
     // Regression for the gap found migrating off the collapsed `UseConfig`
