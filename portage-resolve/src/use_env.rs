@@ -269,17 +269,12 @@ async fn compute_use_env(
             .chain(std::iter::once(portage_dir.join("license_groups")))
             .chain(config_overlay.map(|o| o.join("license_groups"))),
     );
-    // The `ACCEPT_*` lists arrive stacked, the process environment included; an empty one
-    // takes Portage's default.
-    let accept_list = |name: &str, default: &str| {
-        let v = split_var(name);
-        if v.is_empty() {
-            default.split_whitespace().map(str::to_string).collect()
-        } else {
-            v
-        }
-    };
-    let accept_license_tokens = accept_list("ACCEPT_LICENSE", "* -@EULA");
+    // The `ACCEPT_*` lists arrive stacked, the process environment included; an empty
+    // `ACCEPT_LICENSE` takes Portage's default.
+    let mut accept_license_tokens = split_var("ACCEPT_LICENSE");
+    if accept_license_tokens.is_empty() {
+        accept_license_tokens = vec!["*".to_string(), "-@EULA".to_string()];
+    }
     let accept_license = AcceptSet::from_tokens(&accept_license_tokens, &license_groups);
 
     // Per-package `package.license`, in portage's precedence order: profile
@@ -303,10 +298,14 @@ async fn compute_use_env(
     }
 
     // ACCEPT_PROPERTIES / ACCEPT_RESTRICT: same shape as ACCEPT_LICENSE minus
-    // @GROUP support (no license-group registry to load or pass), default "*"
-    // (accept everything — why these gates almost never mask).
+    // @GROUP support. make.globals' `*` is the bottom layer, so a lone `-token` denies only that.
     let no_groups = LicenseGroupRegistry::default();
-    let accept_properties_tokens = accept_list("ACCEPT_PROPERTIES", "*");
+    let accept_list = |name: &str| {
+        let mut v = vec!["*".to_string()];
+        v.extend(split_var(name));
+        v
+    };
+    let accept_properties_tokens = accept_list("ACCEPT_PROPERTIES");
     let accept_properties = AcceptSet::from_tokens_plain(&accept_properties_tokens);
     let mut package_properties: Vec<(Dep, AcceptSet)> =
         load_package_license(portage_dir.join("package.properties").as_str(), &no_groups);
@@ -317,7 +316,7 @@ async fn compute_use_env(
         ));
     }
 
-    let accept_restrict_tokens = accept_list("ACCEPT_RESTRICT", "*");
+    let accept_restrict_tokens = accept_list("ACCEPT_RESTRICT");
     let accept_restrict = AcceptSet::from_tokens_plain(&accept_restrict_tokens);
     let mut package_restrict: Vec<(Dep, AcceptSet)> = load_package_license(
         portage_dir.join("package.accept_restrict").as_str(),
@@ -965,6 +964,32 @@ mod tests {
             .unwrap();
         let masks: Vec<_> = env.package_mask.iter().map(|d| d.to_string()).collect();
         assert_eq!(masks, ["dev-libs/bar::gentoo"]);
+    }
+
+    #[tokio::test]
+    async fn a_lone_accept_properties_negation_keeps_the_globals_star() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repos = make_test_repo(repo_dir.path());
+        let profile_dir = repo_dir.path().join("test-profile");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(profile_dir.join("make.defaults"), "").unwrap();
+        let pending = PendingConfig {
+            profile: Some(PendingProfile {
+                parents: vec![camino::Utf8PathBuf::try_from(profile_dir).unwrap()],
+                layer: None,
+            }),
+            make_conf: Some("ACCEPT_PROPERTIES=\"-interactive\"\n".into()),
+            ..Default::default()
+        };
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(root_dir.path()).unwrap();
+
+        let env = build_use_env(&repos, Some(root), None, None, Some(&pending))
+            .await
+            .unwrap();
+        assert!(env.accept_properties.accepts("live"));
+        assert!(!env.accept_properties.accepts("interactive"));
+        assert!(env.accept_restrict.accepts("fetch"));
     }
 
     // Expected override shorthand
