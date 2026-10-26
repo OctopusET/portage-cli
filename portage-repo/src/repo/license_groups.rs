@@ -243,16 +243,16 @@ impl AcceptSet {
                     vec![name.clone()]
                 }
             }
+            // Every alternative is reported: the user picks which one to accept.
             LicenseExpr::AnyOf(children) => {
                 if self.accepts_expr(expr, enabled) {
-                    Vec::new()
-                } else {
-                    children
-                        .iter()
-                        .find(|c| !is_void(c, enabled))
-                        .map(|c| self.licenses_needed(c, enabled))
-                        .unwrap_or_default()
+                    return Vec::new();
                 }
+                children
+                    .iter()
+                    .filter(|c| !is_void(c, enabled))
+                    .flat_map(|c| self.licenses_needed(c, enabled))
+                    .collect()
             }
             LicenseExpr::All(children) => children
                 .iter()
@@ -507,5 +507,19 @@ OSI Apache-2.0
 
         let empty = LicenseExpr::parse("EULA? ( EULA ) || ( foo? ( EULA ) )").unwrap();
         assert!(acc.accepts_expr(&empty, &off));
+    }
+
+    #[test]
+    fn any_of_reports_every_unaccepted_alternative() {
+        let reg = LicenseGroupRegistry::default();
+        let acc = AcceptSet::from_tokens(&["MIT".into()], &reg);
+        let off = |_: &str| false;
+        let expr = LicenseExpr::parse("|| ( A B )").unwrap();
+        assert_eq!(acc.licenses_needed(&expr, &off), vec!["A", "B"]);
+        let expr = LicenseExpr::parse("|| ( A MIT )").unwrap();
+        assert!(acc.licenses_needed(&expr, &off).is_empty());
+        // An inactive conditional alternative neither satisfies nor joins the report.
+        let expr = LicenseExpr::parse("|| ( foo? ( MIT ) A )").unwrap();
+        assert_eq!(acc.licenses_needed(&expr, &off), vec!["A"]);
     }
 }
