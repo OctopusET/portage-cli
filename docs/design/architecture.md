@@ -560,6 +560,15 @@ So: `-arch` and `-~arch` are independent negations; `~arch` does not accept
 stable `arch` and vice versa at match time; `-*` is an incremental clear-all
 (same family as make.conf(5) incremental clear-all for `USE`/`ACCEPT_*`).
 
+An `ACCEPT_KEYWORDS` that names neither `$ARCH` nor `~$ARCH` (`~*`, `-* **`)
+is taken as written; only an empty list or a lone `~` falls back to
+`$ARCH ~$ARCH`. A bare `package.accept_keywords` atom grants `~kw` for each
+stable `kw` in the profile `make.defaults` `ACCEPT_KEYWORDS` (site file) or
+in the effective one (profile file). A profile's `package.keywords` is not an
+accept list: it edits the ebuild's own `KEYWORDS` incrementally (`-*`, `-kw`,
+`kw`) before the match; the site `/etc/portage/package.keywords` stays an
+alias of `package.accept_keywords`.
+
 ## Per-package config atoms
 
 Site `/etc/portage/package.{use,env,accept_keywords,license,properties,accept_restrict,mask,unmask}`

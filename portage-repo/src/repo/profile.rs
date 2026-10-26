@@ -293,15 +293,21 @@ impl Profile {
         parse_atom_flags_list(&self.path.join("package.use"))
     }
 
-    /// Parse `package.accept_keywords` (and legacy `package.keywords`)
+    /// Parse `package.accept_keywords`
     ///
     /// Returns `(dep, [keyword tokens...])` pairs; a bare atom (no tokens) is
-    /// kept with an empty token list, meaning "accept this package's testing
-    /// keyword for the configured arch".
+    /// kept with an empty token list, meaning "accept the testing form of each
+    /// stable `ACCEPT_KEYWORDS` keyword".
     pub fn package_accept_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
-        let mut out = parse_atom_flags_list(&self.path.join("package.accept_keywords"))?;
-        out.extend(parse_atom_flags_list(&self.path.join("package.keywords"))?);
-        Ok(out)
+        parse_atom_flags_list(&self.path.join("package.accept_keywords"))
+    }
+
+    /// Parse `package.keywords`
+    ///
+    /// Returns `(dep, [keyword tokens...])` pairs. In a profile these edit the matching
+    /// ebuild's own `KEYWORDS` incrementally; they grant no acceptance.
+    pub fn package_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
+        parse_atom_flags_list(&self.path.join("package.keywords"))
     }
 
     /// Parse `package.license`
@@ -697,6 +703,11 @@ impl ProfileStack {
     /// ancestors first. Bare atoms are preserved (empty token list).
     pub fn package_accept_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_accept_keywords()))
+    }
+
+    /// Accumulated `package.keywords` entries from the full stack, ancestors first
+    pub fn package_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
+        collect_atom_flags(self.profiles.iter().map(|p| p.package_keywords()))
     }
 
     /// Accumulated `package.license` entries from the full stack, ancestors first

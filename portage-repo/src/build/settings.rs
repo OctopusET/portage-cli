@@ -125,6 +125,8 @@ pub struct SettingsSources<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     vars: BTreeMap<String, Setting>,
+    /// Values as the profile stack's `make.defaults` left them, before `make.conf`
+    defaults: BTreeMap<String, String>,
 }
 
 type Snapshot = BTreeMap<String, String>;
@@ -369,7 +371,18 @@ impl Settings {
                 setting.value = sorted.into_iter().collect::<Vec<_>>().join(" ");
             }
         }
-        Ok((Self { vars }, resolved))
+        let defaults = defaults
+            .into_iter()
+            .filter(|(name, value)| initial.get(name) != Some(value))
+            .map(|(name, value)| (name, value.replace('\n', " ")))
+            .collect();
+        Ok((Self { vars, defaults }, resolved))
+    }
+
+    /// The value of `name` as the profile `make.defaults` stack left it, ignoring `make.conf`
+    /// and the environment
+    pub fn profile_default(&self, name: &str) -> Option<&str> {
+        self.defaults.get(name).map(String::as_str)
     }
 
     /// The value of `name`, if any layer sets it

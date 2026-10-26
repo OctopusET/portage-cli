@@ -52,13 +52,16 @@ pub struct UseEnv {
     pub force_mask: ForceMask,
     /// Effective global `ACCEPT_KEYWORDS`, parsed to interned tokens
     pub accept_keywords: Vec<AcceptToken>,
-    /// Per-package `package.accept_keywords` (and legacy `package.keywords`) entries
+    /// Per-package `package.accept_keywords` entries (and the site's legacy `package.keywords`)
     ///
-    /// `(atom, [tokens])`, tokens interned.
-    ///
-    /// A bare atom carries an empty token list (expanded to `~arch` when the host
-    /// arch is known). Each file is ordered by atom specificity.
+    /// `(atom, [tokens])`, tokens interned. A bare atom is already expanded to the testing
+    /// form of each stable keyword: the profile `make.defaults` `ACCEPT_KEYWORDS` for a site
+    /// line, the effective one for a profile line. Each file is ordered by atom specificity.
     pub package_accept_keywords: Vec<(ConfigAtom, Vec<AcceptToken>)>,
+    /// Profile `package.keywords` entries, which edit the ebuild's `KEYWORDS`
+    ///
+    /// Each profile node is ordered by atom specificity, parents first.
+    pub package_keywords: Vec<(ConfigAtom, Vec<String>)>,
     /// Effective global `ACCEPT_LICENSE` after `@GROUP` expansion and `-` denials
     pub accept_license: AcceptSet,
     /// Per-package `package.license` entries: `(atom, overlay)`, each overlay
@@ -239,26 +242,40 @@ async fn compute_use_env(
 
     // Per-package keyword acceptance, in portage's precedence order: each profile,
     // then site `package.keywords` + `package.accept_keywords` (one layer, as in
-    // Portage), then the config overlay. Bare atoms mean "accept this package's `~arch`".
+    // Portage), then the config overlay.
+    let profile_bare = testing_of_stable(&accept_keywords);
+    let site_bare = testing_of_stable(
+        &settings
+            .profile_default("ACCEPT_KEYWORDS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(AcceptToken::parse)
+            .collect::<Vec<_>>(),
+    );
     let mut package_accept_keywords: Vec<(ConfigAtom, Vec<AcceptToken>)> = Vec::new();
+    let mut package_keywords: Vec<(ConfigAtom, Vec<String>)> = Vec::new();
+    let as_config = |entries: Vec<(Dep, Vec<String>)>| -> Vec<(ConfigAtom, Vec<String>)> {
+        entries
+            .into_iter()
+            .map(|(dep, toks)| (ConfigAtom::Dep(dep), toks))
+            .collect()
+    };
     for profile in stack.profiles() {
         let entries = profile.package_accept_keywords().unwrap_or_default();
-        package_accept_keywords.extend(parse_keyword_tokens(
-            entries
-                .into_iter()
-                .map(|(dep, toks)| (ConfigAtom::Dep(dep), toks))
-                .collect(),
-        ));
+        package_accept_keywords.extend(parse_keyword_tokens(as_config(entries), &profile_bare));
+        let entries = profile.package_keywords().unwrap_or_default();
+        package_keywords.extend(order_by_specificity(as_config(entries)));
     }
     let mut site_keywords = load_atom_tokens(portage_dir.join("package.keywords").as_str());
     site_keywords.extend(load_atom_tokens(
         portage_dir.join("package.accept_keywords").as_str(),
     ));
-    package_accept_keywords.extend(parse_keyword_tokens(site_keywords));
+    package_accept_keywords.extend(parse_keyword_tokens(site_keywords, &site_bare));
     if let Some(overlay) = config_overlay {
-        package_accept_keywords.extend(parse_keyword_tokens(load_atom_tokens(
-            overlay.join("package.accept_keywords").as_str(),
-        )));
+        package_accept_keywords.extend(parse_keyword_tokens(
+            load_atom_tokens(overlay.join("package.accept_keywords").as_str()),
+            &site_bare,
+        ));
     }
     if let Some(pending) = pending {
         package_accept_keywords.extend(
@@ -532,6 +549,7 @@ async fn compute_use_env(
         force_mask,
         accept_keywords,
         package_accept_keywords,
+        package_keywords,
         accept_license,
         package_license,
         accept_properties,
@@ -583,14 +601,35 @@ fn load_atom_tokens(path: &str) -> Vec<(ConfigAtom, Vec<String>)> {
     result
 }
 
-/// One `package.accept_keywords` layer, ordered by atom specificity, tokens interned
+/// One `package.accept_keywords` layer, ordered by atom specificity, tokens interned,
+/// a bare atom taking `bare`
 fn parse_keyword_tokens(
     layer: Vec<(ConfigAtom, Vec<String>)>,
+    bare: &[AcceptToken],
 ) -> impl Iterator<Item = (ConfigAtom, Vec<AcceptToken>)> {
-    order_by_specificity(layer).into_iter().map(|(atom, toks)| {
-        let parsed = toks.iter().filter_map(|t| AcceptToken::parse(t)).collect();
-        (atom, parsed)
-    })
+    order_by_specificity(layer)
+        .into_iter()
+        .map(move |(atom, toks)| {
+            let parsed = if toks.is_empty() {
+                bare.to_vec()
+            } else {
+                toks.iter().filter_map(|t| AcceptToken::parse(t)).collect()
+            };
+            (atom, parsed)
+        })
+}
+
+/// The testing form of each stable token in `tokens`: what a bare `package.accept_keywords`
+/// atom grants
+fn testing_of_stable(tokens: &[AcceptToken]) -> Vec<AcceptToken> {
+    tokens
+        .iter()
+        .filter_map(|t| match *t {
+            AcceptToken::Stable(arch) => Some(AcceptToken::Testing(arch)),
+            AcceptToken::AnyStable => Some(AcceptToken::AnyTesting),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `package.license`-style layers, each ordered by atom specificity, as per-package
@@ -1038,11 +1077,17 @@ mod tests {
 
     /// Resolve with `site` files written into the root's `etc/portage`
     async fn env_with_site(site: &[(&str, &str)]) -> UseEnv {
+        env_with(&[("make.defaults", "")], site).await
+    }
+
+    async fn env_with(profile: &[(&str, &str)], site: &[(&str, &str)]) -> UseEnv {
         let repo_dir = tempfile::tempdir().unwrap();
         let repos = make_test_repo(repo_dir.path());
         let profile_dir = repo_dir.path().join("test-profile");
         std::fs::create_dir_all(&profile_dir).unwrap();
-        std::fs::write(profile_dir.join("make.defaults"), "").unwrap();
+        for (name, body) in profile {
+            std::fs::write(profile_dir.join(name), body).unwrap();
+        }
         let pending = PendingConfig {
             profile: Some(PendingProfile {
                 parents: vec![camino::Utf8PathBuf::try_from(profile_dir).unwrap()],
@@ -1087,6 +1132,39 @@ mod tests {
         assert!(env.accept_license.accepts("GPL-2"));
         let mask: Vec<_> = env.package_mask.iter().map(|a| a.to_string()).collect();
         assert_eq!(mask, ["dev-libs/*::gentoo"]);
+    }
+
+    #[tokio::test]
+    async fn bare_keyword_atoms_and_profile_package_keywords() {
+        let env = env_with(
+            &[
+                (
+                    "make.defaults",
+                    "ARCH=amd64\nACCEPT_KEYWORDS=\"amd64 x86\"\n",
+                ),
+                ("package.accept_keywords", "dev-libs/bar\n"),
+                ("package.keywords", "dev-libs/foo ~amd64\n"),
+            ],
+            &[
+                ("make.conf", "ACCEPT_KEYWORDS=\"arm64\"\n"),
+                ("package.accept_keywords", "dev-libs/baz\n"),
+            ],
+        )
+        .await;
+        let toks = |s: &[&str]| -> Vec<AcceptToken> {
+            s.iter().filter_map(|t| AcceptToken::parse(t)).collect()
+        };
+        assert_eq!(
+            atoms(&env.package_accept_keywords),
+            ["dev-libs/bar", "dev-libs/baz"]
+        );
+        assert_eq!(
+            env.package_accept_keywords[0].1,
+            toks(&["~amd64", "~arm64", "~x86"])
+        );
+        assert_eq!(env.package_accept_keywords[1].1, toks(&["~amd64", "~x86"]));
+        assert_eq!(atoms(&env.package_keywords), ["dev-libs/foo"]);
+        assert_eq!(env.package_keywords[0].1, ["~amd64"]);
     }
 
     #[tokio::test]

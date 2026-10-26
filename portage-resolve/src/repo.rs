@@ -283,8 +283,12 @@ impl KeywordAccept {
 /// 1. Global incremental `ACCEPT_KEYWORDS` (profile `make.defaults` usually
 ///    contributes `$ARCH`; make.conf often adds `~$ARCH`) — see make.conf(5).
 /// 2. Per-package lines from profile + `/etc/portage/package.accept_keywords`
-///    (+ legacy `package.keywords`) — portage(5): each line *augments* the
-///    accept set for matching atoms; a bare atom expands to host `~arch`.
+///    (+ legacy `package.keywords`), portage(5): each line *augments* the
+///    accept set for matching atoms; a bare atom arrives pre-expanded by
+///    [`crate::use_env`], or empty, which means host `~arch`.
+///
+/// Profile `package.keywords` instead edits the version's own `KEYWORDS` first
+/// ([`Self::with_package_keywords`]).
 ///
 /// Effective set for a version = fold (1) then all matching lines of (2) in
 /// order; each file arrives sorted by atom specificity
@@ -300,10 +304,36 @@ pub struct AcceptKeywords {
     global: KeywordAccept,
     /// Per-package overrides: `(atom, [tokens])`
     ///
-    /// A bare atom is pre-expanded to `~arch` (portage(5)). Empty ⇒ no per-package
+    /// An empty token list is expanded to `~arch`. Empty ⇒ no per-package
     /// work in the hot path.
     per_package: Vec<(ConfigAtom, Vec<AcceptToken>)>,
     index: AtomIndex,
+    /// Profile `package.keywords` edits to the ebuild's own `KEYWORDS`
+    package_keywords: Vec<(ConfigAtom, Vec<KeywordEdit>)>,
+    package_keywords_index: AtomIndex,
+}
+
+/// One profile `package.keywords` token, applied incrementally to `KEYWORDS`
+#[derive(Clone)]
+enum KeywordEdit {
+    /// `-*`
+    Clear,
+    /// `-kw`
+    Remove(Keyword),
+    /// `kw`
+    Add(Keyword),
+}
+
+impl KeywordEdit {
+    fn parse(token: &str) -> Option<Self> {
+        if token == "-*" {
+            return Some(Self::Clear);
+        }
+        match token.strip_prefix('-') {
+            Some(kw) => Keyword::parse(kw).ok().map(Self::Remove),
+            None => Keyword::parse(token).ok().map(Self::Add),
+        }
+    }
 }
 
 impl AcceptKeywords {
@@ -345,7 +375,67 @@ impl AcceptKeywords {
             global: global_accept,
             per_package,
             index,
+            package_keywords: Vec::new(),
+            package_keywords_index: AtomIndex::default(),
         }
+    }
+
+    /// Add profile `package.keywords` lines, `(atom, [tokens])` in fold order
+    ///
+    /// Each matching line edits the version's `KEYWORDS` (`-*` clears, `-kw` removes,
+    /// `kw` adds) before acceptance is checked.
+    pub fn with_package_keywords(mut self, entries: Vec<(ConfigAtom, Vec<String>)>) -> Self {
+        self.package_keywords = entries
+            .into_iter()
+            .map(|(atom, toks)| {
+                let edits = toks.iter().filter_map(|t| KeywordEdit::parse(t)).collect();
+                (atom, edits)
+            })
+            .collect();
+        self.package_keywords_index =
+            AtomIndex::new(self.package_keywords.iter().map(|(atom, _)| atom));
+        self
+    }
+
+    /// `keywords` after every matching profile `package.keywords` line
+    fn edited_keywords<'k>(
+        &self,
+        keywords: &'k [Keyword],
+        cpv: &Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+        repo: Option<Interned<DefaultInterner>>,
+    ) -> Cow<'k, [Keyword]> {
+        if self.package_keywords.is_empty() {
+            return Cow::Borrowed(keywords);
+        }
+        let slot = slot.map(portage_atom::Slot::from_name);
+        let mut out: Option<Vec<Keyword>> = None;
+        for index in self.package_keywords_index.candidates(&cpv.cpn) {
+            let (atom, edits) = &self.package_keywords[index];
+            if !atom.matches(cpv, slot.as_ref(), repo) {
+                continue;
+            }
+            // Portage's incremental stack keeps only positive keywords.
+            let list = out.get_or_insert_with(|| {
+                keywords
+                    .iter()
+                    .filter(|k| matches!(k.stability, Stability::Stable | Stability::Testing))
+                    .cloned()
+                    .collect()
+            });
+            for edit in edits {
+                match edit {
+                    KeywordEdit::Clear => list.clear(),
+                    KeywordEdit::Remove(kw) => list.retain(|k| k != kw),
+                    KeywordEdit::Add(kw) => {
+                        if !list.contains(kw) {
+                            list.push(kw.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out.map_or(Cow::Borrowed(keywords), Cow::Owned)
     }
 
     /// Test-only constructor from a global token list (no per-package entries)
@@ -405,7 +495,8 @@ impl AcceptKeywords {
         slot: Option<Interned<DefaultInterner>>,
         repo: Option<Interned<DefaultInterner>>,
     ) -> bool {
-        self.decision(cpv, slot, repo).accepts(keywords)
+        let keywords = self.edited_keywords(keywords, cpv, slot, repo);
+        self.decision(cpv, slot, repo).accepts(&keywords)
     }
 
     /// Whether this version is merged on a *stable* keyword path
@@ -421,7 +512,8 @@ impl AcceptKeywords {
         slot: Option<Interned<DefaultInterner>>,
         repo: Option<Interned<DefaultInterner>>,
     ) -> bool {
-        self.decision(cpv, slot, repo).is_stable_for(keywords)
+        let keywords = self.edited_keywords(keywords, cpv, slot, repo);
+        self.decision(cpv, slot, repo).is_stable_for(&keywords)
     }
 
     /// The keyword token an autounmask would need: the version is not accepted
@@ -438,6 +530,7 @@ impl AcceptKeywords {
         if self.accepts(keywords, cpv, slot, repo) {
             return None;
         }
+        let keywords = self.edited_keywords(keywords, cpv, slot, repo);
         if keywords
             .iter()
             .any(|kw| kw.arch == self.arch && kw.stability == Stability::Testing)
@@ -1232,7 +1325,8 @@ impl ResolvedPolicy {
     /// `DISTDIR`).
     pub fn from_use_env(env: crate::use_env::UseEnv, arch: &Arch) -> (Self, UseEnvExtras) {
         let accept_keywords =
-            AcceptKeywords::new(arch, &env.accept_keywords, env.package_accept_keywords);
+            AcceptKeywords::new(arch, &env.accept_keywords, env.package_accept_keywords)
+                .with_package_keywords(env.package_keywords);
         let accept_licenses = AcceptLicenses::new(env.accept_license, env.package_license);
         let accept_properties =
             AcceptProperties::new(env.accept_properties, env.package_properties);
@@ -2404,6 +2498,30 @@ mod tests {
             .description,
             "a2"
         );
+    }
+
+    #[test]
+    fn profile_package_keywords_edit_keywords_not_acceptance() {
+        let arch = Arch::intern("amd64");
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+        let line = |toks: &[&str]| {
+            vec![(
+                atom("dev-libs/foo"),
+                toks.iter().map(|t| t.to_string()).collect(),
+            )]
+        };
+        let stable = Keyword::parse_line("amd64").unwrap();
+        let removed =
+            AcceptKeywords::from_global(&arch, &["amd64"]).with_package_keywords(line(&["-amd64"]));
+        assert!(!removed.accepts(&stable, &foo, None, None));
+
+        let added = |global: &[&str]| {
+            AcceptKeywords::from_global(&arch, global).with_package_keywords(line(&["~amd64"]))
+        };
+        assert!(!added(&["amd64"]).accepts(&[], &foo, None, None));
+        assert!(added(&["amd64", "~amd64"]).accepts(&[], &foo, None, None));
+        let bar = Cpv::parse("dev-libs/bar-1").unwrap();
+        assert!(!added(&["amd64", "~amd64"]).accepts(&[], &bar, None, None));
     }
 
     #[test]
