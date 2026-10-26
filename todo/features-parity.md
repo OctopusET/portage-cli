@@ -15,13 +15,6 @@ run. Matching Portage's set is this note's work, one feature at a time.
 - **Read from FEATURES:** `binpkg-request-signature`, `binpkg-signing`, `candy`, `ccache`,
   `config-protect-if-modified` (seeded from the settings), `keeptemp`, `keepwork`, `noclean`,
   `nostrip`, `test`, `test-fail-continue`; `sandbox` only in a test.
-- **Make.globals defaults em has no FEATURES check for** (30): `assume-digests`,
-  `binpkg-docompress`, `binpkg-dostrip`, `binpkg-logs`, `binpkg-multi-instance`,
-  `buildpkg-live`, `compress-index`, `distlocks`, `ebuild-locks`,
-  `fixlafiles`, `ipc-sandbox`, `merge-sync`, `merge-wait`, `multilib-strict`, `network-sandbox`,
-  `news`, `parallel-fetch`, `pkgdir-index-trusted`, `pid-sandbox`, `preserve-libs`,
-  `protect-owned`, `qa-unresolved-soname-deps`, `sandbox`, `strict`, `unknown-features-warn`,
-  `unmerge-logs`, `unmerge-orphans`, `userfetch`, `userpriv`, `usersandbox`, `usersync`.
 
 - **Carried from the settings into the build shell** (`settings::PROVIDED_FEATURES`, 2026-10-26):
   `binpkg-multi-instance`, `config-protect-if-modified`, `preserve-libs`, `unmerge-orphans`.
@@ -30,13 +23,50 @@ run. Matching Portage's set is this note's work, one feature at a time.
   make.globals em supplies both as its default. `distlocks` stays always on: the same lock keeps
   em's own parallel fetch tasks off one distfile.
 
+## The make.globals defaults, checked against the code (2026-10-26)
+
+Always on in em, no FEATURES switch:
+
+| Feature | Where |
+|---|---|
+| `binpkg-docompress`, `binpkg-dostrip` | ecompress/estrip run at the tail of `src_install` (`ebuild/mod.rs` `post_process_image`), before `ebuild/binpkg.rs` packs the image |
+| `binpkg-multi-instance` | `portage-binpkg` writes `cat/pn/pf-build_id.gpkg.tar` |
+| `buildpkg-live` | `-b`/`buildpkg` packs live ebuilds too; nothing checks `PROPERTIES=live` |
+| `distlocks` | `portage-distfiles/src/fetch.rs` `lock_distfile` (`.<name>.portage_lockfile`) |
+| `pkgdir-index-trusted` | `BinpkgIndex::open` trusts `Packages`; it scans PKGDIR only when the index is absent or empty |
+| `preserve-libs` | `preserve_libs.rs`, wired into every merge |
+| `protect-owned` | `ebuild/mod.rs` `check_collisions` refuses a path another installed package owns |
+| `config-protect-if-modified`, `unmerge-orphans` | read from the settings |
+
+Missing in em:
+
+| Feature | State |
+|---|---|
+| `sandbox`, `usersandbox`, `network-sandbox`, `ipc-sandbox`, `pid-sandbox` | no phase sandbox or namespaces |
+| `userpriv`, `userfetch`, `usersync` | phases, fetch and sync run as the invoking user; no drop to `portage` |
+| `ebuild-locks` | no lock around unsandboxed phases |
+| `merge-wait` | `--jobs` merges each package as soon as it builds (`merge/mod.rs`) |
+| `merge-sync` | no fsync after merge or unmerge |
+| `parallel-fetch` | no background fetch of later packages' distfiles |
+| `compress-index` | no `Packages.gz` |
+| `news` | no news update or notice after sync; only `em select news` |
+| `fixlafiles`, `multilib-strict`, `qa-unresolved-soname-deps` | none of these install QA passes |
+| `strict` | no switch; a distfile without a digest is refused unless the repo layout or `digest` allows it |
+| `unknown-features-warn` | unknown FEATURES are not reported |
+
+No meaning for em:
+
+| Feature | Why |
+|---|---|
+| `assume-digests` | em does not generate Manifests |
+| `binpkg-logs`, `unmerge-logs` | em keeps only elog output in `PORTAGE_LOGDIR`; build logs stay with the work dir |
+
 ## Work
 
-1. Sort the 31 into: behaviour em always has (no switch: likely `preserve-libs`,
-   `binpkg-multi-instance`, the collision checks), behaviour em lacks (the sandbox family,
-   `userpriv`/`userfetch`/`usersync`, `distlocks`), and features with no meaning for em. Check
-   each against the code, not the name.
-2. Export to the ebuild environment the ones em provides, always-on ones included.
+1. Done: the table above.
+2. Done: `settings::PROVIDED_FEATURES` carries the always-on set and the two read features into the
+   build shell when the settings enable them. The VDB `FEATURES` still omits the missing ones,
+   which emerge records.
 3. For each always-on one, decide whether `-feature` in make.conf must switch it off, as in
    Portage.
 4. `em --info`/`portageq envvar FEATURES` show Portage's stacked value (make.globals included)
