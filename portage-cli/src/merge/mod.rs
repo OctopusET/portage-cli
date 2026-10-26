@@ -80,7 +80,7 @@ struct BinpkgReuse {
 struct RemoteBinpkg {
     url: String,
     /// The binrepo's `verify-signature` setting
-    verify_signature: bool,
+    verify_signature: Option<bool>,
     /// The index entry, whose digests the download must match
     entry: portage_binpkg::BinpkgEntry,
 }
@@ -407,19 +407,19 @@ async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
         if !reuse.needs_pretend(planned) {
             continue;
         }
-        let (binpkg, force_verify_signature) = if let Some(local) = reuse.local {
-            (camino::Utf8PathBuf::from_path_buf(local).ok(), false)
+        let (binpkg, verify_signature) = if let Some(local) = reuse.local {
+            (camino::Utf8PathBuf::from_path_buf(local).ok(), None)
         } else if let Some(remote) = &reuse.remote {
             match fetch_remote_binpkg(remote, run.work_base).await {
                 Ok(path) => (Some(path), remote.verify_signature),
                 Err(e) if flags.enforce_no_source => return Err(e),
                 // The merge warns and builds from source.
-                Err(_) => (None, false),
+                Err(_) => (None, None),
             }
         } else if flags.enforce_no_source {
             continue;
         } else {
-            (None, false)
+            (None, None)
         };
         let result = ebuild::pkg_pretend(ebuild::PkgPretend {
             ebuild_path: &planned.ebuild_path,
@@ -429,7 +429,7 @@ async fn run_pretend_checks(run: &MergeRun<'_>) -> Result<()> {
             root: merge_root,
             roots: root_context(entry_roots, run.host_roots, &flags, run.extra_path),
             binpkg: binpkg.as_deref(),
-            force_verify_signature,
+            verify_signature,
             buildpkgonly: flags.buildpkgonly,
         })
         .instrument(tracing::info_span!("pkg", cpv = %planned.cpv))
@@ -989,7 +989,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
             quiet,
             roots: root_ctx,
             merge_gate,
-            force_verify_signature: false,
+            verify_signature: None,
             ignore_blockers,
             activity: activity_pkg.clone(),
         })
@@ -1011,7 +1011,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
                     quiet,
                     roots: root_ctx,
                     merge_gate,
-                    force_verify_signature: remote.verify_signature,
+                    verify_signature: remote.verify_signature,
                     ignore_blockers,
                     activity: activity_pkg.clone(),
                 })

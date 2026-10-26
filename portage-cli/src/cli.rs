@@ -2354,14 +2354,9 @@ pub struct WorkerArgs {
     /// A pre-built GPKG to merge (`-k`/`-g`)
     #[arg(long)]
     pub binpkg: Option<String>,
-    /// `binpkg`'s origin forces cryptographic GPG signature
-    /// verification (a `binrepos.conf` entry with
-    /// `verify-signature = yes`), independent of
-    /// `FEATURES=binpkg-request-signature`.
-    #[arg(long)]
-    pub force_verify_signature: bool,
-    /// `--nodeps`: the merge takes over no blocked package's files
-    #[arg(long)]
+    /// The `binrepos.conf` `verify-signature` of `binpkg`'s origin, if set
+    #[arg(long, value_name = "y|n")]
+    pub verify_signature: Option<YesNo>,
     pub ignore_blockers: bool,
     #[arg(long)]
     pub buildpkg: bool,

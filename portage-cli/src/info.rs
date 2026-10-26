@@ -117,7 +117,7 @@ struct RepoInfo {
 struct BinaryRepoInfo {
     name: String,
     sync_uri: String,
-    verify_signature: bool,
+    verify_signature: Option<bool>,
 }
 
 /// One `@name` set's resolved atoms, or why it couldn't be resolved —
@@ -426,7 +426,11 @@ fn print_text(info: &Info) -> Result<()> {
             writeln!(
                 out,
                 "    {C_DIM}verify-signature:{C_DIM:#} {}",
-                if r.verify_signature { "True" } else { "False" }
+                match r.verify_signature {
+                    Some(true) => "True",
+                    Some(false) => "False",
+                    None => "None",
+                }
             )?;
             writeln!(out)?;
         }

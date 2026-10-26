@@ -474,8 +474,8 @@ pub struct RemoteBinpkgIndex {
     /// This binhost's `binrepos.conf` `verify-signature` setting — carried
     /// alongside the index (not enforced here; the CLI reads it back via
     /// [`Self::verify_signature`] to build a `VerifyPolicy` for whatever it
-    /// fetches from this index).
-    verify_signature: bool,
+    /// fetches from this index). `None` when unset.
+    verify_signature: Option<bool>,
 }
 
 impl RemoteBinpkgIndex {
@@ -494,19 +494,19 @@ impl RemoteBinpkgIndex {
         Self {
             entries: parse_packages_entries(index_text),
             base_uri: base.trim_end_matches('/').to_string(),
-            verify_signature: false,
+            verify_signature: None,
         }
     }
 
     /// Set this binhost's `binrepos.conf` `verify-signature` setting
-    /// (default `false` from [`Self::new`]).
-    pub fn with_verify_signature(mut self, v: bool) -> Self {
+    /// (unset from [`Self::new`]).
+    pub fn with_verify_signature(mut self, v: Option<bool>) -> Self {
         self.verify_signature = v;
         self
     }
 
     /// This binhost's `verify-signature` setting (see [`Self::with_verify_signature`])
-    pub fn verify_signature(&self) -> bool {
+    pub fn verify_signature(&self) -> Option<bool> {
         self.verify_signature
     }
 

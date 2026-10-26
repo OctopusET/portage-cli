@@ -308,12 +308,10 @@ impl DesiredBuildEnv {
 /// One `binrepos.conf` section — real portage's `BinRepoConfig`, restricted
 /// to the fields em's remote binpkg fetch path uses.
 ///
-/// Both flags are honoured end to end: `frozen` is passed to
-/// [`fetch_index_cached`] to prefer this binhost's cached `Packages` over
-/// refetching, and `verify_signature` reaches
-/// [`VerifyPolicy`](portage_binpkg::VerifyPolicy)'s `require_signature` when
-/// the container is extracted, so a binhost can demand a signed package and
-/// have an unsigned one rejected.
+/// `frozen` is passed to [`fetch_index_cached`] to prefer this binhost's
+/// cached `Packages` over refetching; `verify_signature` decides the
+/// [`VerifyPolicy`](portage_binpkg::VerifyPolicy) a fetched container is
+/// extracted with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinRepoEntry {
     /// Section name, or an md5 hex digest of the `sync-uri` for a
@@ -326,7 +324,8 @@ pub struct BinRepoEntry {
     /// The binhost base URI, trailing slash stripped
     pub sync_uri: String,
     pub frozen: bool,
-    pub verify_signature: bool,
+    /// `verify-signature`, `None` when unset so `FEATURES` decide
+    pub verify_signature: Option<bool>,
 }
 
 /// Resolve the configured remote binhosts: `binrepos.conf` (global then
@@ -394,20 +393,21 @@ fn combine_binhosts(
     let mut repos: Vec<(Option<i64>, String, BinRepoEntry)> = Vec::new();
     for name in order {
         let s = &portage_repo::ini::section_with_defaults(sections, name);
-        let Some(sync_uri) = s.get("sync-uri").map(|v| normalize_binhost_uri(v)) else {
+        let get = |key: &str| s.get(key);
+        let Some(sync_uri) = get("sync-uri").map(|v| normalize_binhost_uri(v)) else {
             crate::style::warn_line!("missing sync-uri setting for binrepo {name}");
             continue;
         };
         seen_uris.insert(sync_uri.clone());
-        let priority = s.get("priority").and_then(|v| v.parse::<i64>().ok());
+        let priority = get("priority").and_then(|v| v.parse::<i64>().ok());
         repos.push((
             priority,
             name.clone(),
             BinRepoEntry {
                 name: name.clone(),
                 sync_uri,
-                frozen: parse_binrepo_bool(s.get("frozen")),
-                verify_signature: parse_binrepo_bool(s.get("verify-signature")),
+                frozen: parse_binrepo_bool(get("frozen")).unwrap_or(false),
+                verify_signature: parse_binrepo_bool(get("verify-signature")),
             },
         ));
     }
@@ -426,7 +426,7 @@ fn combine_binhosts(
                         name,
                         sync_uri,
                         frozen: false,
-                        verify_signature: false,
+                        verify_signature: None,
                     },
                 ));
             }
@@ -441,8 +441,8 @@ fn normalize_binhost_uri(uri: &str) -> String {
     uri.trim().trim_end_matches('/').to_string()
 }
 
-fn parse_binrepo_bool(v: Option<&String>) -> bool {
-    matches!(v.map(|s| s.to_lowercase()), Some(s) if s == "true" || s == "yes")
+fn parse_binrepo_bool(v: Option<&String>) -> Option<bool> {
+    v.map(|s| matches!(s.to_lowercase().as_str(), "true" | "yes"))
 }
 
 /// Exclusive lock on `pkgdir`, held while em allocates a build id, writes or removes containers,
@@ -966,24 +966,30 @@ mod tests {
         let result = combine_binhosts(&sections, &order, None);
         assert_eq!(result.len(), 1);
         assert!(result[0].frozen);
-        assert!(result[0].verify_signature);
+        assert_eq!(result[0].verify_signature, Some(true));
     }
 
     #[test]
-    fn default_section_keys_reach_every_binrepo() {
-        let (sections, order) =
-            parse_sections("[DEFAULT]\nverify-signature = true\n[a]\nsync-uri = http://a\n");
-        let result = combine_binhosts(&sections, &order, None);
-        assert!(result[0].verify_signature);
-    }
-
-    #[test]
-    fn frozen_and_verify_signature_default_false() {
+    fn frozen_defaults_false_and_verify_signature_unset() {
         let (sections, order) = parse_sections("[a]\nsync-uri = http://a\n");
-        let result = combine_binhosts(&sections, &order, None);
-        assert_eq!(result.len(), 1);
+        let result = combine_binhosts(&sections, &order, Some("http://b"));
+        assert_eq!(result.len(), 2);
         assert!(!result[0].frozen);
-        assert!(!result[0].verify_signature);
+        assert_eq!(result[0].verify_signature, None);
+        assert_eq!(result[1].verify_signature, None);
+    }
+
+    #[test]
+    fn default_section_is_inherited_and_overridden() {
+        let (sections, order) = parse_sections(
+            "[DEFAULT]\nverify-signature = true\n\n[gentoo]\nsync-uri = http://g\n\n\
+             [mine]\nsync-uri = http://m\nverify-signature = false\n",
+        );
+        let result = combine_binhosts(&sections, &order, Some("http://implicit"));
+        let by_name = |n: &str| result.iter().find(|r| r.sync_uri == n).unwrap();
+        assert_eq!(by_name("http://g").verify_signature, Some(true));
+        assert_eq!(by_name("http://m").verify_signature, Some(false));
+        assert_eq!(by_name("http://implicit").verify_signature, None);
     }
 
     // Exercises the real `portage_binhosts` entry point end-to-end against a

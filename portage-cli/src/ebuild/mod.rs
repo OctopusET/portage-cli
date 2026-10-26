@@ -495,7 +495,7 @@ pub async fn run(
         merge_gate: None,
         buildpkg: false,
         binpkg: None,
-        force_verify_signature: false,
+        verify_signature: None,
         ignore_blockers: false,
         activity: None,
     })
@@ -742,7 +742,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             merge_gate,
             buildpkg: false,
             binpkg: None,
-            force_verify_signature: false,
+            verify_signature: None,
             ignore_blockers,
             activity,
         })
@@ -765,7 +765,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             merge_gate,
             buildpkg: true,
             binpkg: None,
-            force_verify_signature: false,
+            verify_signature: None,
             ignore_blockers,
             activity,
         })
@@ -791,7 +791,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             merge_gate: None,
             buildpkg,
             binpkg: None,
-            force_verify_signature: false,
+            verify_signature: None,
             ignore_blockers,
             activity: activity.clone(),
         })
@@ -811,7 +811,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
                 distdir,
                 buildpkg,
                 binpkg: None,
-                force_verify_signature: false,
+                verify_signature: None,
                 ignore_blockers,
                 activity: activity.as_ref(),
                 log_label: "build",
@@ -834,7 +834,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             merge_gate,
             buildpkg,
             binpkg: None,
-            force_verify_signature: false,
+            verify_signature: None,
             ignore_blockers,
             activity,
         })
@@ -861,11 +861,9 @@ pub struct MergeBinpkg<'a> {
     pub quiet: bool,
     pub roots: RootContext<'a>,
     pub merge_gate: Option<&'a MergeGate>,
-    /// This binpkg's origin (a `binrepos.conf` entry with
-    /// `verify-signature = yes`) forces cryptographic signature
-    /// verification, independent of `FEATURES=binpkg-request-signature`.
-    /// `false` for a local `-k` reuse.
-    pub force_verify_signature: bool,
+    /// The `binrepos.conf` `verify-signature` of this binpkg's origin; `None`
+    /// (a local `-k` reuse, or unset) leaves the policy to `FEATURES`.
+    pub verify_signature: Option<bool>,
     /// `--nodeps`: blockers are ignored, so the merge takes over no blocked package's files
     pub ignore_blockers: bool,
     pub activity: Option<crate::activity::ActivityPkgCtx>,
@@ -887,7 +885,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
         root,
         quiet,
         roots,
-        force_verify_signature,
+        verify_signature,
         merge_gate,
         ignore_blockers,
         activity,
@@ -913,7 +911,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
                 distdir: None,
                 buildpkg: false,
                 binpkg: Some(binpkg_path),
-                force_verify_signature,
+                verify_signature,
                 ignore_blockers,
                 activity: activity.as_ref(),
                 log_label: "merge",
@@ -938,7 +936,7 @@ pub async fn merge_binpkg(opts: MergeBinpkg<'_>) -> Result<()> {
             merge_gate,
             buildpkg: false,
             binpkg: Some(binpkg_path),
-            force_verify_signature,
+            verify_signature,
             ignore_blockers,
             activity,
         })
@@ -969,8 +967,8 @@ pub struct PkgPretend<'a> {
     pub roots: RootContext<'a>,
     /// The binary package the merge will install, whose saved `pkg_pretend` runs
     pub binpkg: Option<&'a Utf8Path>,
-    /// See [`MergeBinpkg::force_verify_signature`]
-    pub force_verify_signature: bool,
+    /// See [`MergeBinpkg::verify_signature`]
+    pub verify_signature: Option<bool>,
     /// `-B`/`--buildpkgonly`, which `MERGE_TYPE` reports
     pub buildpkgonly: bool,
 }
@@ -986,7 +984,7 @@ pub async fn pkg_pretend(opts: PkgPretend<'_>) -> Result<()> {
         root,
         roots,
         binpkg,
-        force_verify_signature,
+        verify_signature,
         buildpkgonly,
     } = opts;
     let pf = format!("{}-{}", cpv.cpn.package, cpv.version);
@@ -1012,7 +1010,7 @@ pub async fn pkg_pretend(opts: PkgPretend<'_>) -> Result<()> {
         merge_gate: None,
         buildpkg: false,
         binpkg,
-        force_verify_signature,
+        verify_signature,
         ignore_blockers: false,
         activity: None,
     })
@@ -1032,13 +1030,9 @@ pub struct InstallWorker<'a> {
     pub distdir: Option<&'a str>,
     pub roots: RootContext<'a>,
     pub binpkg: Option<&'a str>,
-    /// See `PhaseGroupRun`'s field of the same name; relayed across the
-    /// `__worker` process boundary as a bare flag (`--force-verify-signature`)
-    /// rather than the keyring/config itself — the worker re-sources
-    /// `make.conf`/profile via the normal `EbuildShell` sweep and re-reads
-    /// `FEATURES`/`BINPKG_GPG_VERIFY_GPG_HOME` itself, same as everything
-    /// else it re-derives.
-    pub force_verify_signature: bool,
+    /// See [`MergeBinpkg::verify_signature`]; relayed to the `__worker` as
+    /// `--verify-signature y|n`, which re-reads `FEATURES` and the keyring itself.
+    pub verify_signature: Option<bool>,
     /// See [`BuildAndMerge::ignore_blockers`]
     pub ignore_blockers: bool,
     pub buildpkg: bool,
@@ -1089,7 +1083,7 @@ struct WorkerStep<'a> {
     distdir: Option<&'a Utf8Path>,
     buildpkg: bool,
     binpkg: Option<&'a Utf8Path>,
-    force_verify_signature: bool,
+    verify_signature: Option<bool>,
     ignore_blockers: bool,
     activity: Option<&'a crate::activity::ActivityPkgCtx>,
     /// `build`/`merge` — names the log in the non-zero-exit error only
@@ -1139,7 +1133,7 @@ async fn spawn_install_worker_step(
             buildpkg: step.buildpkg,
             quiet: step.quiet,
             binpkg: step.binpkg.map(|b| b.as_str()),
-            force_verify_signature: step.force_verify_signature,
+            verify_signature: step.verify_signature,
             ignore_blockers: step.ignore_blockers,
             activity_job_id: act_job.as_deref(),
             activity_parent_job_id: act_parent.as_deref(),
@@ -1204,7 +1198,7 @@ pub async fn run_install_worker(opts: InstallWorker<'_>) -> Result<()> {
         distdir,
         roots,
         binpkg,
-        force_verify_signature,
+        verify_signature,
         ignore_blockers,
         buildpkg,
         quiet,
@@ -1265,7 +1259,7 @@ pub async fn run_install_worker(opts: InstallWorker<'_>) -> Result<()> {
         merge_gate: None,
         buildpkg,
         binpkg: binpkg.map(Utf8Path::new),
-        force_verify_signature,
+        verify_signature,
         ignore_blockers,
         activity,
     })
@@ -1386,7 +1380,7 @@ struct PhaseGroupRun<'a> {
     /// verification for `binpkg`, independent of whether
     /// `FEATURES=binpkg-request-signature` is set. `false` for a local
     /// `-k` reuse or when the remote repo didn't request it.
-    force_verify_signature: bool,
+    verify_signature: Option<bool>,
     /// See [`BuildAndMerge::ignore_blockers`]
     ignore_blockers: bool,
     activity: Option<crate::activity::ActivityPkgCtx>,
@@ -1402,7 +1396,7 @@ async fn run_phase_group(opts: PhaseGroupRun<'_>) -> Result<()> {
         merge_gate,
         buildpkg,
         binpkg,
-        force_verify_signature,
+        verify_signature,
         ignore_blockers,
         activity,
         ..
@@ -1416,7 +1410,7 @@ async fn run_phase_group(opts: PhaseGroupRun<'_>) -> Result<()> {
             merge_gate,
             buildpkg,
             binpkg,
-            force_verify_signature,
+            verify_signature,
             ignore_blockers,
             activity,
         })
@@ -1433,7 +1427,7 @@ struct GroupRun<'a> {
     merge_gate: Option<&'a MergeGate>,
     buildpkg: bool,
     binpkg: Option<&'a Utf8Path>,
-    force_verify_signature: bool,
+    verify_signature: Option<bool>,
     ignore_blockers: bool,
     activity: Option<crate::activity::ActivityPkgCtx>,
 }
@@ -1716,7 +1710,7 @@ impl PackageSetup {
             merge_gate,
             buildpkg,
             binpkg,
-            force_verify_signature,
+            verify_signature,
             ignore_blockers,
             activity,
         } = opts;
@@ -1746,10 +1740,6 @@ impl PackageSetup {
         let mut binpkg_metadata = None;
         let mut record = BinpkgRecord::new();
         if let (Some(wd), Some(bp)) = (work_dir, binpkg) {
-            // FEATURES=binpkg-request-signature, or the origin's own
-            // binrepos.conf verify-signature=yes.
-            let require_signature =
-                features.contains("binpkg-request-signature") || force_verify_signature;
             // Where src_install would have put it: the package holds `ED`.
             let image = shell.image_ed(&ebuild, wd.as_std_path(), root.as_std_path());
             let image = (!matches!(group, PhaseGroup::Pretend(_))).then_some(image);
@@ -1758,8 +1748,7 @@ impl PackageSetup {
                 bp,
                 image.as_deref(),
                 config_root,
-                require_signature,
-                &features,
+                signature_policy(&features, verify_signature),
             )?;
             let metadata = portage_binpkg::read_metadata(bp.as_std_path())
                 .with_context(|| format!("reading the metadata of {bp}"))?;
@@ -1959,6 +1948,27 @@ async fn add_feature(shell: &mut portage_repo::EbuildShell, feature: &str) -> Re
         .with_context(|| format!("adding {feature} to FEATURES"))
 }
 
+/// `(require_signature, ignore_signature)` for a binpkg whose origin's
+/// `binrepos.conf` says `verify-signature`, as Portage's `gpkg` decides it
+///
+/// Unset defers to `FEATURES`; `binpkg-request-signature`, then
+/// `binpkg-ignore-signature`, override an explicit setting.
+fn signature_policy(
+    features: &std::collections::HashSet<String>,
+    verify_signature: Option<bool>,
+) -> (bool, bool) {
+    if features.contains("binpkg-request-signature") {
+        (true, false)
+    } else if features.contains("binpkg-ignore-signature") {
+        (false, true)
+    } else {
+        match verify_signature {
+            Some(v) => (v, !v),
+            None => (false, false),
+        }
+    }
+}
+
 /// Extract a binary package's image into `image_dir`, or with none only check it, and return
 /// its saved environment, still compressed
 ///
@@ -1968,8 +1978,7 @@ fn extract_binpkg(
     bp: &Utf8Path,
     image_dir: Option<&std::path::Path>,
     config_root: Option<&Utf8Path>,
-    require_signature: bool,
-    features: &std::collections::HashSet<String>,
+    (require_signature, ignore_signature): (bool, bool),
 ) -> Result<Option<Vec<u8>>> {
     // BINPKG_GPG_VERIFY_GPG_HOME names the keyring. The default is under the
     // config root, never the host's path for another --root/--target/--prefix.
@@ -1988,8 +1997,6 @@ fn extract_binpkg(
             "FEATURES=binpkg-request-signature (or this binpkg's binrepos.conf verify-signature=yes) requires a GPG verify keyring at {verify_home} — run `em maint binpkg gpg-import <keyfile>` first"
         );
     }
-    // binpkg-request-signature wins over binpkg-ignore-signature, as in portage.
-    let ignore_signature = !require_signature && features.contains("binpkg-ignore-signature");
     let policy = portage_binpkg::VerifyPolicy {
         require_signature,
         keyring: keyring.as_ref(),
@@ -4963,6 +4970,20 @@ mod tests {
     }
 
     #[test]
+    fn binrepo_verify_signature_sets_the_policy_unless_features_override() {
+        let f = |words: &[&str]| words.iter().map(|w| w.to_string()).collect();
+        let none = f(&[]);
+        assert_eq!(signature_policy(&none, None), (false, false));
+        assert_eq!(signature_policy(&none, Some(true)), (true, false));
+        assert_eq!(signature_policy(&none, Some(false)), (false, true));
+        let request = f(&["binpkg-request-signature", "binpkg-ignore-signature"]);
+        assert_eq!(signature_policy(&request, Some(false)), (true, false));
+        let ignore = f(&["binpkg-ignore-signature"]);
+        assert_eq!(signature_policy(&ignore, Some(true)), (false, true));
+        assert_eq!(signature_policy(&ignore, None), (false, true));
+    }
+
+    #[test]
     fn repo_revisions_follow_the_sync_type() {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(tmp.path()).unwrap();
@@ -5314,7 +5335,7 @@ mod tests {
                     merge_gate: None,
                     buildpkg: true,
                     binpkg,
-                    force_verify_signature: false,
+                    verify_signature: None,
                     ignore_blockers: self.ignore_blockers,
                     activity: None,
                 })

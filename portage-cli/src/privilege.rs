@@ -223,11 +223,8 @@ pub struct WorkerArgs<'a> {
     /// Empty for all but `em setup --local`'s own merge.
     pub extra_path: &'a str,
     pub binpkg: Option<&'a str>,
-    /// `binpkg`'s origin forces cryptographic signature verification
-    /// (a `binrepos.conf` entry with `verify-signature = yes`), independent
-    /// of `FEATURES=binpkg-request-signature`. See `ebuild::PhaseGroupRun`'s
-    /// field of the same name.
-    pub force_verify_signature: bool,
+    /// The `binrepos.conf` `verify-signature` of `binpkg`'s origin, if set
+    pub verify_signature: Option<bool>,
     /// See `ebuild::BuildAndMerge::ignore_blockers`
     pub ignore_blockers: bool,
     pub buildpkg: bool,
@@ -402,8 +399,8 @@ fn build_worker_command(
     if let Some(b) = args.binpkg {
         cmd.arg("--binpkg").arg(b);
     }
-    if args.force_verify_signature {
-        cmd.arg("--force-verify-signature");
+    if let Some(v) = args.verify_signature {
+        cmd.arg("--verify-signature").arg(if v { "y" } else { "n" });
     }
     if args.ignore_blockers {
         cmd.arg("--ignore-blockers");
@@ -802,7 +799,7 @@ mod worker_argv_tests {
             self_contained_bootstrap: false,
             extra_path: "",
             binpkg: None,
-            force_verify_signature: false,
+            verify_signature: None,
             ignore_blockers: false,
             buildpkg: false,
             quiet,

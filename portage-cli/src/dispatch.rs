@@ -99,7 +99,7 @@ impl RunAsync<&cli::Cli> for WorkerArgs {
                 extra_path: &worker_extra_path,
             },
             binpkg: self.binpkg.as_deref(),
-            force_verify_signature: self.force_verify_signature,
+            verify_signature: self.verify_signature.map(|v| v == crate::cli::YesNo::Y),
             ignore_blockers: self.ignore_blockers,
             buildpkg: self.buildpkg,
             quiet: self.quiet,
