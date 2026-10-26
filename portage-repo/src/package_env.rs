@@ -10,7 +10,9 @@
 //! USE wins at build time — because the resolver does not yet read
 //! `package.env`. That is a separate, resolver-side follow-up.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use portage_atom::{Cpv, Dep};
 
@@ -79,7 +81,10 @@ pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
             let dep = match Dep::parse(atom_str) {
                 Ok(dep) => dep,
                 Err(e) => {
-                    tracing::warn!("{}: ignoring invalid atom {atom_str}: {e}", file.display());
+                    warn_once(format!(
+                        "{}: ignoring unsupported atom {atom_str}: {e}",
+                        file.display()
+                    ));
                     continue;
                 }
             };
@@ -90,6 +95,18 @@ pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
         }
     }
     result
+}
+
+/// Warn once per process: this file is re-read for every package built.
+fn warn_once(msg: String) {
+    static SEEN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    if SEEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(msg.clone())
+    {
+        tracing::warn!("{msg}");
+    }
 }
 
 #[cfg(test)]

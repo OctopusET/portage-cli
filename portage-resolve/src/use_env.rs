@@ -718,7 +718,7 @@ fn load_dep_list(path: &str) -> Vec<Dep> {
 /// Parse the atom of a `path` line, warning instead of failing on one em cannot read
 fn parse_config_atom(path: &str, atom: &str) -> Option<Dep> {
     Dep::parse(atom)
-        .inspect_err(|e| tracing::warn!("{path}: ignoring invalid atom {atom}: {e}"))
+        .inspect_err(|e| tracing::warn!("{path}: ignoring unsupported atom {atom}: {e}"))
         .ok()
 }
 
