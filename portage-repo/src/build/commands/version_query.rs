@@ -146,7 +146,7 @@ fn best_match(
 /// `installed_iuse`, relative to the querying package's `parent_use`. A
 /// flag absent from IUSE resolves through its `(+)`/`(-)` default; absent
 /// and undefaulted means the constraint cannot be satisfied.
-fn use_deps_satisfied(
+pub fn use_deps_satisfied(
     use_deps: &[portage_atom::UseDep],
     installed_use: &HashSet<Interned<DefaultInterner>>,
     installed_iuse: &HashSet<Interned<DefaultInterner>>,

@@ -48,15 +48,51 @@ fn installed_packages(eroot: &str) -> Vec<InstalledPackage> {
     }
 }
 
+/// `atom` as a query: a blocker or a conditional USE dependency, which need a package to be
+/// relative to, is invalid here as in portageq
 fn parse_atom(atom: &str) -> std::result::Result<Dep, u8> {
-    Dep::parse(atom).map_err(|_| {
-        eprintln!("ERROR: Invalid atom: '{atom}'");
-        INVALID_ATOM
-    })
+    use portage_atom::UseDepKind;
+    Dep::parse(atom)
+        .ok()
+        .filter(|dep| {
+            dep.blocker.is_none()
+                && dep
+                    .use_deps
+                    .iter()
+                    .flatten()
+                    .all(|ud| matches!(ud.kind, UseDepKind::Enabled | UseDepKind::Disabled))
+        })
+        .ok_or_else(|| {
+            eprintln!("ERROR: Invalid atom: '{atom}'");
+            INVALID_ATOM
+        })
 }
 
+/// Whether installed `pkg` satisfies `dep`: version, slot, `::repo` and USE dependencies
 fn matches(dep: &Dep, pkg: &InstalledPackage) -> bool {
-    dep.matches_cpv(pkg.cpv(), pkg.slot().ok().as_ref())
+    use portage_atom::interner::{DefaultInterner, Interned};
+    use std::collections::HashSet;
+    if !dep.matches_cpv(pkg.cpv(), pkg.slot().ok().as_ref()) {
+        return false;
+    }
+    if dep
+        .repo
+        .is_some_and(|repo| pkg.repository().ok().flatten() != Some(repo))
+    {
+        return false;
+    }
+    let Some(use_deps) = dep.use_deps.as_deref().filter(|u| !u.is_empty()) else {
+        return true;
+    };
+    let installed_use: HashSet<Interned<DefaultInterner>> =
+        pkg.use_flags().unwrap_or_default().into_iter().collect();
+    let installed_iuse: HashSet<Interned<DefaultInterner>> = pkg
+        .iuse()
+        .unwrap_or_default()
+        .iter()
+        .map(Interned::from)
+        .collect();
+    portage_repo::use_deps_satisfied(use_deps, &installed_use, &installed_iuse, &HashSet::new())
 }
 
 pub(crate) fn has_version(eroot: &str, atom: &str) -> Result<u8> {
@@ -319,6 +355,26 @@ mod tests {
         vdb.add("dev-python/setuptools-83.0.0", "0");
         assert_eq!(has_version(&vdb.eroot, "dev-python/setuptools").unwrap(), 0);
         assert_eq!(has_version(&vdb.eroot, "dev-python/pip").unwrap(), 1);
+    }
+
+    #[test]
+    fn has_version_holds_use_and_repo_deps_against_the_installed_package() {
+        let vdb = TestVdb::new();
+        vdb.add("app-misc/foo-1.0", "0");
+        let dir = std::path::Path::new(&vdb.eroot).join("var/db/pkg/app-misc/foo-1.0");
+        std::fs::write(dir.join("USE"), "foo\n").unwrap();
+        std::fs::write(dir.join("IUSE"), "foo bar\n").unwrap();
+        std::fs::write(dir.join("repository"), "gentoo\n").unwrap();
+        let has = |atom: &str| has_version(&vdb.eroot, atom).unwrap();
+        assert_eq!(has("app-misc/foo[foo]"), 0);
+        assert_eq!(has("app-misc/foo[-bar]"), 0);
+        assert_eq!(has("app-misc/foo[bar]"), 1);
+        assert_eq!(has("app-misc/foo[baz]"), 1);
+        assert_eq!(has("app-misc/foo[baz(+)]"), 0);
+        assert_eq!(has("app-misc/foo::gentoo"), 0);
+        assert_eq!(has("app-misc/foo::other"), 1);
+        assert_eq!(has("app-misc/foo[foo?]"), 2);
+        assert_eq!(has("!app-misc/foo"), 2);
     }
 
     #[test]

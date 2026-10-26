@@ -9,6 +9,8 @@ pub mod terminal;
 pub(crate) mod ver_funcs;
 
 pub use commands::inherit;
+pub use commands::version_query::use_deps_satisfied;
+
 pub use env::EbuildEnv;
 pub use profile::{ConfSource, Environment};
 pub use settings::{Layer, Setting, Settings, SettingsSources};
