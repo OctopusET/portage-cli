@@ -710,9 +710,15 @@ impl ProfileStack {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_keywords()))
     }
 
-    /// Accumulated `package.license` entries from the full stack, ancestors first
+    /// Accumulated `package.license` entries, ancestors first, from the profiles whose
+    /// `profile-formats` include `profile-license`
     pub fn package_license(&self) -> Result<Vec<(Dep, Vec<String>)>> {
-        collect_atom_flags(self.profiles.iter().map(|p| p.package_license()))
+        collect_atom_flags(
+            self.profiles
+                .iter()
+                .filter(|p| p.profile_formats.iter().any(|f| f == "profile-license"))
+                .map(|p| p.package_license()),
+        )
     }
 
     /// Accumulated `package.use.force` entries from the full stack
@@ -1663,6 +1669,24 @@ mod tests {
         );
         let err = ProfileStack::build(leaf).unwrap_err().to_string();
         assert!(err.contains("parent 'gentoo:base' not found"), "{err}");
+    }
+
+    #[test]
+    fn package_license_needs_a_profile_license_format_profile() {
+        for (formats, expected) in [
+            ("profile-formats = portage-2 profile-license\n", 1),
+            ("profile-formats = portage-2\n", 0),
+        ] {
+            let (tmp, _gentoo, leaf) = overlay_profile("../shared\n", formats);
+            std::fs::write(leaf.join("package.license"), "dev-libs/foo EULA\n").unwrap();
+            let config_root = Utf8Path::from_path(tmp.path()).unwrap().join("sysroot");
+            let stack = ProfileStack::build_in(leaf, &config_root).unwrap();
+            assert_eq!(
+                stack.package_license().unwrap().len(),
+                expected,
+                "{formats}"
+            );
+        }
     }
 
     #[test]
