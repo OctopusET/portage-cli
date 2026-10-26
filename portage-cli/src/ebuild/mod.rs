@@ -2314,13 +2314,21 @@ async fn run_fetch(
     }
 
     if any_restricted || any_failed {
-        shell
-            .run_phase(ebuild, "nofetch", work_root.as_std_path(), Path::new("/"))
-            .await
-            .context("pkg_nofetch failed")?;
+        if should_run_nofetch(restrict_gate.fetch, shell.defines_function("pkg_nofetch")) {
+            shell
+                .run_phase(ebuild, "nofetch", work_root.as_std_path(), Path::new("/"))
+                .await
+                .context("pkg_nofetch failed")?;
+        }
         bail!("one or more distfiles could not be fetched");
     }
     Ok(())
+}
+
+/// Whether a failed fetch runs `pkg_nofetch`: only under `RESTRICT=fetch` or when
+/// the ebuild defines it, so a network failure never prints the default SRC_URI list
+fn should_run_nofetch(restrict_fetch: bool, defines_nofetch: bool) -> bool {
+    restrict_fetch || defines_nofetch
 }
 
 /// Whether a distfile with no `DIST` entry may be fetched unverified, as portage allows
@@ -4254,6 +4262,13 @@ fn read_fetch_commands(shell: &portage_repo::EbuildShell) -> (Option<String>, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nofetch_runs_only_for_restrict_fetch_or_an_ebuild_definition() {
+        assert!(!should_run_nofetch(false, false));
+        assert!(should_run_nofetch(true, false));
+        assert!(should_run_nofetch(false, true));
+    }
     use portage_vdb::ContentsKind;
     use std::fs;
     use std::os::unix::fs::symlink;
