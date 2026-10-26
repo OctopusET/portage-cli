@@ -646,8 +646,8 @@ fn apply_order_filters(
     (order, exclude_omitted, resume_omitted)
 }
 
-/// Installed versions the solution keeps although policy filters them out,
-/// each with the reason, sorted by package.
+/// Installed versions the solution keeps although `package.mask` or LICENSE
+/// filters them out, each with the reason, sorted by package.
 ///
 /// A version the plan still merges (same slot and merge root, any version)
 /// is not listed. A kept version whose ebuild is gone, or whose slot has no

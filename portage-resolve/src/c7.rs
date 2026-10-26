@@ -135,6 +135,7 @@ fn solve_with(
         profile_package_use: &[],
         force_mask: &fm,
         facts: None,
+        installed: None,
     };
     let mut provider = PortageDependencyProvider::new(adapter);
     let roots: Vec<_> = targets

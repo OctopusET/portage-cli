@@ -58,6 +58,7 @@ pub(super) fn assemble(
         host_installed_cpvs,
         base_installed_cpvs,
         target_installed_cpvs,
+        empty,
         root_pkgs,
         pristine_package_use,
         ..
@@ -130,6 +131,7 @@ pub(super) fn assemble(
         profile_package_use: &profile_package_use,
         force_mask: &force_mask,
         facts: None,
+        installed: (!empty).then_some(&target_installed_cpvs),
     }
     .with_package_use(&policy_facts, &package_use);
 

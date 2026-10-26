@@ -537,6 +537,7 @@ pub(super) fn solve_round(
         profile_package_use,
         force_mask,
         facts: None,
+        installed: Some(solver_installed_cpvs),
     }
     .with_package_use(policy_facts, &package_use);
 

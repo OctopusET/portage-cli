@@ -627,9 +627,13 @@ fn masked_names(outcome: &super::DepgraphOutcome) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn a_masked_installed_package_is_reported_when_nothing_replaces_it() {
-    let pkgs = vec![
+fn mask(fix: &Fix, atom: &str) {
+    let conf = fix.root.join("etc/portage/package.mask");
+    std::fs::write(conf.as_std_path(), format!("{atom}\n")).unwrap();
+}
+
+fn kept_bar(bar_keywords: &'static str) -> Vec<Pkg> {
+    vec![
         Pkg {
             cpv: "app-misc/consumer-1",
             keywords: "amd64",
@@ -640,22 +644,42 @@ fn a_masked_installed_package_is_reported_when_nothing_replaces_it() {
         },
         Pkg {
             cpv: "app-misc/bar-1",
-            keywords: "~amd64",
+            keywords: bar_keywords,
             depend: "",
             rdepend: "",
             iuse: "",
             slot: "0",
         },
-    ];
-    let fix = fixture(&pkgs, &[]);
+    ]
+}
+
+#[test]
+fn a_package_masked_installed_package_is_reported_when_nothing_replaces_it() {
+    let fix = fixture(&kept_bar("amd64"), &[]);
     plant_installed(&fix.root, "app-misc/bar-1", "0", "", "");
+    mask(&fix, "=app-misc/bar-1");
     let atoms = [TargetAtom::explicit("app-misc/consumer")];
     let outcome = solve(&fix, Solve::new(&atoms));
     assert_eq!(names(&outcome), ["app-misc/consumer-1"]);
     assert_eq!(masked_names(&outcome), ["app-misc/bar-1"]);
-    // The kept package is still a dropped keyword dep, so autounmask fails
+    // The kept package is still a dropped masked dep, so autounmask fails
     // the plan. The warning itself is not what sets the exit code.
     assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn an_installed_package_is_not_masked_by_its_keywords() {
+    let fix = fixture(&kept_bar("~amd64"), &[]);
+    plant_installed(&fix.root, "app-misc/bar-1", "0", "", "");
+    let atoms = [TargetAtom::explicit("app-misc/consumer")];
+    let outcome = solve(&fix, Solve::new(&atoms));
+    assert_eq!(names(&outcome), ["app-misc/consumer-1"]);
+    assert!(
+        masked_names(&outcome).is_empty(),
+        "masked was {:?}",
+        masked_names(&outcome)
+    );
+    assert_eq!(outcome.exit_code, 0);
 }
 
 #[test]
@@ -671,7 +695,7 @@ fn a_masked_installed_package_is_not_reported_when_its_slot_is_upgraded() {
         },
         Pkg {
             cpv: "app-misc/bar-1",
-            keywords: "~amd64",
+            keywords: "amd64",
             depend: "",
             rdepend: "",
             iuse: "",
@@ -688,6 +712,7 @@ fn a_masked_installed_package_is_not_reported_when_its_slot_is_upgraded() {
     ];
     let fix = fixture(&pkgs, &[]);
     plant_installed(&fix.root, "app-misc/bar-1", "0", "", "");
+    mask(&fix, "=app-misc/bar-1");
     // The first atom matches only the masked installed version and is dropped.
     let atoms = [
         TargetAtom::explicit("<app-misc/bar-2"),
