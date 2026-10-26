@@ -656,6 +656,13 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
     {
         crate::style::warn_line!("env-update failed: {e:#}");
     }
+    if merged > 0
+        && !buildpkgonly
+        && !fetchonly
+        && let Err(e) = maint::infodir::update_info_dirs(merge_root)
+    {
+        crate::style::warn_line!("info directory index update failed: {e:#}");
+    }
 
     // Replay what the elog `echo` module collected, now that every package in
     // the run has been through its phases — portage's `mod_echo.finalize`, and

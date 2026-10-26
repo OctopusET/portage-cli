@@ -1,6 +1,7 @@
 pub mod binhost;
 pub mod binpkg;
 pub mod env;
+pub mod infodir;
 pub mod logs;
 pub mod movebin;
 pub mod moveinst;
