@@ -27,6 +27,11 @@ pub struct EmergeModeArgs {
     #[arg(short = 'S', long)]
     pub searchdesc: bool,
 
+    /// `n`: a `-s`/`-S` key with regex metacharacters is still a plain substring (prefix it
+    /// with `%` to make it a regular expression)
+    #[arg(long, value_name = "y|n")]
+    pub regex_search_auto: Option<super::YesNo>,
+
     /// Skip dependency resolution and only merge specified packages
     #[arg(short = 'O', long)]
     pub nodeps: bool,

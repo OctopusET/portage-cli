@@ -175,6 +175,53 @@ async fn run_desc(
 // emerge -s / -S style search
 // ---------------------------------------------------------------------------
 
+/// One `-s`/`-S` search key, read as emerge reads it: a leading `%` makes it a regular
+/// expression, a leading `@` or any `/` matches it against `category/package`
+#[derive(Debug, Clone)]
+struct SearchKey {
+    re: regex::Regex,
+    category: bool,
+}
+
+impl SearchKey {
+    /// `pat` as a key; with `regex_auto`, one holding regex metacharacters that compiles is a
+    /// regular expression too
+    fn parse(pat: &str, regex_auto: bool) -> Result<Self> {
+        let (key, explicit) = match pat.strip_prefix('%') {
+            Some(key) => (key, true),
+            None => (pat, false),
+        };
+        let (key, at) = match key.strip_prefix('@') {
+            Some(key) => (key, true),
+            None => (key, false),
+        };
+        let build = |p: &str| regex::RegexBuilder::new(p).case_insensitive(true).build();
+        let looks_like_regex =
+            key.contains(['^', '$', '*', '[', ']', '{', '}', '|', '?']) || key.contains(".+");
+        let re = if explicit {
+            build(key)?
+        } else {
+            match (regex_auto && looks_like_regex).then(|| build(key)) {
+                Some(Ok(re)) => re,
+                _ => build(&regex::escape(key))?,
+            }
+        };
+        Ok(Self {
+            re,
+            category: at || key.contains('/'),
+        })
+    }
+
+    /// Whether the package `category/name` matches
+    fn matches_package(&self, category: &str, name: &str) -> bool {
+        if self.category {
+            self.re.is_match(&format!("{category}/{name}"))
+        } else {
+            self.re.is_match(name)
+        }
+    }
+}
+
 /// Search with emerge's output format: one block per package with latest
 /// available/installed versions, distfile size, homepage, description and
 /// license, bracketed by the search-key header and the result count.
@@ -182,8 +229,13 @@ pub async fn run_emerge_style(
     repo_paths: &[std::path::PathBuf],
     patterns: &[String],
     search_desc: bool,
+    regex_auto: bool,
 ) -> Result<()> {
     let repos = open_repos(repo_paths)?;
+    let keys = patterns
+        .iter()
+        .map(|p| SearchKey::parse(p, regex_auto))
+        .collect::<Result<Vec<_>>>()?;
 
     // Installed versions (best per cpn) from the VDB.
     let mut installed: BTreeMap<Cpn, portage_atom::Version> = BTreeMap::new();
@@ -204,7 +256,7 @@ pub async fn run_emerge_style(
     let arch = gentoo_core::Arch::current();
     let arch_str = arch.as_str().to_string();
 
-    for pat in patterns {
+    for (pat, key) in patterns.iter().zip(&keys) {
         let mut out = anstream::stdout();
         writeln!(
             out,
@@ -221,14 +273,10 @@ pub async fn run_emerge_style(
             let has_cache = repo.has_primary_cache();
             for cat in repo.categories() {
                 for pkg in cat.packages() {
-                    let mut hit = if pat.contains('/') {
-                        contains_ci(&format!("{}/{}", cat.name(), pkg.name()), pat)
-                    } else {
-                        contains_ci(pkg.name(), pat)
-                    };
+                    let mut hit = key.matches_package(cat.name(), pkg.name());
                     if !hit && search_desc && !has_cache {
                         hit = latest_visible(&repos, idx, pkg.cpn(), &arch_str)
-                            .is_some_and(|(_, e, _)| contains_ci(&e.metadata.description, pat));
+                            .is_some_and(|(_, e, _)| key.re.is_match(&e.metadata.description));
                     }
                     if hit {
                         matched
@@ -245,13 +293,10 @@ pub async fn run_emerge_style(
                 latest_per_cpn: true,
                 ..Default::default()
             };
-            let pat_owned = pat.to_string();
+            let re = key.re.clone();
             let desc_hits = cache_entries_parallel(&repos, &opts, move |text| {
                 let raw = RawCacheEntry::new(text);
-                Ok::<_, portage_repo::Error>(contains_ci(
-                    raw.field("DESCRIPTION").unwrap_or(""),
-                    &pat_owned,
-                ))
+                Ok::<_, portage_repo::Error>(re.is_match(raw.field("DESCRIPTION").unwrap_or("")))
             })
             .await?;
             for (cpv, hit) in desc_hits {
@@ -448,4 +493,28 @@ fn distfiles_size(repo: &Repository, cpn: &Cpn, meta: &portage_metadata::EbuildM
         .into_iter()
         .filter_map(|f| sizes.get(&f).copied())
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_keys_read_regex_and_category_markers_as_emerge_does() {
+        let key = |p: &str| SearchKey::parse(p, true).unwrap();
+        assert!(key("^gcc$").matches_package("sys-devel", "gcc"));
+        assert!(!key("^gcc$").matches_package("sys-devel", "gcc-config"));
+        assert!(key("GCC").matches_package("sys-devel", "gcc-config"));
+        assert!(key("@sys-devel/gcc").matches_package("sys-devel", "gcc"));
+        assert!(!key("@sys-devel/gcc").matches_package("dev-util", "gcc"));
+        assert!(key("%gc+").matches_package("sys-devel", "gcc"));
+        assert!(!key("%^g.c$").matches_package("sys-devel", "gcc-config"));
+        let plain = SearchKey::parse("^gcc$", false).unwrap();
+        assert!(!plain.matches_package("sys-devel", "gcc"));
+        assert!(
+            key("g[cc").matches_package("dev-util", "g[cc"),
+            "a bad regex is text"
+        );
+        assert!(SearchKey::parse("%(", true).is_err());
+    }
 }

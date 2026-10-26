@@ -781,7 +781,11 @@ time, where emerge fails the resolve.
 The `-p` status column never shows `g` (remote binary package): the preview
 does not query binhosts.
 
+`em -s`/`-S` reads emerge's `%`/`@` key markers and auto-detected regular
+expressions, but has no fuzzy matching (`--fuzzy-search`, on by default in emerge).
+
 `em --info <atom>` prints each installed match's build settings but never runs
+
 its `pkg_info()` phase, marks no forced USE flags, and fails on an atom with no
 installed version where emerge would fall back to an ebuild's `pkg_info()`.
 

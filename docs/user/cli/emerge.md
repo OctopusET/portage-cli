@@ -125,6 +125,9 @@ Pick a different operation than a merge.
 * `-S, --searchdesc` — Search package names and descriptions
 
   Same split as `-s`/`em search` above: emerge-style output here, `em search --desc` is the equery-style applet.
+* `--regex-search-auto <y|n>` — `n`: a `-s`/`-S` key with regex metacharacters is still a plain substring (prefix it with `%` to make it a regular expression)
+  * `y`: Yes
+  * `n`: No
 * `-O, --nodeps` — Skip dependency resolution and only merge specified packages
 * `-C, --unmerge` — Remove the matching installed packages completely, without regard to dependencies
 
