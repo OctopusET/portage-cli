@@ -1010,7 +1010,7 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         return prune_atoms(cli, &atoms).await;
     }
     // emerge -W/--deselect: world-file-only, no removal at all.
-    if mode.deselect {
+    if mode.deselect == Some(cli::YesNo::Y) {
         return deselect_atoms(cli, &atoms);
     }
     // emerge -s / -S: the arguments are search patterns, not atoms.
@@ -1112,7 +1112,7 @@ async fn resume_atoms(cli: &cli::Cli) -> Result<()> {
 /// these atoms, report unmatched ones, bail if nothing matched" is identical.
 fn match_installed_atoms(
     vdb: &portage_vdb::Vdb,
-    atoms: &[String],
+    atoms: &[TargetAtom],
     label: &str,
 ) -> Result<Vec<portage_vdb::InstalledPackage>> {
     if atoms.is_empty() {
@@ -1122,11 +1122,15 @@ fn match_installed_atoms(
     let mut seen = std::collections::HashSet::new();
     let mut matched: Vec<portage_vdb::InstalledPackage> = Vec::new();
     let mut unmatched: Vec<&str> = Vec::new();
-    for raw in atoms {
+    for target in atoms {
+        let raw = &target.atom;
         let mut pkgs = crate::vdb::find_packages(vdb, raw);
         if pkgs.is_empty() {
-            crate::style::warn_line!("no installed package matches '{raw}'");
-            unmatched.push(raw.as_str());
+            // A set member that is not installed is simply not removed.
+            if target.origin == TargetOrigin::Explicit {
+                crate::style::warn_line!("no installed package matches '{raw}'");
+                unmatched.push(raw.as_str());
+            }
             continue;
         }
         if !raw.contains('/') {
@@ -1169,8 +1173,31 @@ fn match_installed_atoms(
 /// the match list, so `--pretend` prints it and `--ask` confirms against it.
 async fn unmerge_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     let vdb = open_cli_vdb(cli)?;
-    let matched = match_installed_atoms(&vdb, atoms, "-C/--unmerge")?;
-    remove_matched_packages(cli, vdb, matched, "unmerge", "unmerged").await
+    let targets = expand_sets(atoms, &cli.roots());
+    let matched = match_installed_atoms(&vdb, &targets, "-C/--unmerge")?;
+    remove_matched_packages(cli, vdb, matched, "unmerge", "unmerged").await?;
+    deselect_removed_sets(cli, atoms)
+}
+
+/// After a real `-C`/`-P`, drop the `@set`s its command line named from the world files
+fn deselect_removed_sets(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
+    let refs = removed_set_refs(&cli.mode(), atoms);
+    if !cli.pretend() && !refs.is_empty() {
+        maint::world::remove_lines(Some(cli.roots().merge_root()), &refs)?;
+    }
+    Ok(())
+}
+
+/// The `@set` tokens of `atoms` a removal deselects: none under `--deselect=n`
+fn removed_set_refs(mode: &cli::EmergeModeArgs, atoms: &[String]) -> Vec<String> {
+    if mode.deselect == Some(cli::YesNo::N) {
+        return Vec::new();
+    }
+    atoms
+        .iter()
+        .filter(|a| portage_repo::is_set_ref(a))
+        .cloned()
+        .collect()
 }
 
 /// `-P`/`--prune`: remove the older installed versions of the matched packages (of every
@@ -1182,7 +1209,8 @@ async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
     let candidates = if atoms.is_empty() {
         installed.clone()
     } else {
-        match_installed_atoms(&vdb, atoms, "-P/--prune")?
+        let targets = expand_sets(atoms, &cli.roots());
+        match_installed_atoms(&vdb, &targets, "-P/--prune")?
     };
     // The dependency-aware prune keeps each cp's highest installed version; `--nodeps` keeps
     // the highest match of the atoms, as portage's plain unmerge prune does.
@@ -1226,7 +1254,8 @@ async fn prune_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    remove_matched_packages(cli, vdb, matched, "prune", "pruned").await
+    remove_matched_packages(cli, vdb, matched, "prune", "pruned").await?;
+    deselect_removed_sets(cli, atoms)
 }
 
 /// From `candidates` (already matched installed packages, possibly several
@@ -1543,7 +1572,8 @@ pub(crate) async fn run_unmerge_batch(
         confirm_action(&format!("{verb} these {} package(s)", packages.len()))?;
     }
 
-    execute_unmerge_batch(cli, vdb, packages, exclude, verb, gerund, true).await
+    let clean_world = cli.mode().deselect != Some(cli::YesNo::N);
+    execute_unmerge_batch(cli, vdb, packages, exclude, verb, gerund, clean_world).await
 }
 
 /// Disk-mutating half of [`run_unmerge_batch`]: profile-env'd shell, one
@@ -2181,12 +2211,51 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_deselects_the_sets_it_named_unless_deselect_n() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
+        let world_sets = root.join("var/lib/portage/world_sets");
+        std::fs::create_dir_all(world_sets.parent().unwrap()).unwrap();
+        std::fs::write(&world_sets, "@myset\n@other\n").unwrap();
+        let atoms = ["@myset".to_string(), "app-misc/foo".to_string()];
+        let mut mode = cli::EmergeModeArgs {
+            deselect: Some(cli::YesNo::N),
+            ..Default::default()
+        };
+        assert!(removed_set_refs(&mode, &atoms).is_empty());
+        mode.deselect = None;
+        let refs = removed_set_refs(&mode, &atoms);
+        assert_eq!(refs, ["@myset"]);
+        maint::world::remove_lines(Some(&root), &refs).unwrap();
+        assert_eq!(std::fs::read_to_string(&world_sets).unwrap(), "@other\n");
+    }
+
+    #[test]
+    fn set_members_that_are_not_installed_are_skipped_quietly() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pkg(&tmp.path().join("var/db/pkg"), "app-misc", "foo-1.0");
+        let vdb = open_vdb(tmp.path());
+        let member = |atom: &str| TargetAtom {
+            atom: atom.to_string(),
+            origin: TargetOrigin::Set("myset".to_string()),
+        };
+        let got = match_installed_atoms(
+            &vdb,
+            &[member("app-misc/foo"), member("app-misc/gone")],
+            "-C/--unmerge",
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
     fn match_installed_atoms_bails_when_nothing_matches() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("var/db/pkg")).unwrap();
         let vdb = open_vdb(tmp.path());
         let err =
-            match_installed_atoms(&vdb, &["app-misc/foo".to_string()], "-P/--prune").unwrap_err();
+            match_installed_atoms(&vdb, &[TargetAtom::explicit("app-misc/foo")], "-P/--prune")
+                .unwrap_err();
         assert!(err.to_string().contains("-P/--prune"));
     }
 
@@ -2199,12 +2268,17 @@ mod tests {
             std::fs::write(d.join("SLOT"), "0").unwrap();
         }
         let vdb = open_vdb(tmp.path());
-        let err = match_installed_atoms(&vdb, &["foo".to_string()], "-C/--unmerge").unwrap_err();
+        let err = match_installed_atoms(&vdb, &[TargetAtom::explicit("foo")], "-C/--unmerge")
+            .unwrap_err();
         assert!(err.to_string().contains("app-misc/foo, dev-libs/foo"));
         assert_eq!(
-            match_installed_atoms(&vdb, &["app-misc/foo".to_string()], "-C/--unmerge")
-                .unwrap()
-                .len(),
+            match_installed_atoms(
+                &vdb,
+                &[TargetAtom::explicit("app-misc/foo")],
+                "-C/--unmerge"
+            )
+            .unwrap()
+            .len(),
             1
         );
     }
@@ -2218,7 +2292,8 @@ mod tests {
             std::fs::write(d.join("SLOT"), "0").unwrap();
         }
         let vdb = open_vdb(tmp.path());
-        let got = match_installed_atoms(&vdb, &["portage".to_string()], "-C/--unmerge").unwrap();
+        let got = match_installed_atoms(&vdb, &[TargetAtom::explicit("portage")], "-C/--unmerge")
+            .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].cpn().to_string(), "sys-apps/portage");
     }

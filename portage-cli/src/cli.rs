@@ -287,8 +287,8 @@ const OPTIONAL_YN: &[(&str, Option<char>)] = &[
 ];
 
 /// `words` with emerge's optional `y`/`n` switch values folded away: `--ask y` is `--ask`, and
-/// `--ask n` drops that switch and every earlier one. A switch em takes as `--name=y|n` gets
-/// its value attached.
+/// `--ask n` drops that switch and every earlier one. `--deselect n` is kept, as `--deselect=n`.
+/// A switch em takes as `--name=y|n` gets its value attached.
 fn normalize_optional_yn(words: Vec<OsString>) -> Vec<OsString> {
     let mut out: Vec<OsString> = Vec::with_capacity(words.len());
     let mut words = words.into_iter().peekable();
@@ -318,6 +318,7 @@ fn normalize_optional_yn(words: Vec<OsString>) -> Vec<OsString> {
             Some("n") if valued => out.push(format!("{long}=n").into()),
             None if valued => out.push(word),
             None | Some("y" | "True") => out.push(name.into()),
+            Some("n") if long == "--deselect" => out.push("--deselect=n".into()),
             Some("n") => out.retain(|w| !is_switch(w, long, short)),
             Some(_) => out.push(word),
         }
@@ -921,6 +922,10 @@ mod tests {
             normalize_optional_yn(os(&["--buildpkg=y", "-k", "True", "-b", "n", "-j", "4"])),
             os(&["--buildpkg=y", "-k", "--buildpkg=n", "-j", "4"])
         );
+        let cli = Cli::parse_from(normalize_optional_yn(os(&["-C", "-W", "n", "foo"]))).unwrap();
+        assert_eq!(cli.mode().deselect, Some(YesNo::N));
+        assert_eq!(cli.atoms(), ["foo"]);
+        assert_eq!(emerge(["-W", "foo"]).mode().deselect, Some(YesNo::Y));
     }
 
     #[test]

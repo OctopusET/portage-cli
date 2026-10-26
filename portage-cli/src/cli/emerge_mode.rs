@@ -57,10 +57,18 @@ pub struct EmergeModeArgs {
     #[arg(short = 'P', long, effect = "destructive")]
     pub prune: bool,
 
-    /// Remove atoms and/or `@set`s from the world file, without unmerging
-    /// anything.
-    #[arg(short = 'W', long)]
-    pub deselect: bool,
+    /// Remove atoms and/or `@set`s from the world file, without unmerging anything
+    ///
+    /// `--deselect=n` instead keeps a removal (`-C`/`-P`/`-c`) from dropping what it removed
+    /// from the world file.
+    #[arg(
+        short = 'W',
+        long,
+        require_equals,
+        default_missing = "y",
+        value_name = "y|n"
+    )]
+    pub deselect: Option<super::YesNo>,
 
     /// Resume the last saved merge (see `em maint cleanresume` to discard it instead)
     ///
