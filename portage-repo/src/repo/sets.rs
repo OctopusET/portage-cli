@@ -231,14 +231,18 @@ fn parse_dep(s: &str) -> Result<Dep> {
     Dep::parse(s).map_err(Error::from)
 }
 
+/// Valid atoms of `path`; an unparseable line is warned about and skipped, as portage does.
 fn read_atoms(path: &Utf8Path) -> Result<Vec<Dep>> {
     let mut out = Vec::new();
-    for line in read_lines(path)? {
+    for (n, line) in read_lines(path)?.iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        out.push(Dep::parse(trimmed)?);
+        match Dep::parse(trimmed) {
+            Ok(dep) => out.push(dep),
+            Err(e) => tracing::warn!("{path}: invalid atom at line {}: {trimmed}: {e}", n + 1),
+        }
     }
     Ok(out)
 }
@@ -459,6 +463,26 @@ mod tests {
             .collect();
         got.sort();
         assert_eq!(got, vec!["dev-libs/openssl", "sys-libs/zlib"]);
+    }
+
+    #[test]
+    fn invalid_world_line_is_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            &root.join("var/lib/portage/world"),
+            "sys-libs/zlib\nnot an atom\ndev-libs/openssl\n",
+        );
+        let stack = make_profile_stack(root);
+        let eroot = Utf8Path::from_path(root).unwrap();
+        let r = SetResolver::new(&stack, eroot);
+        let got: Vec<String> = r
+            .resolve("selected-packages")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.to_string())
+            .collect();
+        assert_eq!(got, vec!["sys-libs/zlib", "dev-libs/openssl"]);
     }
 
     #[test]
