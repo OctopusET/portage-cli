@@ -479,14 +479,12 @@ fn sdiff_merge(p: &Pending) -> Result<bool> {
     }
 
     // `sdiff` created `tmp` with the invoking umask, so carry the sidecar's
-    // mode *and* ownership onto it before it becomes the live file — the same
-    // `chmod`/`chown` from `lstat(conf["new"])` dispatch-conf applies to its
-    // own merge result. Without this a `0600` root-owned config comes back
-    // world-readable.
+    // ownership and mode onto it before it becomes the live file, as dispatch-conf
+    // does for its own merge result. chown first: it clears setuid/setgid.
     if let Ok(meta) = std::fs::metadata(p.sidecar.as_std_path()) {
         use std::os::unix::fs::MetadataExt;
-        let _ = std::fs::set_permissions(tmp.as_std_path(), meta.permissions());
         let _ = std::os::unix::fs::chown(tmp.as_std_path(), Some(meta.uid()), Some(meta.gid()));
+        let _ = std::fs::set_permissions(tmp.as_std_path(), meta.permissions());
     }
     std::fs::rename(tmp.as_std_path(), p.target.as_std_path())
         .with_context(|| format!("installing the merge result over {}", p.target))?;
