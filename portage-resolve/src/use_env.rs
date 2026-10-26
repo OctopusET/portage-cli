@@ -551,19 +551,14 @@ fn effective_accept_keywords(
     split_var: &dyn Fn(&str) -> Vec<String>,
     arch: &str,
 ) -> Vec<AcceptToken> {
-    let arch = arch.to_owned();
     let ak = split_var("ACCEPT_KEYWORDS");
-    let parse = |toks: &[String]| toks.iter().filter_map(|t| AcceptToken::parse(t)).collect();
-    if arch.is_empty() {
-        return parse(&ak);
-    }
-    let testing = format!("~{arch}");
-    let has_arch = ak.iter().any(|k| k == &arch || k == &testing);
-    if has_arch {
-        return parse(&ak);
-    }
-    // Broken expansion (e.g. `["~"]` or empty) — mirror portage's make.conf default.
-    parse(&[arch, testing])
+    // An empty list or a lone `~` is a failed `${ARCH}` expansion; any other list is taken as written.
+    let toks = if !arch.is_empty() && ak.iter().all(|k| k == "~") {
+        vec![arch.to_owned(), format!("~{arch}")]
+    } else {
+        ak
+    };
+    toks.iter().filter_map(|t| AcceptToken::parse(t)).collect()
 }
 
 /// Load a `package.*` file as raw `(atom, [token])` lines, in file order
@@ -785,11 +780,29 @@ fn stack_user_atoms(acc: &mut Vec<ConfigAtom>, lines: Vec<(bool, ConfigAtom)>) {
 mod tests {
     use super::{
         AcceptSet, AcceptToken, PendingConfig, PendingProfile, ProfileLayer, UseEnv, build_use_env,
-        expand_use_expand_colon, flags_have_use_clear_all, load_atom_tokens, load_package_env_use,
-        per_package_accept,
+        effective_accept_keywords, expand_use_expand_colon, flags_have_use_clear_all,
+        load_atom_tokens, load_package_env_use, per_package_accept,
     };
     use portage_atom::{ConfigAtom, Cpv, Dep};
     use portage_atom_pubgrub::UseOverride;
+
+    #[test]
+    fn accept_keywords_fall_back_to_arch_only_for_a_broken_expansion() {
+        let arch = "amd64";
+        let eff = |toks: &[&str]| {
+            let toks: Vec<String> = toks.iter().map(|t| t.to_string()).collect();
+            effective_accept_keywords(&|_| toks.clone(), arch)
+        };
+        let parse = |toks: &[&str]| -> Vec<AcceptToken> {
+            toks.iter().filter_map(|t| AcceptToken::parse(t)).collect()
+        };
+        assert_eq!(eff(&["~*"]), parse(&["~*"]));
+        assert_eq!(eff(&["-*", "**"]), parse(&["-*", "**"]));
+        assert_eq!(eff(&["x86"]), parse(&["x86"]));
+        assert_eq!(eff(&["amd64", "~amd64"]), parse(&["amd64", "~amd64"]));
+        assert_eq!(eff(&["~"]), parse(&["amd64", "~amd64"]));
+        assert_eq!(eff(&[]), parse(&["amd64", "~amd64"]));
+    }
 
     fn make_test_repo(dir: &std::path::Path) -> portage_repo::RepoSet {
         std::fs::create_dir_all(dir.join("metadata")).unwrap();
