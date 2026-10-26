@@ -3,8 +3,8 @@
 //! matching real portage's `_emerge/actions.py::_calc_depclean`, read
 //! rather than guessed from behavior.
 //!
-//! The real algorithm: seed a "required" set from `@world`, walk every
-//! requirement's *installed* `RDEPEND`/`PDEPEND` (`DEPEND`/`BDEPEND`
+//! The real algorithm: seed a "required" set from `@world` (`@system` and the selected sets
+//! when atoms are given), walk every requirement's *installed* `RDEPEND`/`PDEPEND` (`DEPEND`/`BDEPEND`
 //! excluded by default — build-time-only, the classic thing depclean
 //! clears out) transitively over what's actually installed, and anything
 //! installed but never reached is removal-eligible. When atoms are given
