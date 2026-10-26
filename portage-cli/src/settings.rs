@@ -168,13 +168,17 @@ const SEEDED: &[&str] = &[
 /// `FEATURES` em acts on when the configuration sets them; the rest never reach a build, so an
 /// ebuild testing for a sandbox em lacks does not assume it
 const HONOURED_FEATURES: &[&str] = &[
+    "binpkg-docompress",
+    "binpkg-dostrip",
     "binpkg-ignore-signature",
     "binpkg-multi-instance",
     "binpkg-request-signature",
     "binpkg-signing",
     "buildpkg",
+    "buildpkg-live",
     "config-protect-if-modified",
     "digest",
+    "distlocks",
     "keeptemp",
     "keepwork",
     "noclean",
@@ -182,7 +186,9 @@ const HONOURED_FEATURES: &[&str] = &[
     "noinfo",
     "noman",
     "nostrip",
+    "pkgdir-index-trusted",
     "preserve-libs",
+    "protect-owned",
     "test",
     "unmerge-orphans",
 ];
