@@ -1613,7 +1613,7 @@ async fn remove_matched_packages(
 }
 
 /// The packages of `system` that removing `packages` leaves with no installed version, each with
-/// the `virtual/*` of `system` that pulled it in, if any
+/// the `virtual/*` of `system` that pulled it in, if any, in the order of `packages`
 fn system_warning_cps(
     packages: &[portage_vdb::InstalledPackage],
     vdb: &portage_vdb::Vdb,
@@ -1622,10 +1622,11 @@ fn system_warning_cps(
     let system = expand_system_virtuals(system, vdb);
     let removed: std::collections::HashSet<&portage_atom::Cpv> =
         packages.iter().map(|p| p.cpv()).collect();
-    let mut cpns: Vec<portage_atom::Cpn> = packages.iter().map(|p| *p.cpn()).collect();
-    cpns.sort();
-    cpns.dedup();
-    cpns.into_iter()
+    let mut seen = std::collections::HashSet::new();
+    packages
+        .iter()
+        .map(|p| *p.cpn())
+        .filter(|cpn| seen.insert(*cpn))
         .filter_map(|cpn| {
             let virt = *system.get(&cpn)?;
             vdb.category(cpn.category.as_ref())
