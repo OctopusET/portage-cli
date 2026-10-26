@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use portage_atom::{Cpn, Cpv};
 use portage_metadata::RawCacheEntry;
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
@@ -237,25 +237,12 @@ pub async fn run_emerge_style(
         .map(|p| SearchKey::parse(p, regex_auto))
         .collect::<Result<Vec<_>>>()?;
 
-    let roots = cli.roots();
-    let set = portage_repo::RepoSet::from_ordered(
-        repos.iter().cloned().map(std::sync::Arc::new).collect(),
-        0,
-        Vec::new(),
-    );
-    let use_env = portage_resolve::use_env::build_use_env(
-        &set,
-        roots.config(),
-        roots.config_overlay(),
-        None,
-        None,
-    )
-    .await
-    .context("resolving the profile for search visibility")?;
-    let (policy, _) = portage_resolve::repo::ResolvedPolicy::from_use_env(use_env, &cli.arch());
-    let policy = policy.as_policy();
-    let accepts = |cpv: &Cpv, entry: &portage_metadata::CacheEntry, repo: &Repository| {
-        policy.version_accepted(cpv, entry, repo.name())
+    let arch = cli.arch();
+    let policy = search_policy(&repos, &cli.roots(), &arch).await;
+    let view = policy.as_ref().map(|p| p.as_policy());
+    let accepts = |cpv: &Cpv, entry: &portage_metadata::CacheEntry, repo: &Repository| match &view {
+        Some(policy) => policy.version_accepted(cpv, entry, repo.name()),
+        None => arch_keyword_accepts(entry, arch.as_str()),
     };
 
     // Installed versions (best per cpn) from the VDB.
@@ -337,6 +324,43 @@ pub async fn run_emerge_style(
 
 /// Whether a version from a repo is visible on the searched root
 type Accepts<'a> = dyn Fn(&Cpv, &portage_metadata::CacheEntry, &Repository) -> bool + 'a;
+
+/// The visibility policy of `roots`' profile and config, or `None` when it cannot be resolved
+/// (no `make.profile`), where search falls back to `arch`'s keywords alone
+async fn search_policy(
+    repos: &[Repository],
+    roots: &portage_resolve::Roots,
+    arch: &gentoo_core::Arch,
+) -> Option<portage_resolve::repo::ResolvedPolicy> {
+    let set = portage_repo::RepoSet::from_ordered(
+        repos.iter().cloned().map(std::sync::Arc::new).collect(),
+        0,
+        Vec::new(),
+    );
+    let use_env = portage_resolve::use_env::build_use_env(
+        &set,
+        roots.config(),
+        roots.config_overlay(),
+        None,
+        None,
+    )
+    .await;
+    match use_env {
+        Ok(env) => Some(portage_resolve::repo::ResolvedPolicy::from_use_env(env, arch).0),
+        Err(e) => {
+            tracing::debug!("search visibility falls back to {arch} keywords: {e:#}");
+            None
+        }
+    }
+}
+
+/// Whether `entry` is keyworded stable or testing for `arch`
+fn arch_keyword_accepts(entry: &portage_metadata::CacheEntry, arch: &str) -> bool {
+    entry.metadata.keywords.iter().any(|k| {
+        let k = k.to_string();
+        k == arch || k == format!("~{arch}") || k == "*" || k == "~*"
+    })
+}
 
 /// The first of `repos` that has `cpn`
 fn repo_providing(repos: &[Repository], cpn: &Cpn) -> Option<usize> {
@@ -581,5 +605,56 @@ mod tests {
         assert_eq!(latest(&["amd64"]), ("1".to_string(), true));
         assert_eq!(latest(&["amd64", "~amd64"]), ("2".to_string(), true));
         assert_eq!(latest(&["arm64"]), ("2".to_string(), false));
+    }
+
+    #[tokio::test]
+    async fn search_policy_applies_package_mask_and_falls_back_without_a_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(repo_dir.join("metadata")).unwrap();
+        std::fs::write(repo_dir.join("metadata/layout.conf"), "").unwrap();
+        std::fs::create_dir_all(repo_dir.join("profiles/test")).unwrap();
+        std::fs::write(repo_dir.join("profiles/repo_name"), "test\n").unwrap();
+        std::fs::write(repo_dir.join("profiles/categories"), "app-misc\n").unwrap();
+        std::fs::write(
+            repo_dir.join("profiles/test/make.defaults"),
+            "ARCH=\"amd64\"\nACCEPT_KEYWORDS=\"amd64\"\nACCEPT_LICENSE=\"*\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo_dir.join("app-misc/foo")).unwrap();
+        let repo = Repository::builder()
+            .in_memory_cache()
+            .open(&repo_dir)
+            .unwrap();
+        for ver in ["1", "2"] {
+            std::fs::write(
+                repo_dir.join(format!("app-misc/foo/foo-{ver}.ebuild")),
+                "EAPI=8\nSLOT=0\n",
+            )
+            .unwrap();
+            let text = "EAPI=8\nDESCRIPTION=d\nSLOT=0\nKEYWORDS=amd64\n";
+            let entry = portage_metadata::CacheEntry::parse(text).unwrap();
+            let cpv = Cpv::parse(&format!("app-misc/foo-{ver}")).unwrap();
+            repo.write_cache_entry(&cpv, &entry).unwrap();
+        }
+        let repos = [repo];
+        let cpn = Cpn::parse("app-misc/foo").unwrap();
+        let arch = gentoo_core::Arch::intern("amd64");
+        let root = camino::Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        let roots = portage_resolve::Roots::for_test(root.as_str()).with_config(Some(root.clone()));
+        let config = root.join("etc/portage");
+        std::fs::create_dir_all(&config).unwrap();
+        assert!(search_policy(&repos, &roots, &arch).await.is_none());
+
+        std::os::unix::fs::symlink(repo_dir.join("profiles/test"), config.join("make.profile"))
+            .unwrap();
+        std::fs::write(config.join("package.mask"), ">=app-misc/foo-2\n").unwrap();
+        let policy = search_policy(&repos, &roots, &arch).await.unwrap();
+        let policy = policy.as_policy();
+        let accepts = |cpv: &Cpv, e: &portage_metadata::CacheEntry, r: &Repository| {
+            policy.version_accepted(cpv, e, r.name())
+        };
+        let (ver, _, visible) = latest_visible(&repos, 0, &cpn, &accepts).unwrap();
+        assert_eq!((ver.to_string(), visible), ("1".to_string(), true));
     }
 }
