@@ -101,20 +101,24 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for EconfCommand {
         if !config_shell.is_empty()
             && let Err(e) = rewrite_sh_shebang(&configure, &config_shell)
         {
-            let _ = writeln!(
-                context.params.stderr(shell),
-                "econf: {}: {e}",
-                configure.display()
-            );
+            let msg = format!("econf: {}: {e}", configure.display());
+            if let Some(flag) = &die_flag {
+                flag.raise(&msg);
+            }
+            let _ = writeln!(context.params.stderr(shell), "die: {msg}");
+            return Ok(brush_core::ExecutionResult::new(1));
         }
         let gnuconfig = std::path::PathBuf::from(format!("{eprefix}/usr/share/gnuconfig"));
-        let workdir = get("WORKDIR");
-        if gnuconfig.exists() && !workdir.is_empty() {
-            let workdir = std::path::Path::new(&workdir);
+        let workdir = std::path::PathBuf::from(get("WORKDIR"));
+        if gnuconfig.exists() && !workdir.as_os_str().is_empty() {
             let quiet = get("PORTAGE_QUIET") == "1";
-            for updated in refresh_gnuconfig(workdir, &gnuconfig) {
+            let (dir, from) = (workdir.clone(), gnuconfig.clone());
+            let updated = tokio::task::spawn_blocking(move || refresh_gnuconfig(&dir, &from))
+                .await
+                .unwrap_or_default();
+            for updated in updated {
                 if !quiet {
-                    let rel = updated.strip_prefix(workdir).unwrap_or(&updated);
+                    let rel = updated.strip_prefix(&workdir).unwrap_or(&updated);
                     let name = updated.file_name().unwrap_or_default().to_string_lossy();
                     let _ = writeln!(
                         context.params.stderr(shell),
@@ -309,8 +313,11 @@ fn refresh_gnuconfig(
 }
 
 fn tmp_sibling(path: &std::path::Path) -> std::path::PathBuf {
+    // Every subshell shares em's pid, so concurrent econf calls need the counter to stay apart.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".em-tmp.{}", std::process::id()));
+    name.push(format!(".em-tmp.{}.{seq}", std::process::id()));
     path.with_file_name(name)
 }
 
