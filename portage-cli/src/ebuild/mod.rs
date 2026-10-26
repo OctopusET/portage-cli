@@ -388,6 +388,12 @@ pub(crate) async fn apply_profile_env(
         .configure_shell(shell, &confs)
         .await
         .context("sourcing profile environment")?;
+    if let Some((cpv, slot)) = pkg {
+        let implicit = stack
+            .implicit_iuse(cpv, slot)
+            .context("reading profile use.force/use.mask")?;
+        shell.set_implicit_iuse(implicit);
+    }
 
     // Every profile/make.conf-derived variable (CHOST, ELIBC, MULTILIB_ABIS,
     // DEFAULT_ABI, …) must reach real subprocesses an ebuild/eclass spawns

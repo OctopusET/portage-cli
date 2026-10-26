@@ -462,6 +462,11 @@ matching Portage's `USE_ORDER` (`env` beats `pkg`):
    stable-keyword merges) — unconditional, not smuggled through package.use
 7. Level-C ceded flags under `--autosolve-use` (also post-fold)
 
+Global `use.force`/`use.mask` only touch flags in `IUSE_EFFECTIVE`. Before
+EAPI 5 the force/mask flags themselves, plus `build` and `bootstrap`, are
+implicit IUSE (portage `_get_implicit_iuse`), so a forced flag stays in such a
+package's `USE` in the plan and in the build shell.
+
 Portage also appends **`/etc/portage/profile/`** as a *site-local profile layer*
 on top of the resolved `make.profile` chain (portage(5),
 `LocationsManager`'s `CUSTOM_PROFILE_PATH`) — a flat node whose own `parent` file

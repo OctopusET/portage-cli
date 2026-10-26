@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -309,6 +309,8 @@ pub struct EbuildShell {
     /// Active USE flags for this shell session
     /// Used by the `use()`, `usev()`, `usex()` functions.
     use_flags: HashSet<String>,
+    /// The package's profile `use.force`/`use.mask` flags, implicit IUSE before EAPI 5
+    implicit_iuse: BTreeSet<String>,
 }
 
 /// The variables the package manager itself provides to a phase and exports
@@ -771,6 +773,7 @@ impl EbuildShell {
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
             use_flags: HashSet::new(),
+            implicit_iuse: BTreeSet::new(),
         };
         ebuild_shell.sync_eclass_dirs_var();
 
@@ -2521,6 +2524,12 @@ impl EbuildShell {
         self.shell.env_str(name).map(|cow| cow.into_owned())
     }
 
+    /// Set the package's profile `use.force`/`use.mask` flags, which
+    /// [`apply_iuse_effective`](Self::apply_iuse_effective) adds to `IUSE_EFFECTIVE` before EAPI 5
+    pub fn set_implicit_iuse(&mut self, flags: impl IntoIterator<Item = String>) {
+        self.implicit_iuse = flags.into_iter().collect();
+    }
+
     /// Set `IUSE_EFFECTIVE` from IUSE + profile implicit/expand values (PMS 11.1.1)
     /// and narrow `USE` to it
     ///
@@ -2551,7 +2560,7 @@ impl EbuildShell {
                 values.insert(v.clone(), vals);
             }
         }
-        let set = portage_metadata::iuse_effective(
+        let mut set = portage_metadata::iuse_effective(
             eapi,
             split("IUSE"),
             split("IUSE_IMPLICIT"),
@@ -2560,6 +2569,9 @@ impl EbuildShell {
             unprefixed,
             &values,
         );
+        if !eapi.has_profile_iuse_injection() {
+            set.extend(self.implicit_iuse.iter().cloned());
+        }
         let use_str = if self.use_flags.is_empty() {
             self.get_var("USE").unwrap_or_default()
         } else {

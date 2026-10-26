@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
@@ -731,6 +731,33 @@ impl ProfileStack {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_use_mask()))
     }
 
+    /// The forced and masked flags for `cpv`: global `use.{force,mask}` folded with
+    /// matching `package.use.{force,mask}` entries, the implicit IUSE of EAPI 0-4
+    pub fn implicit_iuse(
+        &self,
+        cpv: &Cpv,
+        slot: Option<&portage_atom::Slot>,
+    ) -> Result<BTreeSet<String>> {
+        let fold = |global: Vec<String>, pkg: Vec<(Dep, Vec<String>)>| {
+            let mut set: BTreeSet<String> = global.into_iter().collect();
+            for (dep, flags) in pkg {
+                if !dep.matches_cpv(cpv, slot) {
+                    continue;
+                }
+                for f in flags {
+                    match f.strip_prefix('-') {
+                        Some(name) => set.remove(name),
+                        None => set.insert(f),
+                    };
+                }
+            }
+            set
+        };
+        let mut out = fold(self.use_force()?, self.package_use_force()?);
+        out.extend(fold(self.use_mask()?, self.package_use_mask()?));
+        Ok(out)
+    }
+
     /// Accumulated `package.use.stable.force` entries from the full stack
     pub fn package_use_stable_force(&self) -> Result<Vec<(Dep, Vec<String>)>> {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_use_stable_force()))
@@ -1359,6 +1386,21 @@ mod tests {
         let forced = stack.use_force().unwrap();
         assert!(!forced.contains(&"ipv6".to_string()));
         assert!(forced.contains(&"nls".to_string()));
+    }
+
+    #[test]
+    fn implicit_iuse_folds_matching_package_force_and_mask() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = make_profile(&dir, "leaf", &[]);
+        std::fs::write(leaf.join("use.force"), "prefix\n").unwrap();
+        std::fs::write(leaf.join("use.mask"), "bar\n").unwrap();
+        std::fs::write(leaf.join("package.use.force"), "cat/pkg baz -prefix\n").unwrap();
+        std::fs::write(leaf.join("package.use.mask"), "cat/other qux\n").unwrap();
+        let stack = ProfileStack::build(leaf).unwrap();
+        let set = stack
+            .implicit_iuse(&Cpv::parse("cat/pkg-1").unwrap(), None)
+            .unwrap();
+        assert_eq!(set, BTreeSet::from(["bar".into(), "baz".into()]));
     }
 
     #[test]

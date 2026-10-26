@@ -519,6 +519,10 @@ async fn compute_use_env(
     }
     let force_mask = ForceMask {
         iuse_injection: crate::force_mask::IuseInjection::new(
+            [stack.use_force(), stack.use_mask()]
+                .into_iter()
+                .flat_map(|r| r.unwrap_or_default())
+                .collect(),
             split_var("IUSE_IMPLICIT"),
             expand.clone(),
             use_expand_implicit,

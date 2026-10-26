@@ -113,11 +113,15 @@ pub fn iuse_effective_profile_part(
 /// values like `arm64-macos` that [`KnownArch`] doesn't model) — the
 /// hardcoded [`KnownArch::ALL`] list is a fallback only, for a caller that
 /// never threads the profile value through.
+///
+/// Portage also treats `build` and `bootstrap` as implicit here; the profile's
+/// `use.force`/`use.mask` flags are the caller's to add, being per package.
 fn non_injection_extras(
     use_expand: impl IntoIterator<Item = impl AsRef<str>>,
     expand_values: &HashMap<String, Vec<String>>,
     out: &mut BTreeSet<String>,
 ) {
+    out.extend(["build".to_string(), "bootstrap".to_string()]);
     match expand_values.get("ARCH") {
         Some(vals) => out.extend(vals.iter().filter(|s| !s.is_empty()).cloned()),
         None => out.extend(KnownArch::ALL.iter().map(|a| a.as_keyword().to_string())),
@@ -159,6 +163,7 @@ mod tests {
         assert!(set.contains("debug"));
         assert!(set.contains("nls"));
         assert!(!set.contains("prefix"), "IUSE_IMPLICIT must not leak in");
+        assert!(set.contains("build") && set.contains("bootstrap"));
         assert!(
             set.contains("elibc_glibc"),
             "USE_EXPAND prefix applies without the IMPLICIT filter"
@@ -228,5 +233,9 @@ mod tests {
         assert!(set.contains("elibc_glibc"));
         assert!(set.contains("elibc_musl"));
         assert!(!set.contains("ELIBC"));
+        assert!(
+            !set.contains("build"),
+            "build is implicit only before EAPI 5"
+        );
     }
 }

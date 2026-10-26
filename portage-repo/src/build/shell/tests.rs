@@ -3087,6 +3087,31 @@ async fn use_outside_iuse_effective_dies_only_from_eapi_5() {
 }
 
 #[tokio::test]
+async fn eapi4_keeps_a_profile_forced_flag_outside_iuse() {
+    let dir = tempdir().unwrap();
+    let (repo, ebuild) = phase_repo(dir.path(), "");
+    std::fs::write(
+        ebuild.path(),
+        "EAPI=4\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nIUSE=\"foo\"\n\
+         S=\"${WORKDIR}\"\npkg_setup() { use kforced; EM_RC=$?; }\n",
+    )
+    .unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell.set_implicit_iuse(["kforced".to_string()]);
+    shell.set_use_flags(&["kforced"]).unwrap();
+    shell
+        .run_phase(&ebuild, "setup", &dir.path().join("work"), Path::new("/"))
+        .await
+        .unwrap();
+    assert_eq!(shell.get_var("EM_RC").as_deref(), Some("0"));
+    let effective = shell.get_var("IUSE_EFFECTIVE").unwrap_or_default();
+    assert!(
+        effective.split_whitespace().any(|f| f == "kforced"),
+        "{effective}"
+    );
+}
+
+#[tokio::test]
 async fn src_prepare_must_call_eapply_user_from_eapi_6() {
     for (eapi, body, ok) in [
         ("8", "src_prepare() { :; }", false),

@@ -98,7 +98,10 @@ pub struct IuseInjection {
 impl IuseInjection {
     /// Build from the profile's raw `IUSE_IMPLICIT`/`USE_EXPAND`/... values,
     /// precomputing both EAPI classes' profile-invariant `IUSE_EFFECTIVE` half
+    ///
+    /// `force_mask_flags` (global `use.force` and `use.mask`) are implicit IUSE before EAPI 5.
     pub fn new(
+        force_mask_flags: Vec<String>,
         iuse_implicit: Vec<String>,
         use_expand: Vec<String>,
         use_expand_implicit: Vec<String>,
@@ -115,14 +118,16 @@ impl IuseInjection {
             &use_expand_unprefixed,
             &expand_values,
         ));
-        let non_injected = intern_all(portage_metadata::iuse_effective_profile_part(
+        let mut non_injected = portage_metadata::iuse_effective_profile_part(
             false,
             &iuse_implicit,
             &use_expand,
             &use_expand_implicit,
             &use_expand_unprefixed,
             &expand_values,
-        ));
+        );
+        non_injected.extend(force_mask_flags);
+        let non_injected = intern_all(non_injected);
         Self {
             injected,
             non_injected,
@@ -636,6 +641,7 @@ mod tests {
     #[test]
     fn iuse_effective_includes_profile_implicit() {
         let inj = IuseInjection::new(
+            Vec::new(),
             vec!["prefix".into()],
             Vec::new(),
             Vec::new(),
@@ -645,5 +651,30 @@ mod tests {
         let set = iuse_effective_set(portage_metadata::Eapi::Eight, [flag("ssl")], &inj);
         assert!(set.contains(&flag("ssl")));
         assert!(set.contains(&flag("prefix")));
+    }
+
+    #[test]
+    fn global_force_mask_is_implicit_iuse_only_before_eapi_5() {
+        let inj = IuseInjection::new(
+            vec!["kforced".into()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        );
+        let fm = ForceMask {
+            layers: vec![ForceMaskLayer {
+                use_force: fold_signed(vec!["kforced".into()]),
+                ..Default::default()
+            }],
+            iuse_injection: inj,
+        };
+        let cpv = cpv("cat/pkg-1");
+        for (eapi, forced) in [(Eapi::Four, true), (Eapi::Five, false)] {
+            let iuse = iuse_effective_set(eapi, [], &fm.iuse_injection);
+            let (set, _) = fm.effective(&cpv, None, false, &iuse);
+            assert_eq!(set.contains(&flag("kforced")), forced, "EAPI {eapi}");
+        }
     }
 }
