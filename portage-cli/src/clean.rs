@@ -146,7 +146,7 @@ async fn run_all(globals: &Cli, opts: &CleanOpts, filters: &Filters) -> Result<(
     }
 
     println!(">>> build logs");
-    let work_base = crate::ebuild::default_work_base(globals.roots().relocate_root());
+    let work_base = crate::ebuild::work_base(globals, globals.roots().relocate_root()).await?;
     if let Err(e) = crate::maint::logs::run(
         &work_base,
         opts.time_limit.as_deref(),

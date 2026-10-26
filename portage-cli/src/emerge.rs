@@ -739,7 +739,7 @@ async fn emerge_atoms_inner(
     // prefix (eprefix), not under a --target sysroot — see Roots::relocate_root.
     let relocate = roots.relocate_root();
     let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
-    let work_base = ebuild::default_work_base(relocate);
+    let work_base = ebuild::work_base(cli, relocate).await?;
 
     // Ask about what will actually happen (`-f`/`-B` don't install).
     let verb = if merge_flags.fetchonly {
@@ -1461,7 +1461,7 @@ async fn execute_unmerge_batch(
     let broot = cli.host_roots();
     // Scratch trees for pkg_prerm/postrm land where builds would
     // (`emerge_atoms_inner`'s relocation rule).
-    let work_base = ebuild::default_work_base(roots.relocate_root());
+    let work_base = ebuild::work_base(cli, roots.relocate_root()).await?;
 
     let repo = crate::crossdev::main_repo(cli)?;
     let mut shell = repo.shell().await.context("creating shell")?;

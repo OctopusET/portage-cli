@@ -283,13 +283,16 @@ pub(crate) fn build_ld_library_path(
     (!dirs.is_empty()).then(|| dirs.join(":"))
 }
 
-/// The base directory for build work trees: `<prefix>/var/tmp/portage` under
-/// a prefix; otherwise the system `/var/tmp/portage` when writable, falling
-/// back to the user cache.
+/// The base directory for build work trees: `${PORTAGE_TMPDIR}/portage` when
+/// `tmpdir` is given; else `<prefix>/var/tmp/portage` under a prefix; otherwise
+/// the system `/var/tmp/portage` when writable, falling back to the user cache.
 ///
 /// Per-package trees live under [`package_work_dir`], which further keys by
 /// merge root so dual-root plan entries (host + target) never share a WORKDIR.
-pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
+pub fn default_work_base(prefix: Option<&Utf8Path>, tmpdir: Option<&Utf8Path>) -> Utf8PathBuf {
+    if let Some(t) = tmpdir {
+        return t.join("portage");
+    }
     if let Some(p) = prefix {
         return p.join("var/tmp/portage");
     }
@@ -301,6 +304,27 @@ pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     Utf8PathBuf::from(home).join(".cache/em/build")
+}
+
+/// `PORTAGE_TMPDIR` as set by the profile, make.conf or the environment
+///
+/// make.globals' `/var/tmp` is left out, so [`default_work_base`]'s own fallbacks still apply.
+fn portage_tmpdir(settings: Option<&portage_repo::Settings>) -> Option<&Utf8Path> {
+    let s = settings?.setting("PORTAGE_TMPDIR")?;
+    (s.layer > portage_repo::Layer::Globals && !s.value.is_empty())
+        .then(|| Utf8Path::new(s.value.as_str()))
+}
+
+/// [`default_work_base`] under `prefix`, with the `PORTAGE_TMPDIR` of the settings `cli` selects
+pub(crate) async fn work_base(
+    cli: &crate::cli::Cli,
+    prefix: Option<&Utf8Path>,
+) -> Result<Utf8PathBuf> {
+    let settings = crate::settings::load(cli).await?;
+    Ok(default_work_base(
+        prefix,
+        portage_tmpdir(settings.as_deref()),
+    ))
 }
 
 /// Stable subdirectory key for a merge root under [`default_work_base`]
@@ -1338,16 +1362,22 @@ impl PackageSetup {
         };
         let masters = resolve_masters(&repo, &repo_root, repos_conf.as_ref());
 
+        // The config overlay (`package.use`/`bashrc` over host config) is the
+        // prefix's `etc/portage` in an in-place `--local` build (`EPREFIX/etc/portage`).
+        let config_overlay = (!self_contained_bootstrap)
+            .then_some(eprefix)
+            .flatten()
+            .map(|e| e.join("etc/portage"));
+        let key = crate::settings::Key::new(config_root, config_overlay.as_deref(), root, eprefix);
+        let settings = crate::settings::cached(key, &repo).await?;
+
         let work_root = match work_dir {
             Some(p) => p.to_owned(),
             None => {
                 let pf = format!("{}-{}", ebuild.name(), ebuild.version());
-                package_work_dir(
-                    Utf8Path::new("/var/tmp/portage"),
-                    root,
-                    ebuild.category(),
-                    &pf,
-                )
+                let base = portage_tmpdir(settings.as_deref())
+                    .map_or_else(|| "/var/tmp/portage".into(), |t| t.join("portage"));
+                package_work_dir(&base, root, ebuild.category(), &pf)
             }
         };
 
@@ -1367,12 +1397,6 @@ impl PackageSetup {
         // into the shell so phases see CHOST, CFLAGS/LDFLAGS, MULTILIB_ABIS/ABI/
         // LIBDIR_*, and the USE_EXPAND variables (PYTHON_TARGETS, …) that eclasses
         // read directly. This also resolves the profile's effective USE.
-        // The config overlay (`package.use`/`bashrc` over host config) is the
-        // prefix's `etc/portage` in an in-place `--local` build (`EPREFIX/etc/portage`).
-        let config_overlay = (!self_contained_bootstrap)
-            .then_some(eprefix)
-            .flatten()
-            .map(|e| e.join("etc/portage"));
         let slot = repo
             .cache_entry(ebuild.cpv())
             .ok()
@@ -1385,8 +1409,6 @@ impl PackageSetup {
                 "no usable profile at {cr}/etc/portage/make.profile — building without profile defaults"
             );
         }
-        let key = crate::settings::Key::new(config_root, config_overlay.as_deref(), root, eprefix);
-        let settings = crate::settings::cached(key, &repo).await?;
         if let Some(settings) = &settings {
             crate::settings::seed_build_shell(&mut shell, settings).await?;
         }
@@ -4179,6 +4201,53 @@ mod tests {
     use portage_vdb::ContentsKind;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[tokio::test]
+    async fn portage_tmpdir_counts_only_above_make_globals() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("metadata")).unwrap();
+        fs::write(dir.path().join("metadata/layout.conf"), "").unwrap();
+        fs::create_dir_all(dir.path().join("profiles/test")).unwrap();
+        let repo = Repository::builder()
+            .in_memory_cache()
+            .open(dir.path())
+            .unwrap();
+        let stack = portage_repo::ProfileStack::build(dir.path().join("profiles/test")).unwrap();
+        let env = portage_repo::Environment::default();
+        let settings = |conf: &'static str| {
+            let (repo, stack, env) = (&repo, &stack, &env);
+            async move {
+                let mut shell = repo.shell().await.unwrap();
+                let confs = [portage_repo::ConfSource::Str(conf)];
+                portage_repo::Settings::evaluate(
+                    &mut shell,
+                    portage_repo::SettingsSources {
+                        stack,
+                        env_d: None,
+                        globals: Some(portage_repo::ConfSource::Str(
+                            "PORTAGE_TMPDIR=\"/var/tmp\"\n",
+                        )),
+                        confs: &confs,
+                        env,
+                    },
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let globals_only = settings("").await;
+        assert_eq!(portage_tmpdir(Some(&globals_only)), None);
+        let conf = settings("PORTAGE_TMPDIR=\"/mnt/tmpfs\"\n").await;
+        assert_eq!(
+            portage_tmpdir(Some(&conf)),
+            Some(Utf8Path::new("/mnt/tmpfs"))
+        );
+        assert_eq!(
+            default_work_base(Some(Utf8Path::new("/p")), portage_tmpdir(Some(&conf))),
+            "/mnt/tmpfs/portage"
+        );
+    }
 
     #[test]
     fn repo_revisions_follow_the_sync_type() {

@@ -477,7 +477,7 @@ async fn run_maint(command: &MaintCommand, globals: &cli::Cli) -> Result<()> {
         }
         MaintCommand::Logs { fix, older_than } => {
             let roots = globals.roots();
-            let work_base = crate::ebuild::default_work_base(roots.relocate_root());
+            let work_base = crate::ebuild::work_base(globals, roots.relocate_root()).await?;
             maint::logs::run(&work_base, older_than.as_deref(), *fix, "Run with --fix")
         }
         MaintCommand::Merges => bail!(
