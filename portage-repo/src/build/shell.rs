@@ -2366,17 +2366,24 @@ impl EbuildShell {
     pub async fn source_make_defaults(&mut self, path: &Path) -> Result<()> {
         self.invalidate_baseline();
         let params = self.shell.default_exec_params();
-        let path = std::path::absolute(path).map_err(|e| Error::Shell(e.to_string()))?;
         let cwd = self.shell.working_dir().to_path_buf();
+        let path = cwd.join(path);
         let oldpwd = self.get_var("OLDPWD");
+        let chdir_err = |dir: &Path, e| {
+            Error::Shell(format!("setting working directory {}: {e}", dir.display()))
+        };
         if let Some(dir) = path.parent() {
-            let _ = self.shell.set_working_dir(dir);
+            self.shell
+                .set_working_dir(dir)
+                .map_err(|e| chdir_err(dir, e))?;
         }
         let sourced = self
             .shell
             .source_script(&path, std::iter::empty::<&str>(), &params)
             .await;
-        let _ = self.shell.set_working_dir(&cwd);
+        self.shell
+            .set_working_dir(&cwd)
+            .map_err(|e| chdir_err(&cwd, e))?;
         match oldpwd {
             Some(v) => self.set_var("OLDPWD", &v),
             None => self.run_string("unset OLDPWD").await?,
