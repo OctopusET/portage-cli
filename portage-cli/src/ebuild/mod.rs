@@ -2430,6 +2430,16 @@ async fn run_merge(
         Walk::Scan { digests: false },
     )?
     .contents;
+    let blocked = symlinks_over_dirs(&planned, root)?;
+    if !blocked.is_empty() {
+        for path in &blocked {
+            crate::style::warn_line!("{path} is a directory; the package installs a symlink there");
+        }
+        bail!(
+            "{} symlink(s) would replace a directory (forbidden by PMS) — aborting merge",
+            blocked.len()
+        );
+    }
     let exclude_cpv = old_pkg.as_ref().map(|p| p.cpv().clone());
     let mut ownership_index = if let Some(state) = merge_state.as_deref_mut() {
         state.take_or_build(root, &vdb)?
@@ -3328,6 +3338,13 @@ impl ImagePass<'_> {
 
     fn dir(&mut self, entry: ImageEntry) -> Result<()> {
         if self.merging() {
+            let dest = &entry.dest_path;
+            if std::fs::symlink_metadata(dest.as_std_path()).is_ok() && !dest.is_dir() {
+                let backup = backup_path(dest);
+                crate::style::warn_line!("{dest} blocks a directory; moved to {backup}");
+                std::fs::rename(dest.as_std_path(), backup.as_std_path())
+                    .with_context(|| format!("moving {dest} to {backup}"))?;
+            }
             std::fs::create_dir_all(entry.dest_path.as_std_path())
                 .with_context(|| format!("mkdir {}", entry.dest_path))?;
             preserve_owner(&entry.dest_path, &entry.meta);
@@ -3370,6 +3387,7 @@ impl ImagePass<'_> {
         if self.merging()
             && let Some(write_path) = write_path
         {
+            let write_path = clear_of_dir(write_path, "symlink");
             if std::fs::symlink_metadata(write_path.as_std_path()).is_ok() {
                 std::fs::remove_file(write_path.as_std_path())
                     .with_context(|| format!("removing {write_path}"))?;
@@ -3416,6 +3434,7 @@ impl ImagePass<'_> {
         if self.merging()
             && let Some(write_path) = write_path
         {
+            let write_path = clear_of_dir(write_path, "file");
             self.install_file(src_path, &write_path, meta)?;
         }
         self.record(ContentsKind::Obj, entry, Some(md5_str), None);
@@ -3499,6 +3518,38 @@ impl ImagePass<'_> {
         }
         Ok(())
     }
+}
+
+/// portage's `_new_backup_path`: the first free `<path>.backup.NNNN`
+fn backup_path(path: &Utf8Path) -> Utf8PathBuf {
+    (0..)
+        .map(|n| Utf8PathBuf::from(format!("{path}.backup.{n:04}")))
+        .find(|p| std::fs::symlink_metadata(p.as_std_path()).is_err())
+        .expect("a free backup name")
+}
+
+/// `path`, or a backup name beside it when a live directory is in the way
+///
+/// CONTENTS still records `path`, as in portage.
+fn clear_of_dir(path: Utf8PathBuf, what: &str) -> Utf8PathBuf {
+    if !std::fs::symlink_metadata(path.as_std_path()).is_ok_and(|m| m.is_dir()) {
+        return path;
+    }
+    let backup = backup_path(&path);
+    crate::style::warn_line!("directory {path} blocks a {what}; merging it as {backup}");
+    backup
+}
+
+/// Image symlinks that would replace a live directory, which PMS forbids
+fn symlinks_over_dirs(planned: &[ContentsEntry], root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    let mut found = vec![];
+    for e in planned.iter().filter(|e| e.kind == ContentsKind::Sym) {
+        let dest = safe_dest_under(root, &e.path)?;
+        if std::fs::symlink_metadata(dest.as_std_path()).is_ok_and(|m| m.is_dir()) {
+            found.push(dest);
+        }
+    }
+    Ok(found)
 }
 
 /// Set the merged path's owner to the image entry's uid/gid (`lchown`, so a
@@ -5332,6 +5383,60 @@ mod tests {
         // The image mode is applied after copy; the read-only 0555 dest was
         // replaced, so the new content is readable.
         assert!(contents.iter().any(|e| e.path == "/usr/bin/bug"));
+    }
+
+    #[test]
+    fn walk_image_moves_type_conflicts_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        // Live: a file where the image has a directory, a directory where it has a file.
+        fs::create_dir_all(root.join("usr/lib/tool").as_std_path()).unwrap();
+        fs::write(root.join("usr/share").as_std_path(), b"stray\n").unwrap();
+        fs::create_dir_all(image.join("usr/share/doc").as_std_path()).unwrap();
+        fs::create_dir_all(image.join("usr/lib").as_std_path()).unwrap();
+        fs::write(image.join("usr/lib/tool").as_std_path(), b"bin\n").unwrap();
+        std::os::unix::fs::symlink("tool", image.join("usr/lib/link").as_std_path()).unwrap();
+
+        let planned = walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Scan { digests: false },
+        )
+        .unwrap()
+        .contents;
+        assert!(symlinks_over_dirs(&planned, &root).unwrap().is_empty());
+        let WalkResult { contents, .. } = walk_image(
+            &image,
+            &image,
+            &root,
+            &ConfigProtect::none(),
+            false,
+            Walk::Merge,
+        )
+        .unwrap();
+
+        assert!(root.join("usr/share/doc").is_dir());
+        assert_eq!(
+            fs::read(root.join("usr/share.backup.0000").as_std_path()).unwrap(),
+            b"stray\n"
+        );
+        assert!(root.join("usr/lib/tool").is_dir());
+        assert_eq!(
+            fs::read(root.join("usr/lib/tool.backup.0000").as_std_path()).unwrap(),
+            b"bin\n"
+        );
+        assert!(contents.iter().any(|e| e.path == "/usr/lib/tool"));
+
+        fs::remove_file(root.join("usr/lib/link").as_std_path()).unwrap();
+        fs::create_dir(root.join("usr/lib/link").as_std_path()).unwrap();
+        assert_eq!(
+            symlinks_over_dirs(&planned, &root).unwrap(),
+            [root.join("usr/lib/link")]
+        );
     }
 
     #[test]
