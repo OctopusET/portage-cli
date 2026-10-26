@@ -127,6 +127,13 @@ pub fn load_package_env(path: &Path) -> Vec<(Dep, Vec<String>)> {
                 continue;
             };
             let dep = match Dep::parse(atom_str) {
+                Ok(dep) if dep.pinned_build().is_some() => {
+                    warn_once(format!(
+                        "{}: ignoring {atom_str}: a build id matches only a binary package",
+                        file.display()
+                    ));
+                    continue;
+                }
                 Ok(dep) => dep,
                 Err(e) => {
                     warn_once(format!(

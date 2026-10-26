@@ -1042,6 +1042,19 @@ fn warn_invalid<T>(path: &Path, parsed: Result<T>) -> Option<T> {
         .ok()
 }
 
+/// Parse one atom of a `package.*` file, warning about and dropping one that matches no ebuild
+fn parse_entry_atom(path: &Path, atom: &str) -> Option<Dep> {
+    let dep = warn_invalid(path, Dep::parse(atom).map_err(Into::into))?;
+    if dep.pinned_build().is_some() {
+        tracing::warn!(
+            "ignoring {atom} in {}: a build id matches only a binary package",
+            path.display()
+        );
+        return None;
+    }
+    Some(dep)
+}
+
 /// Read a `package.mask`-format file as `(is_removal, atom)` lines, skipping invalid atoms
 pub(crate) fn read_atom_lines(path: &Path) -> Result<Vec<(bool, Dep)>> {
     let mut out = Vec::new();
@@ -1051,7 +1064,7 @@ pub(crate) fn read_atom_lines(path: &Path) -> Result<Vec<(bool, Dep)>> {
             Some(rest) => (true, rest),
             None => (false, line.as_str()),
         };
-        if let Some(dep) = warn_invalid(path, Dep::parse(atom).map_err(Into::into)) {
+        if let Some(dep) = parse_entry_atom(path, atom) {
             out.push((removal, dep));
         }
     }
@@ -1106,7 +1119,7 @@ fn parse_atom_flags_list(path: &Path) -> Result<Vec<(Dep, Vec<String>)>> {
         let line = strip_inline_comment(&line);
         let mut parts = line.split_whitespace();
         if let Some(atom_str) = parts.next() {
-            let Some(dep) = warn_invalid(path, Dep::parse(atom_str).map_err(Into::into)) else {
+            let Some(dep) = parse_entry_atom(path, atom_str) else {
                 continue;
             };
             let flags: Vec<String> = parts.map(String::from).collect();
@@ -1353,6 +1366,16 @@ mod tests {
             "user layer unforced ipv6"
         );
         assert!(forced.contains(&"nls".to_string()), "user layer forced nls");
+    }
+
+    #[test]
+    fn a_build_id_atom_masks_no_ebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.mask");
+        std::fs::write(&path, "=cat/pkg-1-3\ncat/other\n").unwrap();
+        let lines = read_atom_lines(&path).unwrap();
+        let masks: Vec<_> = lines.iter().map(|(_, d)| d.to_string()).collect();
+        assert_eq!(masks, ["cat/other"]);
     }
 
     #[test]

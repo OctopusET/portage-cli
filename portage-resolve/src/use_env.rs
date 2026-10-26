@@ -738,10 +738,18 @@ fn load_atom_lines(path: &str) -> Vec<(bool, Dep)> {
 }
 
 /// Parse the atom of a `path` line, warning instead of failing on one em cannot read
+///
+/// A build-id atom selects one binary package and never an ebuild, and em applies this
+/// configuration to ebuilds only, so it is dropped.
 fn parse_config_atom(path: &str, atom: &str) -> Option<Dep> {
-    Dep::parse(atom)
+    let dep = Dep::parse(atom)
         .inspect_err(|e| tracing::warn!("{path}: ignoring unsupported atom {atom}: {e}"))
-        .ok()
+        .ok()?;
+    if dep.pinned_build().is_some() {
+        tracing::warn!("{path}: ignoring {atom}: a build id matches only a binary package");
+        return None;
+    }
+    Some(dep)
 }
 
 /// Stack site atom lines onto `acc`: `-atom` drops matching atoms from every earlier layer,
@@ -929,6 +937,16 @@ mod tests {
                 .contains(&Dep::parse(">dev-libs/foo-1").unwrap())
         );
         assert_eq!(env.package_unmask, [Dep::parse("=dev-libs/foo-3").unwrap()]);
+    }
+
+    #[test]
+    fn a_build_id_mask_leaves_the_ebuild_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.mask");
+        std::fs::write(&path, "=cat/pkg-1-3\n>=cat/pkg-2-3\n").unwrap();
+        let lines = super::load_atom_lines(path.to_str().unwrap());
+        let masks: Vec<_> = lines.iter().map(|(_, d)| d.to_string()).collect();
+        assert_eq!(masks, [">=cat/pkg-2-3"]);
     }
 
     #[tokio::test]
