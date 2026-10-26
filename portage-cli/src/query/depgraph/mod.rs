@@ -49,6 +49,8 @@ pub struct PlannedMerge {
     /// formatted string, so nothing downstream has to re-derive it by
     /// parsing a path or string.
     pub cpv: Cpv,
+    /// `SLOT`, by name only; `None` when unknown
+    pub slot: Option<portage_atom::Slot>,
     /// Absolute path to the ebuild
     pub ebuild_path: camino::Utf8PathBuf,
     /// Effective enabled USE flags for this build: the global config and

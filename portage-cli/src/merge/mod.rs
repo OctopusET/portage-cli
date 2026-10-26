@@ -13,6 +13,8 @@ use crate::error::Result;
 use crate::maint;
 use crate::query;
 
+pub(crate) mod exclude;
+
 /// One package's merge failure, for the end-of-run report
 struct MergeFailure {
     cpv: String,
@@ -277,6 +279,7 @@ struct MergeRun<'a> {
     quiet: bool,
     merge_flags: &'a cli::MergeFlags,
     ignore_blockers: bool,
+    buildpkg_exclude: &'a [exclude::AtomPattern],
     extra_path: &'a [camino::Utf8PathBuf],
     binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
     host_binpkg_index: Option<&'a portage_binpkg::BinpkgIndex>,
@@ -301,31 +304,26 @@ struct ActionFlags {
     enforce_no_source: bool,
     quiet: bool,
     self_contained_bootstrap: bool,
-    /// `--buildpkg-exclude`, already validated by the caller
-    buildpkg_exclude: Vec<portage_atom::Dep>,
+    buildpkg_exclude: Vec<exclude::AtomPattern>,
 }
 
 impl ActionFlags {
     /// `--buildpkg` for this package: not one `--buildpkg-exclude` names
-    fn buildpkg_for(&self, cpv: &portage_atom::Cpv) -> bool {
+    fn buildpkg_for(&self, planned: &query::depgraph::PlannedMerge) -> bool {
         self.buildpkg
             && !self
                 .buildpkg_exclude
                 .iter()
-                .any(|d| d.matches_cpv(cpv, None))
+                .any(|p| p.matches(&planned.cpv, planned.slot.as_ref()))
     }
 }
 
 impl MergeRun<'_> {
     fn action_flags(&self) -> ActionFlags {
         ActionFlags {
-            buildpkg_exclude: self
-                .merge_flags
-                .buildpkg_exclude_atoms()
-                .filter_map(|a| a.parse().ok())
-                .collect(),
+            buildpkg_exclude: self.buildpkg_exclude.to_vec(),
             keep_going: self.merge_flags.keep_going,
-            buildpkg: self.merge_flags.wants_buildpkg(),
+            buildpkg: self.merge_flags.makes_binpkgs(),
             buildpkgonly: self.merge_flags.buildpkgonly,
             fetchonly: self.merge_flags.fetchonly,
             fetch_all_uri: self.merge_flags.fetch_all_uri,
@@ -637,6 +635,7 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
     } else {
         interactive_jobs(plan, jobs, quiet)
     };
+    let buildpkg_exclude = exclude::parse_patterns(merge_flags.buildpkg_exclude_atoms())?;
     let buildpkg = merge_flags.wants_buildpkg();
     let buildpkgonly = merge_flags.buildpkgonly;
     // `-F`/`--fetch-all-uri` is fetch-only too (just a different SRC_URI
@@ -832,6 +831,7 @@ pub(crate) async fn run_merge_plan(req: MergePlanRequest<'_>) -> Result<()> {
         quiet,
         merge_flags,
         ignore_blockers,
+        buildpkg_exclude: &buildpkg_exclude,
         extra_path,
         binpkg_index: binpkg_index.as_ref(),
         host_binpkg_index,
@@ -943,7 +943,7 @@ async fn act_on_package(a: PackageAction<'_>) -> anyhow::Result<()> {
         quiet,
         ..
     } = *flags;
-    let buildpkg = flags.buildpkg_for(&planned.cpv);
+    let buildpkg = flags.buildpkg_for(planned);
 
     let BinpkgReuse {
         local: reused,
@@ -1798,6 +1798,7 @@ mod entry_roots_tests {
         Ok(PlannedMerge {
             merge_root,
             cpv: portage_atom::Cpv::parse("dev-python/jinja2-3.1.6")?,
+            slot: None,
             ebuild_path: camino::Utf8PathBuf::new(),
             use_flags: Vec::new(),
             depend: Vec::new(),
@@ -1953,31 +1954,47 @@ mod entry_roots_tests {
     }
 
     #[test]
-    fn buildpkg_exclude_overrides_buildpkg() -> Result<()> {
-        let flags = cli::MergeFlags {
-            buildpkg: Some(cli::YesNo::Y),
-            buildpkg_exclude: vec!["dev-python/jinja2 app-misc/other".into()],
+    fn buildpkg_exclude_overrides_buildpkg_and_buildpkgonly() -> Result<()> {
+        let action = |flags: &cli::MergeFlags| -> Result<ActionFlags> {
+            Ok(ActionFlags {
+                buildpkg_exclude: exclude::parse_patterns(flags.buildpkg_exclude_atoms())?,
+                keep_going: false,
+                buildpkg: flags.makes_binpkgs(),
+                buildpkgonly: flags.buildpkgonly,
+                fetchonly: false,
+                fetch_all_uri: false,
+                ignore_blockers: false,
+                enforce_no_source: false,
+                quiet: false,
+                self_contained_bootstrap: false,
+            })
+        };
+        let pkg = |cpv: &str, slot: &str| -> Result<PlannedMerge> {
+            Ok(PlannedMerge {
+                slot: Some(portage_atom::Slot::parse(slot)?),
+                cpv: portage_atom::Cpv::parse(cpv)?,
+                ..planned(MergeRoot::Target)?
+            })
+        };
+        let exclude = vec!["jinja2 dev-lang/python:3.12 sys-kernel/*".into()];
+        let buildpkgonly = cli::MergeFlags {
+            buildpkgonly: true,
+            buildpkg_exclude: exclude.clone(),
             ..cli::MergeFlags::default()
         };
-        let excluded = ActionFlags {
-            buildpkg_exclude: flags
-                .buildpkg_exclude_atoms()
-                .map(|a| a.parse().unwrap())
-                .collect(),
-            keep_going: false,
-            buildpkg: flags.wants_buildpkg(),
-            buildpkgonly: false,
-            fetchonly: false,
-            fetch_all_uri: false,
-            ignore_blockers: false,
-            enforce_no_source: false,
-            quiet: false,
-            self_contained_bootstrap: false,
+        let buildpkg = cli::MergeFlags {
+            buildpkg: Some(cli::YesNo::Y),
+            buildpkg_exclude: exclude,
+            ..cli::MergeFlags::default()
         };
-        let jinja = portage_atom::Cpv::parse("dev-python/jinja2-3.1.6")?;
-        let other = portage_atom::Cpv::parse("app-misc/screen-4.9.1")?;
-        assert!(!excluded.buildpkg_for(&jinja));
-        assert!(excluded.buildpkg_for(&other));
+        for flags in [buildpkgonly, buildpkg] {
+            let flags = action(&flags)?;
+            assert!(!flags.buildpkg_for(&pkg("dev-python/jinja2-3.1.6", "0")?));
+            assert!(!flags.buildpkg_for(&pkg("dev-lang/python-3.12.4", "3.12")?));
+            assert!(!flags.buildpkg_for(&pkg("sys-kernel/linux-headers-6.6", "0")?));
+            assert!(flags.buildpkg_for(&pkg("dev-lang/python-3.13.0", "3.13")?));
+            assert!(flags.buildpkg_for(&pkg("app-misc/screen-4.9.1", "0")?));
+        }
         Ok(())
     }
 
@@ -2160,6 +2177,7 @@ mod unmerge_scheduling_tests {
         PlannedMerge {
             merge_root: MergeRoot::Target,
             cpv: portage_atom::Cpv::parse(cpv).unwrap(),
+            slot: None,
             ebuild_path: camino::Utf8PathBuf::new(),
             use_flags: Vec::new(),
             depend: Vec::new(),

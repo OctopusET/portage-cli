@@ -193,6 +193,7 @@ mod tests {
         Ok(PlannedMerge {
             merge_root,
             cpv,
+            slot: None,
             ebuild_path: camino::Utf8PathBuf::new(),
             use_flags: Vec::new(),
             depend: DepEntry::parse(depend)?,

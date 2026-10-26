@@ -324,6 +324,11 @@ impl MergeFlags {
         self.getbinpkg == Some(YesNo::Y)
     }
 
+    /// Whether built packages are packaged: `--buildpkg`, or `-B`, which implies it as in emerge
+    pub fn makes_binpkgs(&self) -> bool {
+        self.wants_buildpkg() || self.buildpkgonly
+    }
+
     /// The `--buildpkg-exclude` atoms, one per word
     pub fn buildpkg_exclude_atoms(&self) -> impl Iterator<Item = &str> {
         self.buildpkg_exclude

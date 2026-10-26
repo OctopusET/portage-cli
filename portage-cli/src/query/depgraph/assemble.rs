@@ -553,6 +553,7 @@ pub(super) fn assemble(
             PlannedMerge {
                 merge_root: entry.merge_root,
                 cpv: cpv.clone(),
+                slot: pkg.slot().map(portage_atom::Slot::from_name),
                 ebuild_path,
                 use_flags: flags,
                 depend,

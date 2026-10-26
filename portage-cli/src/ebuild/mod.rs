@@ -763,7 +763,7 @@ pub async fn build_and_merge(opts: BuildAndMerge<'_>) -> Result<()> {
             phase_log: Some((log.clone(), quiet)),
             roots,
             merge_gate,
-            buildpkg: true,
+            buildpkg,
             binpkg: None,
             verify_signature: None,
             ignore_blockers,
@@ -1881,11 +1881,10 @@ impl PackageSetup {
                     post_process_after_install(&shell, &work_root, &features)?;
                     // The package holds the image as src_install left it: a binary
                     // install runs pkg_preinst itself, on the installing system.
-                    let wanted = matches!(group, PhaseGroup::BuildOnly)
-                        || live_binpkg_wanted(
-                            &features,
-                            &shell.get_var("PROPERTIES").unwrap_or_default(),
-                        );
+                    let wanted = live_binpkg_wanted(
+                        &features,
+                        &shell.get_var("PROPERTIES").unwrap_or_default(),
+                    );
                     if buildpkg && group.should_buildpkg() && wanted {
                         match build_binpkg_standalone(
                             &mut shell,
@@ -6000,6 +5999,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(probe.log(), "install packaged");
+    }
+
+    #[tokio::test]
+    async fn buildpkgonly_skips_a_live_ebuild_without_buildpkg_live() {
+        if pkgdir_is_redirected() {
+            return;
+        }
+        let probe = Probe::new();
+        let live = probe.ebuild("probe", "1", &format!("PROPERTIES=live\n{INSTALLS_A_FILE}"));
+        probe
+            .run_group(&live, PhaseGroup::BuildOnly, "root", None)
+            .await
+            .unwrap();
+        assert_eq!(probe.package("root"), None);
     }
 
     // The ebuild is not sourced at a binary install, so what it exports at
