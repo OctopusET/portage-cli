@@ -1378,6 +1378,7 @@ fn a_required_use_failure_is_reported_on_the_target_before_its_deps() {
         cpv,
         keywords: "amd64",
         depend,
+        rdepend: "",
         iuse: "x",
         slot: "0",
         required_use: "x",
