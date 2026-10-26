@@ -682,6 +682,16 @@ but its ebuild stays filtered, so em never rebuilds it. Unlike emerge, a
 package with no visible ebuild never enters the solve, so `--deep` does not
 descend into it. A dep on it is excused only when BROOT has the version too.
 
+**USE deps on implicit flags.** A USE dep without a `(+)`/`(-)` default needs
+its flag in the target's IUSE. em reads the declared IUSE only, not the
+profile's `IUSE_IMPLICIT` / `USE_EXPAND_IMPLICIT`, so such a dep on an
+implicit flag (`elibc_*`, `kernel_*`) rejects every candidate. The tree has none.
+
+**Invalid metadata.** A version whose dependency field fails to parse is masked
+`invalid` for the solver, but the `:*` slot map (built for the whole tree from
+unforced metadata) still counts its slot, and the query and list views still
+show it.
+
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid
 topological order, different scheduler — emerge: target-driven DFS; here: SCC
 condensation + lexicographic Kahn) and the `:slot` suffix on autounmask
