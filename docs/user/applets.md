@@ -49,7 +49,7 @@ applet, and each one's `--help` lists its subcommands.
 - **`-N` / `--newuse` and `-U` / `--changed-use`** — same-CPV rebuild when planned USE/IUSE differs from the VDB; with `-uD`, prefer newest when USE drift forces a rebuild
 - **Profile USE flags** — `make.defaults` / `make.conf` through brush with portage-style incremental USE stacking (see `docs/design/architecture.md`)
 - **USE_EXPAND** — `PYTHON_TARGETS`, `CPU_FLAGS_*`, `ABI_X86`, etc. expanded and grouped in output
-- **OR-group branch selection** — prefer branches whose USE deps are already satisfied (avoids gratuitous rebuilds)
+- **OR-group branch selection**: as emerge's `dep_zapdeps`, a branch whose USE deps hold beats one needing a USE change, then a fully installed branch beats the rest, then the first listed; a DEPEND/BDEPEND branch only the package itself satisfies comes last (`dev-lang/go` takes `go-bootstrap`), and a branch emptied by a disabled USE conditional or an unavailable atom is no alternative
 - **Post-solve USE-dep rebuilds** — violated USE deps on installed packages force rebuild / `upgrade_to` fixpoint (not full `--newuse`)
 - **Action tags** — `N` new, `NS` new slot, `U` upgrade (`[old_ver]`), `D` downgrade, `R` reinstall
 - **Preserve-libs** — NEEDED.ELF.2–driven orphan library keep/reclaim (parallel install-image ELF scan)

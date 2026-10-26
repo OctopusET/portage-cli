@@ -134,6 +134,10 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   topologically valid (every dependency precedes its dependents); the sequence
   differs because the schedulers differ (emerge: target-driven DFS; here:
   SCC condensation + lexicographic Kahn). The *set* and *versions* match.
+- **`||` choice ignores the partial solution.** emerge's `dep_zapdeps` prefers a
+  branch already pulled into the graph; here only installed state, USE-dep
+  satisfaction and listing order rank branches, so `|| ( a b )` can pull `a`
+  while another dependency already pulled `b`.
 - **Reverse-dependency consistency is checked, and reported.** Unlike a default
   targeted `emerge -p` (which does not pull reverse deps into the graph), the
   consumer checks every installed package's constraints against the plan and
