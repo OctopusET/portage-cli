@@ -287,11 +287,12 @@ const OPTIONAL_YN: &[(&str, Option<char>)] = &[
 ];
 
 /// `words` with emerge's optional `y`/`n` switch values folded away: `--ask y` is `--ask`, and
-/// `--ask n` drops that switch and every earlier one. `--deselect n` is kept, as `--deselect=n`.
-/// A switch em takes as `--name=y|n` gets its value attached.
+/// `--ask n` drops that switch and every earlier one. `--deselect n` is kept, as `--deselect=n`;
+/// a switch em takes as `--name=y|n` gets its value attached; `--select n` is `--oneshot` and
+/// `--select` cancels an earlier `--oneshot`.
 fn normalize_optional_yn(words: Vec<OsString>) -> Vec<OsString> {
     let mut out: Vec<OsString> = Vec::with_capacity(words.len());
-    let mut words = words.into_iter().peekable();
+    let mut words = split_yn_bundles(words).into_iter().peekable();
     while let Some(word) = words.next() {
         let text = word.to_string_lossy().into_owned();
         let (name, attached) = match text.split_once('=') {
@@ -317,10 +318,53 @@ fn normalize_optional_yn(words: Vec<OsString>) -> Vec<OsString> {
             Some("y" | "True") if valued => out.push(format!("{long}=y").into()),
             Some("n") if valued => out.push(format!("{long}=n").into()),
             None if valued => out.push(word),
+            None | Some("y" | "True") if long == "--select" => {
+                out.retain(|w| !is_switch(w, "--oneshot", Some('1')));
+            }
             None | Some("y" | "True") => out.push(name.into()),
             Some("n") if long == "--deselect" => out.push("--deselect=n".into()),
-            Some("n") => out.retain(|w| !is_switch(w, long, short)),
+            Some("n") => {
+                out.retain(|w| !is_switch(w, long, short));
+                if long == "--select" {
+                    out.push("--oneshot".into());
+                }
+            }
             Some(_) => out.push(word),
+        }
+    }
+    out
+}
+
+/// Short bundles such as `-av` split as emerge splits them: each optional `y`/`n` letter alone, in
+/// emerge's order, then the other letters, so a following `y`/`n` is the last letter's value only
+/// when no other letter is left
+fn split_yn_bundles(words: Vec<OsString>) -> Vec<OsString> {
+    const YN_LETTERS: &str = "aAbgGkKqvwW";
+    let mut out = Vec::with_capacity(words.len());
+    for word in words {
+        let Some(letters) = word
+            .to_str()
+            .and_then(|w| w.strip_prefix('-'))
+            .filter(|l| l.len() > 1 && !l.starts_with('-'))
+            .filter(|l| {
+                l.chars()
+                    .all(|c| c.is_ascii_alphanumeric() && c != 'j' && c != 'l')
+            })
+            .filter(|l| l.chars().any(|c| YN_LETTERS.contains(c)))
+        else {
+            out.push(word);
+            continue;
+        };
+        for yn in YN_LETTERS.chars() {
+            let count = letters.chars().filter(|&c| c == yn).count();
+            out.extend(std::iter::repeat_n(OsString::from(format!("-{yn}")), count));
+        }
+        let rest: String = letters
+            .chars()
+            .filter(|&c| !YN_LETTERS.contains(c))
+            .collect();
+        if !rest.is_empty() {
+            out.push(format!("-{rest}").into());
         }
     }
     out
@@ -926,6 +970,47 @@ mod tests {
         assert_eq!(cli.mode().deselect, Some(YesNo::N));
         assert_eq!(cli.atoms(), ["foo"]);
         assert_eq!(emerge(["-W", "foo"]).mode().deselect, Some(YesNo::Y));
+    }
+
+    #[test]
+    fn optional_yn_letters_split_out_of_short_bundles() {
+        let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let defaults = known_default_opts(os(&["-av"]));
+        let cli = Cli::parse_from(normalize_optional_yn(with_default_opts(
+            os(&["emerge", "--ask", "n", "foo"]),
+            defaults,
+        )))
+        .unwrap();
+        assert!(!cli.merge_flags().ask);
+        assert_eq!(cli.atoms(), ["foo"]);
+        assert_eq!(
+            normalize_optional_yn(os(&["-av", "n", "foo"])),
+            os(&["-a", "foo"])
+        );
+        assert_eq!(
+            normalize_optional_yn(os(&["-pv", "n"])),
+            os(&["-v", "-p", "n"])
+        );
+    }
+
+    #[test]
+    fn optional_yn_n_outlasts_features_and_select_n_is_oneshot() {
+        let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let cli = Cli::parse_from(normalize_optional_yn(os(&[
+            "--getbinpkg",
+            "n",
+            "-b",
+            "n",
+            "foo",
+        ])))
+        .unwrap();
+        let mut flags = cli.merge_flags();
+        flags.apply_features("getbinpkg buildpkg");
+        assert!(!flags.wants_getbinpkg() && !flags.wants_buildpkg());
+        let cli = Cli::parse_from(normalize_optional_yn(os(&["--select", "n", "foo"]))).unwrap();
+        assert!(cli.merge_flags().oneshot);
+        let cli = Cli::parse_from(normalize_optional_yn(os(&["-1", "--select", "foo"]))).unwrap();
+        assert!(!cli.merge_flags().oneshot);
     }
 
     #[test]
