@@ -94,6 +94,7 @@ impl DependencyProvider for PortageDependencyProvider {
         // root target (naming `=pkg-9999`, or a range admitting only lives).
         let allow_live = self.root_targets.contains_key(package);
         let candidates = filter_to_preferred_tier(data, candidates, allow_live);
+        let candidates = drop_circular_branches(self, data, candidates);
 
         // A prior iteration pinned this package (`upgrade_to`, or a root target
         // below its newest version). Soft pins fall through when the version is
@@ -739,6 +740,40 @@ fn append_unsatisfied_broot(
         if !host_satisfied_on_broot(provider, vd, p, vs) {
             out.push((stamp_root(p, unsatisfied_root), vs.clone()));
         }
+    }
+}
+
+/// Drop the `||` branches that need their owner built first (see [`VersionData::self_deps`])
+/// while another branch remains
+fn drop_circular_branches<'a>(
+    provider: &PortageDependencyProvider,
+    data: &super::PackageData,
+    candidates: Vec<&'a Version>,
+) -> Vec<&'a Version> {
+    let installed_in = |p: &PortagePackage, vs: &PortageVersionSet| {
+        provider
+            .installed
+            .get(p)
+            .is_some_and(|(v, _)| vs.contains(v))
+            || provider
+                .host_installed
+                .get(&p.at_merge_root(MergeRoot::Host))
+                .is_some_and(|e| vs.contains(&e.version))
+    };
+    let open: Vec<&Version> = candidates
+        .iter()
+        .copied()
+        .filter(|v| {
+            data.versions[*v]
+                .self_deps
+                .iter()
+                .all(|(p, vs)| installed_in(p, vs))
+        })
+        .collect();
+    if open.is_empty() || open.len() == candidates.len() {
+        candidates
+    } else {
+        open
     }
 }
 

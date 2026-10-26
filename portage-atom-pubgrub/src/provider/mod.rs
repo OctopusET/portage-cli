@@ -81,6 +81,11 @@ pub(crate) struct VersionData {
     /// policy, or its ebuild left the tree): selectable so it can stay
     /// installed, never the version to build while an offered one is in range.
     pub(crate) installed_only: bool,
+    /// On a DEPEND/BDEPEND `||` branch: the targets that match the package owning the group
+    ///
+    /// Unless installed, such a branch needs the owner built to build the owner, so
+    /// `choose_version` takes it last (portage `dep_zapdeps` circular demotion).
+    pub(crate) self_deps: Vec<(PortagePackage, PortageVersionSet)>,
 }
 
 impl VersionData {
@@ -135,6 +140,7 @@ impl VersionData {
             needs_unmask: false,
             live: false,
             installed_only: false,
+            self_deps: Vec::new(),
         }
     }
 }
@@ -576,6 +582,7 @@ impl PortageDependencyProvider {
                 let mut all_virtual_choices = Vec::new();
                 let mut all_slot_operator_deps = Vec::new();
                 let mut by_class: Vec<Vec<convert::Req>> = Vec::with_capacity(5);
+                let self_deps = self_dep_branches(&pkg, &cpv.version, &class_results);
 
                 for result in class_results {
                     all_blockers.extend(result.blockers);
@@ -640,6 +647,14 @@ impl PortageDependencyProvider {
                 entry.versions.insert(cpv.version.clone(), version_data);
 
                 register_virtual_choices(&mut packages, all_virtual_choices);
+                for (choice, ver, targets) in self_deps {
+                    if let Some(vd) = packages
+                        .get_mut(&choice)
+                        .and_then(|d| d.versions.get_mut(&ver))
+                    {
+                        vd.self_deps = targets;
+                    }
+                }
             }
         }
 
@@ -1400,11 +1415,48 @@ impl PortageDependencyProvider {
     }
 }
 
-/// Evaluate a single USE dep given the dep's effective state and the parent's
-/// flag state (for Conditional/Equal kinds)
+/// The `||` branches of `owner`'s DEPEND and BDEPEND that name `owner` itself at `version`
 ///
-/// Returns `Some(requires_enabled)` when the constraint fires and is violated,
-/// `None` when it is satisfied or the condition does not apply.
+/// A target counts directly, or through a `:*` slot choice of the same conversion.
+fn self_dep_branches(
+    owner: &PortagePackage,
+    version: &Version,
+    class_results: &[convert::ConversionResult; 5],
+) -> Vec<VirtualBranch> {
+    let mut out = Vec::new();
+    for result in [&class_results[0], &class_results[2]] {
+        let matches_owner = |(p, vs, _): &convert::Req| p == owner && vs.contains(version);
+        for vc in &result.virtual_choices {
+            if !matches!(vc.package, PortagePackage::Choice { .. }) {
+                continue;
+            }
+            for (ver, deps) in &vc.versions {
+                let targets: Vec<_> = deps
+                    .iter()
+                    .filter_map(|req| {
+                        if matches_owner(req) {
+                            return Some(req);
+                        }
+                        let sc = result.virtual_choices.iter().find(|sc| {
+                            sc.package == req.0
+                                && matches!(sc.package, PortagePackage::SlotChoice { .. })
+                        })?;
+                        sc.versions
+                            .iter()
+                            .flat_map(|(_, d)| d)
+                            .find(|r| matches_owner(r))
+                    })
+                    .map(|(p, vs, _)| (p.clone(), vs.clone()))
+                    .collect();
+                if !targets.is_empty() {
+                    out.push((vc.package.clone(), ver.clone(), targets));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn register_virtual_choices(
     packages: &mut HashMap<PortagePackage, PackageData>,
     choices: Vec<convert::VirtualChoice>,

@@ -1189,6 +1189,76 @@ fn or_branch_with_unavailable_atom_is_not_trivially_satisfied() {
     }
 }
 
+fn go_bootstrap_repo() -> InMemoryRepository {
+    let mut repo = InMemoryRepository::new();
+    for cpv in ["dev-lang/go-1.24.6", "dev-lang/go-bootstrap-1.24.6"] {
+        repo.add_version(
+            portage_atom::Cpv::parse(cpv).unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+    }
+    repo.add_version(
+        portage_atom::Cpv::parse("dev-lang/go-1.25.0").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        PackageDeps {
+            bdepend: (DepEntry::parse(
+                "|| ( >=dev-lang/go-1.24.6 >=dev-lang/go-bootstrap-1.24.6 )",
+            )
+            .unwrap())
+            .into(),
+            ..empty_deps()
+        },
+    );
+    repo
+}
+
+// dev-lang/go BDEPEND: a branch only the package itself satisfies loses to go-bootstrap.
+#[test]
+fn or_branch_satisfied_only_by_owner_is_demoted() {
+    let go = PortagePackage::slotted(Cpn::parse("dev-lang/go").unwrap(), Interned::intern("0"));
+    let bootstrap = PortagePackage::slotted(
+        Cpn::parse("dev-lang/go-bootstrap").unwrap(),
+        Interned::intern("0"),
+    );
+    let target = PortageVersionSet::from_operator(
+        portage_atom::Operator::Equal,
+        false,
+        Version::parse("1.25.0").unwrap(),
+    );
+
+    let mut provider = PortageDependencyProvider::new(go_bootstrap_repo());
+    let solution = provider
+        .resolve_targets(vec![(go.clone(), target.clone())])
+        .unwrap();
+    assert!(solution.get(&bootstrap).is_some(), "nothing installed");
+
+    let mut provider = PortageDependencyProvider::new(go_bootstrap_repo());
+    provider.add_host_installed(
+        go.clone(),
+        Version::parse("1.24.6").unwrap(),
+        vec![],
+        vec![],
+    );
+    let solution = provider
+        .resolve_targets(vec![(go.clone(), target.clone())])
+        .unwrap();
+    assert!(solution.get(&bootstrap).is_none(), "go on BROOT");
+
+    let mut provider = PortageDependencyProvider::new(go_bootstrap_repo());
+    provider.add_installed(InstalledPackage {
+        package: go.clone(),
+        version: Version::parse("1.24.6").unwrap(),
+        policy: InstalledPolicy::Favor,
+        active_use: vec![],
+        iuse: vec![],
+    });
+    let solution = provider.resolve_targets(vec![(go, target)]).unwrap();
+    assert!(solution.get(&bootstrap).is_none(), "go installed");
+}
+
 #[test]
 fn or_group_no_preference_when_both_installed() {
     // || ( A B ) where both A and B are installed — solver falls through to
