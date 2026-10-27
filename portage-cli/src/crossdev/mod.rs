@@ -1537,8 +1537,14 @@ fn sysroot_config_entries(
     // change across `--init-target` re-runs (e.g. a different `--prefix`).
     // A create-only write here would leave it silently stale, the same class
     // of bug just fixed for the alias-packages entry.
+    // A make.conf directory gets em's body as the fragment that sorts first, so
+    // the user's fragments override it.
+    let mut make_conf = portage.join("make.conf");
+    if make_conf.is_dir() {
+        make_conf.push("0-em-crossdev");
+    }
     entries.push(config_plan::ConfigEntry::File {
-        path: portage.join("make.conf"),
+        path: make_conf,
         desired: make_conf_body(target, &spec.cflags, outer_root),
     });
 
@@ -2436,6 +2442,32 @@ mod tests {
         let spec = spec::SysrootSpec::builtin(target, &[]);
         let entry = alias_repo_conf_entry(globals, gentoo, target, category, &spec)?;
         config_plan::apply_now(std::slice::from_ref(&entry))
+    }
+
+    #[test]
+    fn a_make_conf_directory_gets_a_fragment_that_sorts_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = Utf8Path::from_path(tmp.path()).unwrap();
+        let gentoo = prefix.join("gentoo");
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let spec = spec::SysrootSpec::builtin(&target, &[]);
+        std::fs::create_dir_all(gentoo.join("profiles").join(&spec.profile[0])).unwrap();
+        let sysroot = prefix.join("usr").join(&target.tuple);
+        let dir = sysroot.join("etc/portage/make.conf");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("00-base"), "FEATURES=\"-sandbox\"\n").unwrap();
+        let entries =
+            sysroot_config_entries(&target, &spec, &sysroot, prefix, &gentoo, None).unwrap();
+        config_plan::apply_now(&entries).unwrap();
+
+        let files =
+            portage_repo::list_config_files(&dir, portage_repo::ConfigFilesMode::Flat).unwrap();
+        let names: Vec<_> = files.iter().map(|f| f.file_name().unwrap()).collect();
+        assert_eq!(names, ["0-em-crossdev", "00-base"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("00-base")).unwrap(),
+            "FEATURES=\"-sandbox\"\n"
+        );
     }
 
     #[test]
