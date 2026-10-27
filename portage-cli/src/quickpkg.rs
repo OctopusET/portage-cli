@@ -428,7 +428,7 @@ fn copy_metadata(src: &Utf8Path, dest: &std::path::Path) {
 
 /// Copy every extended attribute of `src` that `dest` accepts
 fn copy_xattrs(src: &std::path::Path, dest: &std::path::Path) {
-    let Ok(len) = rustix::fs::llistxattr(src, &mut [0u8; 0][..]) else {
+    let Ok(len) = rustix::fs::llistxattr_query(src) else {
         return;
     };
     let mut names = vec![0u8; len];
@@ -437,7 +437,7 @@ fn copy_xattrs(src: &std::path::Path, dest: &std::path::Path) {
     };
     for name in names[..len].split(|&b| b == 0).filter(|n| !n.is_empty()) {
         let name = std::ffi::OsStr::from_bytes(name);
-        let Ok(size) = rustix::fs::lgetxattr(src, name, &mut [0u8; 0][..]) else {
+        let Ok(size) = rustix::fs::lgetxattr_query(src, name) else {
             continue;
         };
         let mut value = vec![0u8; size];
