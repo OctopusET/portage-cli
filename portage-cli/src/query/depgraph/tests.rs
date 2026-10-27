@@ -1468,19 +1468,35 @@ fn strict_solve_backtracks_past_a_version_whose_dependency_slot_is_masked() {
                 depend: "app-misc/lib:2",
                 ..pkg("app-misc/tool-2", "0", "")
             },
+            Pkg {
+                rdepend: "app-misc/lib:1",
+                ..pkg("app-misc/wrap-1", "1", "")
+            },
+            Pkg {
+                rdepend: "app-misc/lib:2",
+                ..pkg("app-misc/wrap-2", "2", "")
+            },
             pkg("app-misc/lib-1", "1", ""),
             pkg("app-misc/lib-2", "2", ""),
         ],
         &[],
     );
     mask(&fix, "app-misc/lib:2");
-    let atoms = [TargetAtom::explicit("app-misc/std")];
+    let atoms = [
+        TargetAtom::explicit("app-misc/std"),
+        TargetAtom::explicit("app-misc/wrap"),
+    ];
     let mut opts = Solve::new(&atoms);
     opts.widen = true;
     let outcome = solve(&fix, opts);
     assert_eq!(
         names(&outcome),
-        ["app-misc/lib-1", "app-misc/tool-1", "app-misc/std-1"]
+        [
+            "app-misc/lib-1",
+            "app-misc/tool-1",
+            "app-misc/wrap-1",
+            "app-misc/std-1"
+        ]
     );
     assert_eq!(outcome.exit_code, 0);
 }

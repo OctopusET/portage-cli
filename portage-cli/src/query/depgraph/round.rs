@@ -57,6 +57,7 @@ pub(super) struct RoundCtx<'a> {
     pub(super) provided_avail: &'a [(Cpv, Option<String>)],
     pub(super) root_pkgs: &'a [PortagePackage],
     pub(super) root_cpns: &'a HashSet<Cpn>,
+    pub(super) slot_free_roots: &'a HashSet<PortagePackage>,
     pub(super) root_use_deps: &'a [super::RootUseDeps],
     pub(super) exclude_atoms: &'a [Dep],
     pub(super) resume_completed: &'a HashSet<(MergeRoot, String)>,
@@ -169,6 +170,7 @@ pub(super) fn solve_round(
         provided_avail,
         root_pkgs,
         root_cpns,
+        slot_free_roots,
         root_use_deps,
         exclude_atoms,
         resume_completed,
@@ -440,7 +442,17 @@ pub(super) fn solve_round(
             );
         }
         let resolve_start = Instant::now();
-        let result = provider.resolve_targets(targets.clone());
+        // Portage's backtracking masks a bare atom's best version and takes the next, in any slot.
+        let targets = targets
+            .iter()
+            .map(|(pkg, vs)| {
+                let moved = (strict_drops.get() && slot_free_roots.contains(pkg))
+                    .then(|| provider.strict_slot(pkg, vs))
+                    .flatten();
+                (moved.unwrap_or_else(|| pkg.clone()), vs.clone())
+            })
+            .collect();
+        let result = provider.resolve_targets(targets);
         tracing::debug!(
             elapsed_ms = resolve_start.elapsed().as_secs_f64() * 1000.0,
             "solver resolve"

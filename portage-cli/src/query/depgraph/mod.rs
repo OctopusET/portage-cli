@@ -469,6 +469,7 @@ fn resolve(
         provided_avail: &prepared.provided_avail,
         root_pkgs: &prepared.root_pkgs,
         root_cpns: &prepared.root_cpns,
+        slot_free_roots: &prepared.slot_free_roots,
         root_use_deps: &prepared.root_use_deps,
         exclude_atoms: &prepared.exclude_atoms,
         resume_completed: &prepared.resume_completed,
@@ -897,6 +898,8 @@ struct RootTargets {
     use_deps: Vec<RootUseDeps>,
     /// CPNs that became solver roots. Unsatisfiable atoms are not inserted.
     cpns: std::collections::HashSet<Cpn>,
+    /// Roots whose atom names no slot, so the solve may take another slot of the cpn
+    slot_free: HashSet<PortagePackage>,
     /// Atoms dropped with a warning, reported after the plan
     unsatisfiable: Vec<output::UnsatisfiableTarget>,
     /// Installed versions that satisfied a silently dropped atom, with what
@@ -927,6 +930,7 @@ fn classify_root_targets(
     let mut deps = Vec::new();
     let mut use_deps = Vec::new();
     let mut cpns: std::collections::HashSet<Cpn> = std::collections::HashSet::new();
+    let mut slot_free = HashSet::new();
     // Root targets with no acceptable candidate, dropped from the solve and
     // reported after the plan (world-family provenance only — anything else is
     // fatal below).
@@ -1012,6 +1016,12 @@ fn classify_root_targets(
             }
         };
         cpns.insert(dep.cpn);
+        if !matches!(
+            dep.slot_dep,
+            Some(portage_atom::SlotDep::Slot { slot: Some(_), .. })
+        ) {
+            slot_free.insert(pkg.clone());
+        }
         if let Some(required) = dep.use_deps.filter(|u| !u.is_empty()) {
             use_deps.push((pkg.clone(), vs.clone(), required, target.label()));
         }
@@ -1021,6 +1031,7 @@ fn classify_root_targets(
         deps,
         use_deps,
         cpns,
+        slot_free,
         unsatisfiable,
         masked_kept,
     })

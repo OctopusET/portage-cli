@@ -333,6 +333,37 @@ impl DependencyProvider for PortageDependencyProvider {
 }
 
 impl PortageDependencyProvider {
+    /// The slot of `package`'s cpn with the newest version in `range` that strict drops leave
+    /// available, when `package`'s own slot has none
+    pub fn strict_slot(
+        &self,
+        package: &PortagePackage,
+        range: &PortageVersionSet,
+    ) -> Option<PortagePackage> {
+        let newest = |p: &PortagePackage| {
+            self.package_data(p)?
+                .versions
+                .keys()
+                .filter(|v| range.contains(v) && !self.has_unmet_hard_drop(p, v))
+                .max()
+                .cloned()
+        };
+        if newest(package).is_some() {
+            return None;
+        }
+        self.packages
+            .keys()
+            .filter(|p| {
+                !p.is_virtual()
+                    && p.cpn() == package.cpn()
+                    && p.merge_root() == package.merge_root()
+                    && p.slot().is_some()
+            })
+            .filter_map(|p| newest(p).map(|v| (v, p)))
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, p)| p.clone())
+    }
+
     /// Whether `version` lost a hard dependency at construction that nothing installed meets
     ///
     /// The installed version itself never counts: keeping it is not choosing it.
