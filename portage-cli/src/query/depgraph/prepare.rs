@@ -80,6 +80,8 @@ pub(super) struct Prepared<'a> {
     pub(super) slot_map: SlotMap,
     pub(super) widened_slot_map: Option<SlotMap>,
     pub(super) sysroot_installed: Vec<(PortagePackage, Version)>,
+    pub(super) sysroot_entries: Vec<installed::VdbEntry>,
+    pub(super) sysroot_by_slot: HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     pub(super) base_installed_cpvs: std::collections::HashSet<Cpv>,
     pub(super) root_pkgs: Vec<PortagePackage>,
     pub(super) pristine_package_use: Vec<(ConfigAtom, Vec<UseOverride>)>,
@@ -271,14 +273,7 @@ pub(super) async fn prepare<'a>(
         None
     };
 
-    let mut installed: HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>> = HashMap::new();
-    for e in &target_installed {
-        let slot_key = e.slot.unwrap_or_else(|| Interned::intern(""));
-        installed
-            .entry(e.cpn)
-            .or_default()
-            .insert(slot_key, e.version.clone());
-    }
+    let installed = by_slot(&target_installed);
 
     let policy_facts = repo::PolicyFactsCache::new();
     let target_policy = repo::ResolvePolicy {
@@ -412,20 +407,22 @@ pub(super) async fn prepare<'a>(
     // static for the whole invocation (doesn't depend on `pkg_use`), so
     // reading it from disk on every fixpoint iteration — as `build_and_solve`
     // used to, inline — was pure waste. Computed once here instead.
-    let sysroot_installed: Vec<(PortagePackage, Version)> = if cross.active {
+    let sysroot_entries = if cross.active {
         installed::load_sysroot_entries_with_cache(cross.sysroot.as_path(), &vdb_snapshots)
-            .into_iter()
-            .map(|e| {
-                let pkg = match e.slot.filter(|s| !s.is_empty()) {
-                    Some(s) => PortagePackage::slotted(e.cpn, s),
-                    None => PortagePackage::unslotted(e.cpn),
-                };
-                (pkg, e.version)
-            })
-            .collect()
     } else {
         Vec::new()
     };
+    let sysroot_by_slot = by_slot(&sysroot_entries);
+    let sysroot_installed: Vec<(PortagePackage, Version)> = sysroot_entries
+        .iter()
+        .map(|e| {
+            let pkg = match e.slot.filter(|s| !s.is_empty()) {
+                Some(s) => PortagePackage::slotted(e.cpn, s),
+                None => PortagePackage::unslotted(e.cpn),
+            };
+            (pkg, e.version.clone())
+        })
+        .collect();
     // `sysroot_installed` as `Cpv`s: what a `MergeRoot::Base` entry (the
     // board-root topology's toolchain-sysroot DEPEND copy) checks "already
     // installed" against — never `target_installed_cpvs`, the board root's
@@ -547,10 +544,26 @@ pub(super) async fn prepare<'a>(
         slot_map,
         widened_slot_map,
         sysroot_installed,
+        sysroot_entries,
+        sysroot_by_slot,
         base_installed_cpvs,
         root_pkgs,
         pristine_package_use,
         rebuilding_installed_cpvs,
         changed_rebuild_cpvs,
     })
+}
+
+/// Installed versions keyed by cpn, then slot (`""` when unslotted)
+fn by_slot(
+    entries: &[installed::VdbEntry],
+) -> HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>> {
+    let mut map: HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>> = HashMap::new();
+    for e in entries {
+        let slot_key = e.slot.unwrap_or_else(|| Interned::intern(""));
+        map.entry(e.cpn)
+            .or_default()
+            .insert(slot_key, e.version.clone());
+    }
+    map
 }

@@ -1540,6 +1540,9 @@ pub(super) struct PrettyCtx<'a> {
     pub data: &'a RepoData,
     pub installed: &'a HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     pub installed_entries: &'a [super::installed::VdbEntry],
+    /// The cross sysroot's own VDB, which a `MergeRoot::Base` row is tagged against
+    pub sysroot_installed: &'a HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
+    pub sysroot_entries: &'a [super::installed::VdbEntry],
     pub defaults: &'a portage_atom_pubgrub::UseLayer,
     pub conf: &'a portage_atom_pubgrub::UseLayer,
     pub env_use: &'a portage_atom_pubgrub::UseLayer,
@@ -1821,6 +1824,8 @@ pub(super) fn format_plan_parts(
         data,
         installed,
         installed_entries,
+        sysroot_installed,
+        sysroot_entries,
         defaults: _,
         conf: _,
         env_use: _,
@@ -1848,6 +1853,10 @@ pub(super) fn format_plan_parts(
     let dest_suffix = match super::root_aware::display_root(merge_root, &cross.target, cross) {
         r if r.as_str() == "/" => String::new(),
         r => format!(" to {}/", r),
+    };
+    let (installed, installed_entries) = match merge_root {
+        portage_atom_pubgrub::MergeRoot::Base => (sysroot_installed, sysroot_entries),
+        _ => (installed, installed_entries),
     };
     let cpn = pkg.cpn();
     let (tag, old_ver) = action_tag(pkg, ver, installed);
@@ -3258,6 +3267,19 @@ mod tests {
 
     // The bracket and rest of a new `app-misc/foo-1` row, ANSI stripped
     fn new_row(quiet: bool) -> (String, String) {
+        row(
+            quiet,
+            portage_atom_pubgrub::MergeRoot::Target,
+            &HashMap::new(),
+        )
+    }
+
+    // The bracket and rest of an `app-misc/foo-1` row, `target_installed` the board root's VDB
+    fn row(
+        quiet: bool,
+        merge_root: portage_atom_pubgrub::MergeRoot,
+        target_installed: &HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
+    ) -> (String, String) {
         let cpn = Cpn::parse("app-misc/foo").unwrap();
         let cpv = Cpv::new(cpn, ver("1"));
         let cache = CacheEntry::parse("EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nIUSE=+doc\n")
@@ -3274,8 +3296,10 @@ mod tests {
         let accept_keywords = portage_resolve::repo::AcceptKeywords::from_global(&arch, &["amd64"]);
         let ctx = PrettyCtx {
             data: &data,
-            installed: &HashMap::new(),
+            installed: target_installed,
             installed_entries: &[],
+            sysroot_installed: &HashMap::new(),
+            sysroot_entries: &[],
             defaults: &layer,
             conf: &layer,
             env_use: &layer,
@@ -3310,11 +3334,31 @@ mod tests {
             &ctx,
             &pkg("app-misc/foo"),
             &ver("1"),
-            portage_atom_pubgrub::MergeRoot::Target,
+            merge_root,
             &cross,
             true,
         );
         (strip_ansi(&bracket), strip_ansi(&rest))
+    }
+
+    #[test]
+    fn sysroot_row_ignores_the_board_root_vdb() {
+        let target_installed = HashMap::from([(
+            Cpn::parse("app-misc/foo").unwrap(),
+            HashMap::from([(Interned::intern(""), ver("0"))]),
+        )]);
+        let base = row(
+            false,
+            portage_atom_pubgrub::MergeRoot::Base,
+            &target_installed,
+        );
+        assert_eq!(base.0, "[ebuild  N     ]");
+        let target = row(
+            false,
+            portage_atom_pubgrub::MergeRoot::Target,
+            &target_installed,
+        );
+        assert_eq!(target.0, "[ebuild     U  ]");
     }
 
     #[test]

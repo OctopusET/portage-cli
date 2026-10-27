@@ -62,6 +62,8 @@ pub(super) fn assemble(
         host_installed_cpvs,
         base_installed_cpvs,
         target_installed_cpvs,
+        sysroot_entries,
+        sysroot_by_slot,
         root_pkgs,
         pristine_package_use,
         ..
@@ -254,6 +256,8 @@ pub(super) fn assemble(
         data: &data,
         installed: &installed,
         installed_entries: &target_installed,
+        sysroot_installed: &sysroot_by_slot,
+        sysroot_entries: &sysroot_entries,
         defaults: &defaults,
         conf: &conf,
         env_use: &env_use,
