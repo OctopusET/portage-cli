@@ -95,6 +95,18 @@ impl DependencyProvider for PortageDependencyProvider {
         let allow_live = self.root_targets.contains_key(package);
         let candidates = filter_to_preferred_tier(data, candidates, allow_live);
         let candidates = drop_circular_branches(self, data, candidates);
+        let candidates = if self.strict_drops {
+            let kept: Vec<&Version> = candidates
+                .into_iter()
+                .filter(|v| !self.has_unmet_hard_drop(package, v))
+                .collect();
+            if kept.is_empty() {
+                return Ok(None);
+            }
+            kept
+        } else {
+            candidates
+        };
 
         // A prior iteration pinned this package (`upgrade_to`, or a root target
         // below its newest version). Soft pins fall through when the version is
@@ -321,6 +333,36 @@ impl DependencyProvider for PortageDependencyProvider {
 }
 
 impl PortageDependencyProvider {
+    /// Whether `version` lost a hard dependency at construction that nothing installed meets
+    ///
+    /// The installed version itself never counts: keeping it is not choosing it.
+    fn has_unmet_hard_drop(&self, package: &PortagePackage, version: &Version) -> bool {
+        if self
+            .installed
+            .get(package)
+            .is_some_and(|(v, _)| v == version)
+        {
+            return false;
+        }
+        let key = self.package_data_key(package);
+        self.dropped_deps
+            .iter()
+            .zip(&self.dropped_parents)
+            .any(|(dep, (parent, ver))| {
+                dep.alternatives.is_empty()
+                    && parent == key
+                    && ver == version
+                    && !self
+                        .installed_versions(&dep.package)
+                        .chain(
+                            self.host_installed
+                                .get(&dep.package.at_merge_root(MergeRoot::Host))
+                                .map(|e| &e.version),
+                        )
+                        .any(|v| dep.version_set.contains(v))
+            })
+    }
+
     /// Whether a choice branch can only be met by installing an `--exclude`d version
     fn branch_needs_excluded(&self, vd: &VersionData) -> bool {
         let Dependencies::Available(ref cs) = vd.merged else {

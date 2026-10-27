@@ -200,6 +200,10 @@ pub(super) fn solve_round(
     // keep) widened candidate supply. Strict-first keeps every
     // non-crossdev resolve byte-identical.
     let widened = std::cell::Cell::new(false);
+    // Strict-first, like portage's backtracking: a version that lost a hard dep to
+    // acceptance filtering is unavailable. Only if that fails does it resolve degraded.
+    let strict_drops = std::cell::Cell::new(true);
+    let saw_hard_drop = std::cell::Cell::new(false);
     let build_and_solve = |autosolve_use: bool, pkg_use: &[(ConfigAtom, Vec<UseOverride>)]| {
         let adapter = repo::Adapter {
             data,
@@ -294,6 +298,14 @@ pub(super) fn solve_round(
             elapsed_ms = provider_start.elapsed().as_secs_f64() * 1000.0,
             "provider build"
         );
+        provider.set_strict_drops(strict_drops.get());
+        if provider
+            .dropped_deps()
+            .iter()
+            .any(|d| d.alternatives.is_empty())
+        {
+            saw_hard_drop.set(true);
+        }
         provider.set_cross_active(cross.active);
         provider.set_is_cross_arch(cross.is_cross_arch());
         // crossdev `--root-deps=rdeps`: caller-supplied (see `DepgraphOpts::
@@ -498,8 +510,17 @@ pub(super) fn solve_round(
         Ok((provider, solution, pu, applied_reqs))
     };
 
-    let (provider, solution, package_use, applied_reqs) = match attempt_solve() {
+    let first = match attempt_solve() {
+        Err(_) if saw_hard_drop.get() => {
+            strict_drops.set(false);
+            tracing::debug!("strict solve failed; retrying with dropped deps left unmet");
+            attempt_solve()
+        }
+        first => first,
+    };
+    let (provider, solution, package_use, applied_reqs) = match first {
         Ok(outcome) => {
+            let selected_drops: Vec<_> = outcome.0.dropped_deps_of(&outcome.1).cloned().collect();
             // A strict solve can still be degraded: hard deps whose
             // every version was acceptance-filtered are dropped at
             // provider construction, so PubGrub never fails on them
@@ -509,7 +530,7 @@ pub(super) fn solve_round(
             // own dropped list keeps the exact-pin advisories.
             if autounmask_widen
                 && !widened.get()
-                && repo::has_widening_eligible_drops(outcome.0.dropped_deps(), data)
+                && repo::has_widening_eligible_drops(&selected_drops, data)
             {
                 widened.set(true);
                 tracing::debug!(

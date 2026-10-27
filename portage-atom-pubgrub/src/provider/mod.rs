@@ -379,6 +379,8 @@ pub struct PortageDependencyProvider {
     pub(crate) selective: bool,
     /// `--exclude` atoms: an `||` branch needing a matching version that is not installed loses
     pub(crate) exclude: Vec<Dep>,
+    /// A version that lost a hard dependency at construction is unavailable, so the solve backtracks
+    pub(crate) strict_drops: bool,
 
     /// `--root-deps=rdeps` (crossdev cross builds): discard a target package's
     /// `DEPEND` from the target-root graph
@@ -946,6 +948,7 @@ impl PortageDependencyProvider {
             selective_no_update: false,
             selective: false,
             exclude: Vec::new(),
+            strict_drops: false,
             root_deps_rdeps: false,
             nodeps: false,
             use_decision_prefer,
@@ -1128,6 +1131,13 @@ impl PortageDependencyProvider {
         self.exclude = atoms.to_vec();
     }
 
+    /// Treat a version whose hard dependency was dropped (every match filtered) as unavailable
+    ///
+    /// Off, such a version resolves with the dependency missing, for the caller to report.
+    pub fn set_strict_drops(&mut self, strict: bool) {
+        self.strict_drops = strict;
+    }
+
     /// Whether a non-selective resolve reinstalls this root target even at its installed version
     pub(crate) fn reinstalled_target(&self, package: &PortagePackage) -> bool {
         !self.selective && self.root_targets.contains_key(package)
@@ -1235,8 +1245,8 @@ impl PortageDependencyProvider {
             .map(|(_, (version, _))| version)
     }
 
-    /// The dependencies dropped from versions `solution` selected, leaving
-    /// out an `||` branch that had an available sibling
+    /// The dependencies dropped from versions `solution` selected, on either
+    /// root, leaving out an `||` branch that had an available sibling
     pub fn dropped_deps_of<'a>(
         &'a self,
         solution: &'a pubgrub::SelectedDependencies<PortagePackage, Version>,
@@ -1245,7 +1255,9 @@ impl PortageDependencyProvider {
             .iter()
             .zip(&self.dropped_parents)
             .filter(|(dep, (parent, ver))| {
-                dep.alternatives.is_empty() && solution.get(parent) == Some(ver)
+                dep.alternatives.is_empty()
+                    && (solution.get(parent) == Some(ver)
+                        || solution.get(&parent.at_merge_root(MergeRoot::Host)) == Some(ver))
             })
             .map(|(dep, _)| dep)
     }

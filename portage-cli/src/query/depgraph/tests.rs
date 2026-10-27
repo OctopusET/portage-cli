@@ -1447,3 +1447,40 @@ fn a_required_use_failure_is_reported_on_the_target_before_its_deps() {
     );
     assert_eq!(outcome.exit_code, 1);
 }
+
+#[test]
+fn strict_solve_backtracks_past_a_version_whose_dependency_slot_is_masked() {
+    let fix = fixture(
+        &[
+            Pkg {
+                depend: "~app-misc/tool-1",
+                ..pkg("app-misc/std-1", "0", "")
+            },
+            Pkg {
+                depend: "~app-misc/tool-2",
+                ..pkg("app-misc/std-2", "0", "")
+            },
+            Pkg {
+                depend: "app-misc/lib:1",
+                ..pkg("app-misc/tool-1", "0", "")
+            },
+            Pkg {
+                depend: "app-misc/lib:2",
+                ..pkg("app-misc/tool-2", "0", "")
+            },
+            pkg("app-misc/lib-1", "1", ""),
+            pkg("app-misc/lib-2", "2", ""),
+        ],
+        &[],
+    );
+    mask(&fix, "app-misc/lib:2");
+    let atoms = [TargetAtom::explicit("app-misc/std")];
+    let mut opts = Solve::new(&atoms);
+    opts.widen = true;
+    let outcome = solve(&fix, opts);
+    assert_eq!(
+        names(&outcome),
+        ["app-misc/lib-1", "app-misc/tool-1", "app-misc/std-1"]
+    );
+    assert_eq!(outcome.exit_code, 0);
+}
