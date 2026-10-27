@@ -108,14 +108,37 @@ fn format_line(e: &Entry) -> String {
     }
 }
 
+/// How [`report`] words its headlines
+pub(super) enum Headline<'a> {
+    /// Dropped deps: the plan is incomplete until the user acts
+    Required,
+    /// Widened selections the solve applied but nothing persists
+    InMemory,
+    /// Widened selections written under this config dir
+    Written(&'a Utf8Path),
+}
+
+fn headline(what: &str, page: &str, mode: &Headline) -> String {
+    use super::output::C_PKG;
+
+    match mode {
+        Headline::Required => {
+            format!("{C_PKG}The following {what} are necessary to proceed:{C_PKG:#}")
+        }
+        Headline::InMemory => format!(
+            "{C_PKG}The following {what} were applied in memory to resolve \
+             this plan, --autounmask-write persists them:{C_PKG:#}"
+        ),
+        Headline::Written(dir) => format!(
+            "{C_PKG}The following {what} were written to {} to resolve this plan:{C_PKG:#}",
+            dir.join(page)
+        ),
+    }
+}
+
 /// Print autounmask changes to stderr in portage style
 /// Order: mask → keywords → license (most fundamental first).
-///
-/// `applied_in_memory` (widened-solve selections) switches the headline to
-/// "applied in memory" wording — the plan already resolves with these picks,
-/// so they're informational, unlike the dropped-dep advisories which mean the
-/// printed plan is incomplete until the user acts.
-pub(super) fn report(candidates: &[AutounmaskCandidate], applied_in_memory: bool) {
+pub(super) fn report(candidates: &[AutounmaskCandidate], mode: Headline) {
     use super::output::{C_DIM, C_ON, C_PKG};
 
     let unmask = build_entries(candidates, "unmask");
@@ -130,30 +153,26 @@ pub(super) fn report(candidates: &[AutounmaskCandidate], applied_in_memory: bool
     }
 
     let mut out = anstream::stderr();
-    let persist_hint = ", --autounmask-write persists them";
-    let headline = |what: &str| {
-        if applied_in_memory {
-            format!(
-                "{C_PKG}The following {what} were applied in memory to resolve \
-                 this plan{persist_hint}:{C_PKG:#}"
-            )
-        } else {
-            format!("{C_PKG}The following {what} are necessary to proceed:{C_PKG:#}")
-        }
+    let head = |what: &str, page: &str| {
+        format!(
+            "\n{}\n (see \"{page}\" in the portage(5) man page for more details)",
+            headline(what, page, &mode)
+        )
     };
-    let man_page =
-        |page: &str| format!(" (see \"{page}\" in the portage(5) man page for more details)");
 
     if !unmask.is_empty() {
-        writeln!(out, "\n{}", headline("mask changes")).ok();
-        writeln!(out, "{}", man_page("package.unmask")).ok();
+        writeln!(out, "{}", head("mask changes", "package.unmask")).ok();
         for e in &unmask {
             writeln!(out, "{C_PKG}{}{C_PKG:#}", e.atom).ok();
         }
     }
     if !kw.is_empty() {
-        writeln!(out, "\n{}", headline("keyword changes")).ok();
-        writeln!(out, "{}", man_page("package.accept_keywords")).ok();
+        writeln!(
+            out,
+            "{}",
+            head("keyword changes", "package.accept_keywords")
+        )
+        .ok();
         for e in &kw {
             let token_str = e
                 .tokens
@@ -165,8 +184,7 @@ pub(super) fn report(candidates: &[AutounmaskCandidate], applied_in_memory: bool
         }
     }
     if !lic.is_empty() {
-        writeln!(out, "\n{}", headline("license changes")).ok();
-        writeln!(out, "{}", man_page("package.license")).ok();
+        writeln!(out, "{}", head("license changes", "package.license")).ok();
         for e in &lic {
             let token_str = e
                 .tokens
@@ -178,8 +196,7 @@ pub(super) fn report(candidates: &[AutounmaskCandidate], applied_in_memory: bool
         }
     }
     if !props.is_empty() {
-        writeln!(out, "\n{}", headline("property changes")).ok();
-        writeln!(out, "{}", man_page("package.properties")).ok();
+        writeln!(out, "{}", head("property changes", "package.properties")).ok();
         for e in &props {
             let token_str = e
                 .tokens
@@ -191,8 +208,12 @@ pub(super) fn report(candidates: &[AutounmaskCandidate], applied_in_memory: bool
         }
     }
     if !restr.is_empty() {
-        writeln!(out, "\n{}", headline("restrict changes")).ok();
-        writeln!(out, "{}", man_page("package.accept_restrict")).ok();
+        writeln!(
+            out,
+            "{}",
+            head("restrict changes", "package.accept_restrict")
+        )
+        .ok();
         for e in &restr {
             let token_str = e
                 .tokens
@@ -324,5 +345,16 @@ mod tests {
         let entries = build_entries(&[candidate(false)], "unmask");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].atom, "dev-libs/foo:0");
+    }
+
+    #[test]
+    fn written_headline_names_the_file() {
+        let dir = Utf8Path::new("/etc/portage");
+        let h = headline("mask changes", "package.unmask", &Headline::Written(dir));
+        assert!(
+            h.contains("were written to /etc/portage/package.unmask"),
+            "{h}"
+        );
+        assert!(!h.contains("in memory"), "{h}");
     }
 }

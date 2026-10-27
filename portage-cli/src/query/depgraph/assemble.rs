@@ -442,8 +442,12 @@ pub(super) fn assemble(
         let has_dropped = !dropped_autounmask.is_empty();
         let has_widened = !widened_autounmask_candidates.is_empty();
         if has_dropped || has_widened {
-            autounmask::report(&dropped_autounmask, false);
-            autounmask::report(&widened_autounmask_candidates, true);
+            let widened_mode = match autounmask_persist {
+                AutounmaskPersist::Always => autounmask::Headline::Written(&portage_dir),
+                AutounmaskPersist::Ask | AutounmaskPersist::Never => autounmask::Headline::InMemory,
+            };
+            autounmask::report(&dropped_autounmask, autounmask::Headline::Required);
+            autounmask::report(&widened_autounmask_candidates, widened_mode);
             if matches!(
                 autounmask_persist,
                 AutounmaskPersist::Always | AutounmaskPersist::Ask
