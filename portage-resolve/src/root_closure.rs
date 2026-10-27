@@ -216,7 +216,7 @@ fn visit(
             DepClass::Pdepend => deps.pdepend(),
             DepClass::Idepend => deps.idepend(),
         };
-        for cpn in unsatisfied_cpns(listed, avail) {
+        for cpn in unsatisfied_cpns(listed, avail, &|cpn| resolve(cpn, ctx).is_some()) {
             if graph.of_cpn.contains_key(&cpn) {
                 continue;
             }
